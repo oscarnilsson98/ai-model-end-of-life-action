@@ -4,7 +4,9 @@
 
 A GitHub Action that flags the AI models your code depends on when they approach **end-of-life**, using the community-maintained [deprecations.info](https://deprecations.info) feed (OpenAI, Anthropic, Google, Bedrock, Azure, Cohere, Groq, xAI, …).
 
-It fetches the feed, matches your models by `(model_id, provider)`, and reports any whose `shutdown_date` falls within a configurable window. Findings show up as workflow warnings and a job-summary table; optionally post them to Slack, fail the build, or read the `findings` output and do your own thing (open a ticket, ping a Linear project, …).
+It fetches the feed, matches your models by `(model_id, provider)`, and reports any whose `shutdown_date` falls within a configurable window. Findings show up as workflow warnings and a job-summary table; optionally post them to Slack, fail the build once a shutdown gets close, or read the `findings` output and do your own thing (open a ticket, ping a Linear project, …).
+
+**Warn early, fail late.** `days-before-shutdown` sets how far ahead you want to *hear* about a model; `fail-within-days` sets when that stops being FYI and starts breaking the build. Warning at 90 days and failing at 30 gives you a quarter of lead time without a red build for the whole quarter.
 
 ## Usage
 
@@ -26,8 +28,12 @@ jobs:
       - uses: oscarnilsson98/ai-model-end-of-life-action@v1
         with:
           models: '[{"id":"gpt-5.2","provider":"openai"},{"id":"claude-sonnet-4-5","provider":"anthropic"}]'
+          days-before-shutdown: "90"
+          fail-within-days: "30"
           slack-webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
+
+That warns from 90 days out and turns the scheduled run red inside 30 — which is also what makes GitHub email you, if you haven't wired up Slack.
 
 No checkout, no language setup — the action ships a bundled Node 20 entrypoint.
 
@@ -36,8 +42,8 @@ No checkout, no language setup — the action ships a bundled Node 20 entrypoint
 | Input | Required | Default | Description |
 |---|---|---|---|
 | `models` | yes | — | JSON array of models. Objects `[{"id":"gpt-5.2","provider":"openai"}]` or bare ids `["gpt-5.2"]`. Omitting `provider` matches **any** provider (e.g. an Azure-hosted namesake), so pass it when you can. |
-| `days-before-shutdown` | no | `90` | Flag a model when its shutdown date is within this many days (or already passed). |
-| `fail-on-findings` | no | `false` | Fail the step when at least one model is inside the window. Default is warn-only. |
+| `days-before-shutdown` | no | `90` | Report a model when its shutdown date is within this many days (or already passed). |
+| `fail-within-days` | no | — | Fail the step when a model is within this many days of shutdown. Unset = warn only. Set it equal to `days-before-shutdown` to fail on any finding. Findings inside it are annotated as errors, the rest as warnings. |
 | `feed-url` | no | `https://deprecations.info/v1/deprecations.json` | Any endpoint serving the deprecations.info JSON schema. |
 | `slack-webhook` | no | — | Slack incoming-webhook URL; when set, findings are posted to it. |
 | `job-summary` | no | `true` | Write a findings table to the GitHub Actions job summary. |
@@ -53,12 +59,14 @@ No checkout, no language setup — the action ships a bundled Node 20 entrypoint
 
 ### Block a PR that introduces a dying model
 
+On a PR check you usually want one threshold, not two — report and fail on the same window:
+
 ```yaml
 - uses: oscarnilsson98/ai-model-end-of-life-action@v1
   with:
     models: '["gpt-5.2","claude-opus-4-1"]'
-    days-before-shutdown: "30"
-    fail-on-findings: "true"
+    days-before-shutdown: "180"
+    fail-within-days: "180"
 ```
 
 ### Generate the model list from your source of truth

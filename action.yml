@@ -14,10 +14,10 @@ inputs:
     description: "Flag a model when its shutdown date is within this many days (or already passed)."
     required: false
     default: "90"
-  fail-on-findings:
-    description: "Fail the step when at least one model is within the shutdown window. Defaults to warning only."
+  fail-within-days:
+    description: "Fail the step when a model is within this many days of shutdown (or already past it). Leave unset to only warn. Keep it below `days-before-shutdown` to warn early and fail late."
     required: false
-    default: "false"
+    default: ""
   feed-url:
     description: "Deprecations feed URL following the deprecations.info JSON schema."
     required: false

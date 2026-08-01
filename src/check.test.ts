@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  breachingFindings,
   matchDeprecations,
   normalizeProvider,
+  parseFailThreshold,
   parseModels,
   renderSlackText,
   renderSummary,
@@ -77,6 +79,37 @@ describe("matchDeprecations", () => {
   test("defaults replacementModels to an empty array", () => {
     const feed = [record({ model_id: "gpt-5.2", replacement_models: null })];
     expect(matchDeprecations([{ id: "gpt-5.2" }], feed, 90, NOW)[0]?.replacementModels).toEqual([]);
+  });
+});
+
+describe("fail threshold", () => {
+  const feed = [
+    record({ model_id: "urgent", shutdown_date: "2026-01-20" }),
+    record({ model_id: "distant", shutdown_date: "2026-03-15" }),
+    record({ model_id: "overdue", shutdown_date: "2025-11-01" }),
+  ];
+  const findings = matchDeprecations([{ id: "urgent" }, { id: "distant" }, { id: "overdue" }], feed, 90, NOW);
+
+  test("unset or blank never fails", () => {
+    expect(parseFailThreshold(undefined)).toBeNull();
+    expect(parseFailThreshold("  ")).toBeNull();
+    expect(breachingFindings(findings, null)).toEqual([]);
+  });
+
+  test("rejects a non-numeric threshold", () => {
+    expect(() => parseFailThreshold("soon")).toThrow(/Invalid fail-within-days/);
+  });
+
+  test("breaches only the findings at or inside the threshold", () => {
+    expect(breachingFindings(findings, parseFailThreshold("30")).map((f) => f.id)).toEqual(["overdue", "urgent"]);
+  });
+
+  test("an already-passed shutdown always breaches", () => {
+    expect(breachingFindings(findings, 0).map((f) => f.id)).toEqual(["overdue"]);
+  });
+
+  test("a threshold matching the report window breaches every finding", () => {
+    expect(breachingFindings(findings, 90)).toHaveLength(3);
   });
 });
 

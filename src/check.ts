@@ -153,12 +153,30 @@ function isTrue(value: string | undefined): boolean {
   return value?.trim().toLowerCase() === "true";
 }
 
+/** Parse the `fail-within-days` threshold; unset/blank means the step never fails on findings. */
+export function parseFailThreshold(raw: string | undefined): number | null {
+  const trimmed = raw?.trim() ?? "";
+  if (trimmed === "") return null;
+  const days = Number(trimmed);
+  if (!Number.isFinite(days)) {
+    throw new Error(`Invalid fail-within-days: ${raw}`);
+  }
+  return days;
+}
+
+/** Findings urgent enough to fail the step — those at or inside the threshold, including already-passed shutdowns. */
+export function breachingFindings(findings: Finding[], failWithinDays: number | null): Finding[] {
+  if (failWithinDays === null) return [];
+  return findings.filter((f) => f.daysUntilShutdown <= failWithinDays);
+}
+
 export async function run(): Promise<void> {
   const models = parseModels(process.env.INPUT_MODELS ?? "");
   const windowDays = Number(process.env.INPUT_DAYS_BEFORE_SHUTDOWN || DEFAULT_WINDOW_DAYS);
   if (!Number.isFinite(windowDays)) {
     throw new Error(`Invalid days-before-shutdown: ${process.env.INPUT_DAYS_BEFORE_SHUTDOWN}`);
   }
+  const failWithinDays = parseFailThreshold(process.env.INPUT_FAIL_WITHIN_DAYS);
   const feedUrl = process.env.INPUT_FEED_URL || DEFAULT_FEED_URL;
 
   // A monitor that can't reach its feed should fail loudly, not silently report "nothing to worry about".
@@ -173,9 +191,16 @@ export async function run(): Promise<void> {
 
   const findings = matchDeprecations(models, feed, windowDays, Date.now());
 
+  const breaching = breachingFindings(findings, failWithinDays);
+
   for (const f of findings) {
+    const level = breaching.includes(f) ? "error" : "warning";
     console.log(
-      `::warning::AI model ${f.id} (${f.provider}) shuts down ${f.shutdownDate} — ${f.daysUntilShutdown} day(s) left. Replacement: ${
+      `::${level}::AI model ${f.id} (${f.provider}) shuts down ${f.shutdownDate} — ${
+        f.daysUntilShutdown < 0
+          ? `${Math.abs(f.daysUntilShutdown)} day(s) ago`
+          : `${f.daysUntilShutdown} day(s) left`
+      }. Replacement: ${
         f.replacementModels.join(", ") || "none listed"
       }. ${f.url ?? ""}`,
     );
@@ -197,7 +222,11 @@ export async function run(): Promise<void> {
     await postSlack(slackWebhook, findings);
   }
 
-  if (findings.length > 0 && isTrue(process.env.INPUT_FAIL_ON_FINDINGS)) {
-    throw new Error(`${findings.length} model(s) are within ${windowDays} day(s) of shutdown.`);
+  if (breaching.length > 0) {
+    throw new Error(
+      `${breaching.length} model(s) within ${failWithinDays} day(s) of shutdown: ${breaching
+        .map((f) => `${f.id} (${f.shutdownDate})`)
+        .join(", ")}.`,
+    );
   }
 }
