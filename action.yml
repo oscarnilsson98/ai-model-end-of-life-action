@@ -3,7 +3,7 @@ description: "Flag AI models your repo depends on that are approaching end-of-li
 author: "oscarnilsson98"
 
 branding:
-  icon: "alert-triangle"
+  icon: "sunset"
   color: "orange"
 
 inputs:
