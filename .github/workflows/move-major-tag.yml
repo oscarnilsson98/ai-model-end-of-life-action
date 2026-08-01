@@ -1,0 +1,40 @@
+name: Move major tag
+
+# Consumers use @v1, so the major tag has to follow every release — including ones
+# published from the web UI, which don't push tags of their own.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to point the major tag at, e.g. v1.5.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  move-major-tag:
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Point the major tag at this release
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::notice::$TAG is not a vX.Y.Z tag — leaving major tags alone."; exit 0 ;;
+          esac
+          major="${TAG%%.*}"
+          sha=$(git rev-list -n 1 "$TAG")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "$major" "$sha"
+          git push -f origin "refs/tags/$major"
+          echo "::notice::$major now points at $TAG ($sha)."
