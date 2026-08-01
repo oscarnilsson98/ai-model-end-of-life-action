@@ -35,7 +35,7 @@ jobs:
 
 That warns from 90 days out and turns the scheduled run red inside 30 — which is also what makes GitHub email you, if you haven't wired up Slack.
 
-No checkout, no language setup — the action ships a bundled Node 20 entrypoint.
+No checkout, no language setup — the action ships a bundled Node 24 entrypoint.
 
 ## Inputs
 
