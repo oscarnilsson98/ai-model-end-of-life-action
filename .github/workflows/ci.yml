@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+      - name: Verify dist/ is in sync with src/
+        run: git diff --exit-code -- dist || { echo "::error::dist/ is stale — run \`bun run build\` and commit the result."; exit 1; }
+
+  self-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: eol
+        uses: ./
+        with:
+          models: '[{"id":"gpt-4","provider":"openai"},{"id":"definitely-not-a-real-model","provider":"openai"}]'
+          days-before-shutdown: "3650"
+      - name: Assert the retired model was flagged
+        env:
+          FINDINGS: ${{ steps.eol.outputs.findings }}
+          HAS_FINDINGS: ${{ steps.eol.outputs.has-findings }}
+        run: |
+          test "$HAS_FINDINGS" = "true" || { echo "::error::Expected gpt-4 to be flagged within a 10-year window."; exit 1; }
+          echo "$FINDINGS" | grep -q '"id":"gpt-4"' || { echo "::error::findings output did not contain gpt-4."; exit 1; }

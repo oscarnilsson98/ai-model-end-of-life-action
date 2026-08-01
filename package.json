@@ -1,0 +1,20 @@
+{
+  "name": "ai-model-end-of-life-action",
+  "version": "1.0.0",
+  "description": "GitHub Action that flags AI models approaching end-of-life, sourced from deprecations.info.",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oscarnilsson98/ai-model-end-of-life-action.git"
+  },
+  "scripts": {
+    "build": "bun build src/main.ts --target=node --format=cjs --outfile=dist/index.js",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}

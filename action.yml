@@ -1,0 +1,42 @@
+name: "AI Model End-of-Life Check"
+description: "Flag AI models your repo depends on that are approaching end-of-life, sourced from deprecations.info."
+author: "oscarnilsson98"
+
+branding:
+  icon: "alert-triangle"
+  color: "orange"
+
+inputs:
+  models:
+    description: 'JSON array of models to check — objects `[{"id":"gpt-5.2","provider":"openai"}]` or bare ids `["gpt-5.2"]`. `provider` is optional but recommended: without it a model matches any provider (e.g. an Azure-hosted namesake).'
+    required: true
+  days-before-shutdown:
+    description: "Flag a model when its shutdown date is within this many days (or already passed)."
+    required: false
+    default: "90"
+  fail-on-findings:
+    description: "Fail the step when at least one model is within the shutdown window. Defaults to warning only."
+    required: false
+    default: "false"
+  feed-url:
+    description: "Deprecations feed URL following the deprecations.info JSON schema."
+    required: false
+    default: "https://deprecations.info/v1/deprecations.json"
+  slack-webhook:
+    description: "Optional Slack incoming-webhook URL; when set, findings are posted to it."
+    required: false
+    default: ""
+  job-summary:
+    description: "Write a findings table to the GitHub Actions job summary."
+    required: false
+    default: "true"
+
+outputs:
+  findings:
+    description: "JSON array of matched deprecations (id, provider, shutdownDate, daysUntilShutdown, replacementModels, url, context), soonest shutdown first."
+  has-findings:
+    description: "'true' when at least one model is within the shutdown window."
+
+runs:
+  using: "node20"
+  main: "dist/index.js"
