@@ -2,7 +2,14 @@
 var import_node_fs = require("node:fs");
 var DEFAULT_FEED_URL = "https://deprecations.info/v1/deprecations.json";
 var DEFAULT_WINDOW_DAYS = 90;
+var DEFAULT_MAX_FEED_AGE_DAYS = 30;
 var DAY_MS = 24 * 60 * 60 * 1000;
+function feedAgeDays(feed, now) {
+  const observed = feed.map((record) => Date.parse(record.last_observed ?? record.scraped_at ?? "")).filter((time) => !Number.isNaN(time));
+  if (observed.length === 0)
+    return null;
+  return Math.floor((now - Math.max(...observed)) / DAY_MS);
+}
 function normalizeProvider(provider) {
   return provider.toLowerCase().trim().replace(/\s+/g, "-").replace(/-ai$/, "");
 }
@@ -110,13 +117,13 @@ ${delimiter}
 function isTrue(value) {
   return value?.trim().toLowerCase() === "true";
 }
-function parseFailThreshold(raw) {
+function parseOptionalDays(raw, inputName) {
   const trimmed = raw?.trim() ?? "";
   if (trimmed === "")
     return null;
   const days = Number(trimmed);
   if (!Number.isFinite(days)) {
-    throw new Error(`Invalid fail-within-days: ${raw}`);
+    throw new Error(`Invalid ${inputName}: ${raw}`);
   }
   return days;
 }
@@ -131,17 +138,25 @@ async function run() {
   if (!Number.isFinite(windowDays)) {
     throw new Error(`Invalid days-before-shutdown: ${process.env.INPUT_DAYS_BEFORE_SHUTDOWN}`);
   }
-  const failWithinDays = parseFailThreshold(process.env.INPUT_FAIL_WITHIN_DAYS);
+  const failWithinDays = parseOptionalDays(process.env.INPUT_FAIL_WITHIN_DAYS, "fail-within-days");
+  const maxFeedAgeDays = parseOptionalDays(process.env.INPUT_MAX_FEED_AGE_DAYS ?? String(DEFAULT_MAX_FEED_AGE_DAYS), "max-feed-age-days");
   const feedUrl = process.env.INPUT_FEED_URL || DEFAULT_FEED_URL;
   const response = await fetch(feedUrl);
   if (!response.ok) {
     throw new Error(`Deprecations feed fetch failed: ${response.status} ${response.statusText}`);
   }
   const feed = await response.json();
-  if (!Array.isArray(feed)) {
-    throw new Error(`Deprecations feed at ${feedUrl} did not return a JSON array.`);
+  if (!Array.isArray(feed) || feed.length === 0) {
+    throw new Error(`Deprecations feed at ${feedUrl} did not return a non-empty JSON array.`);
   }
-  const findings = matchDeprecations(models, feed, windowDays, Date.now());
+  const now = Date.now();
+  const feedAge = feedAgeDays(feed, now);
+  if (feedAge === null) {
+    console.log(`::warning::Feed at ${feedUrl} carries no last_observed/scraped_at timestamps — staleness can't be checked.`);
+  } else if (maxFeedAgeDays !== null && feedAge > maxFeedAgeDays) {
+    throw new Error(`Deprecations feed at ${feedUrl} looks stale: newest entry was observed ${feedAge} day(s) ago (max ${maxFeedAgeDays}). A feed that stopped updating reports a permanent all-clear.`);
+  }
+  const findings = matchDeprecations(models, feed, windowDays, now);
   const breaching = breachingFindings(findings, failWithinDays);
   for (const f of findings) {
     const level = breaching.includes(f) ? "error" : "warning";

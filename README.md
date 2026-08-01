@@ -44,7 +44,8 @@ No checkout, no language setup — the action ships a bundled Node 20 entrypoint
 | `models` | yes | — | JSON array of models. Objects `[{"id":"gpt-5.2","provider":"openai"}]` or bare ids `["gpt-5.2"]`. Omitting `provider` matches **any** provider (e.g. an Azure-hosted namesake), so pass it when you can. |
 | `days-before-shutdown` | no | `90` | Report a model when its shutdown date is within this many days (or already passed). |
 | `fail-within-days` | no | — | Fail the step when a model is within this many days of shutdown. Unset = warn only. Set it equal to `days-before-shutdown` to fail on any finding. Findings inside it are annotated as errors, the rest as warnings. |
-| `feed-url` | no | `https://deprecations.info/v1/deprecations.json` | Any endpoint serving the deprecations.info JSON schema. |
+| `feed-url` | no | `https://deprecations.info/v1/deprecations.json` | A **mirror** of the feed — for air-gapped runners, an upstream outage, or a vendored snapshot pinned for reproducibility. It must serve the same JSON schema; this is not a plugin point for arbitrary feeds. |
+| `max-feed-age-days` | no | `30` | Fail when the feed's newest `last_observed` is older than this. Set to empty to disable. |
 | `slack-webhook` | no | — | Slack incoming-webhook URL; when set, findings are posted to it. |
 | `job-summary` | no | `true` | Write a findings table to the GitHub Actions job summary. |
 
@@ -102,7 +103,7 @@ Keeping the list in the workflow drifts. Emit it from wherever your model ids ac
 
 - **Detection, not a catch-all.** It only sees models the feed tracks with a confirmed `shutdown_date`; a model retired without an announced date won't appear. Matching is exact on `model_id`, so ids carrying a routing prefix (`us.anthropic.claude-…`, `bedrock/…`) won't match the feed's plain id — strip it before passing the list.
 - **Provider names are folded**, not fuzzy-matched: `OpenAI` == `openai`, but `Azure` and `Google Vertex` stay distinct from `openai` and `google`, since a namesake on another platform can have a different lifecycle.
-- **A broken monitor fails loudly.** If the feed is unreachable or returns a non-array, the action fails rather than reporting a silent all-clear.
+- **A broken monitor fails loudly.** The action fails if the feed is unreachable, returns something other than a non-empty array, or has stopped being updated — a stale feed reports a permanent all-clear, which is the worst way for a check like this to break. Staleness is measured from the newest `last_observed` and gated by `max-feed-age-days` (30 by default); if you mirror the feed, keep those timestamps or the guard can't run and you'll get a warning instead.
 - Feed data is community-maintained and best-effort. Treat it as an early warning, not a contract with your provider.
 
 ## Development

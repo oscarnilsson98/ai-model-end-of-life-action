@@ -19,9 +19,13 @@ inputs:
     required: false
     default: ""
   feed-url:
-    description: "Deprecations feed URL following the deprecations.info JSON schema."
+    description: "Mirror of the deprecations.info feed — for air-gapped runners, an outage, or pinning a vendored snapshot. Must serve the same JSON schema."
     required: false
     default: "https://deprecations.info/v1/deprecations.json"
+  max-feed-age-days:
+    description: "Fail when the feed's newest entry was observed longer ago than this — a feed that stopped updating reports a permanent all-clear. Set to empty to disable."
+    required: false
+    default: "30"
   slack-webhook:
     description: "Optional Slack incoming-webhook URL; when set, findings are posted to it."
     required: false

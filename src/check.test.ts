@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   breachingFindings,
+  feedAgeDays,
   matchDeprecations,
   normalizeProvider,
-  parseFailThreshold,
+  parseOptionalDays,
   parseModels,
   renderSlackText,
   renderSummary,
@@ -82,6 +83,26 @@ describe("matchDeprecations", () => {
   });
 });
 
+describe("feedAgeDays", () => {
+  test("measures the freshest record, not the oldest", () => {
+    const feed = [
+      record({ model_id: "a", last_observed: "2025-06-01" }),
+      record({ model_id: "b", last_observed: "2025-12-30" }),
+    ];
+    expect(feedAgeDays(feed, NOW)).toBe(2);
+  });
+
+  test("falls back to scraped_at when last_observed is absent", () => {
+    const feed = [record({ model_id: "a", scraped_at: "2025-12-02T00:00:00Z" })];
+    expect(feedAgeDays(feed, NOW)).toBe(30);
+  });
+
+  test("returns null when no record carries a usable timestamp", () => {
+    expect(feedAgeDays([record({ model_id: "a" })], NOW)).toBeNull();
+    expect(feedAgeDays([record({ model_id: "a", last_observed: "not-a-date" })], NOW)).toBeNull();
+  });
+});
+
 describe("fail threshold", () => {
   const feed = [
     record({ model_id: "urgent", shutdown_date: "2026-01-20" }),
@@ -91,17 +112,21 @@ describe("fail threshold", () => {
   const findings = matchDeprecations([{ id: "urgent" }, { id: "distant" }, { id: "overdue" }], feed, 90, NOW);
 
   test("unset or blank never fails", () => {
-    expect(parseFailThreshold(undefined)).toBeNull();
-    expect(parseFailThreshold("  ")).toBeNull();
+    expect(parseOptionalDays(undefined, "fail-within-days")).toBeNull();
+    expect(parseOptionalDays("  ", "fail-within-days")).toBeNull();
     expect(breachingFindings(findings, null)).toEqual([]);
   });
 
-  test("rejects a non-numeric threshold", () => {
-    expect(() => parseFailThreshold("soon")).toThrow(/Invalid fail-within-days/);
+  test("rejects a non-numeric threshold, naming the input", () => {
+    expect(() => parseOptionalDays("soon", "fail-within-days")).toThrow(/Invalid fail-within-days/);
+    expect(() => parseOptionalDays("soon", "max-feed-age-days")).toThrow(/Invalid max-feed-age-days/);
   });
 
   test("breaches only the findings at or inside the threshold", () => {
-    expect(breachingFindings(findings, parseFailThreshold("30")).map((f) => f.id)).toEqual(["overdue", "urgent"]);
+    expect(breachingFindings(findings, parseOptionalDays("30", "fail-within-days")).map((f) => f.id)).toEqual([
+      "overdue",
+      "urgent",
+    ]);
   });
 
   test("an already-passed shutdown always breaches", () => {
