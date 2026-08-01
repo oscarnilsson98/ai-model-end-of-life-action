@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   breachingFindings,
   feedAgeDays,
+  inputEnvName,
   matchDeprecations,
   normalizeProvider,
   parseOptionalDays,
@@ -80,6 +81,18 @@ describe("matchDeprecations", () => {
   test("defaults replacementModels to an empty array", () => {
     const feed = [record({ model_id: "gpt-5.2", replacement_models: null })];
     expect(matchDeprecations([{ id: "gpt-5.2" }], feed, 90, NOW)[0]?.replacementModels).toEqual([]);
+  });
+});
+
+describe("inputEnvName", () => {
+  // The runner leaves hyphens intact; reading INPUT_FAIL_WITHIN_DAYS silently ignored every hyphenated input.
+  test("keeps hyphens and upper-cases", () => {
+    expect(inputEnvName("fail-within-days")).toBe("INPUT_FAIL-WITHIN-DAYS");
+    expect(inputEnvName("models")).toBe("INPUT_MODELS");
+  });
+
+  test("turns spaces into underscores", () => {
+    expect(inputEnvName("some input")).toBe("INPUT_SOME_INPUT");
   });
 });
 

@@ -117,6 +117,12 @@ ${delimiter}
 function isTrue(value) {
   return value?.trim().toLowerCase() === "true";
 }
+function inputEnvName(name) {
+  return `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
+}
+function getInput(name) {
+  return process.env[inputEnvName(name)]?.trim();
+}
 function parseOptionalDays(raw, inputName) {
   const trimmed = raw?.trim() ?? "";
   if (trimmed === "")
@@ -133,14 +139,14 @@ function breachingFindings(findings, failWithinDays) {
   return findings.filter((f) => f.daysUntilShutdown <= failWithinDays);
 }
 async function run() {
-  const models = parseModels(process.env.INPUT_MODELS ?? "");
-  const windowDays = Number(process.env.INPUT_DAYS_BEFORE_SHUTDOWN || DEFAULT_WINDOW_DAYS);
+  const models = parseModels(getInput("models") ?? "");
+  const windowDays = Number(getInput("days-before-shutdown") || DEFAULT_WINDOW_DAYS);
   if (!Number.isFinite(windowDays)) {
-    throw new Error(`Invalid days-before-shutdown: ${process.env.INPUT_DAYS_BEFORE_SHUTDOWN}`);
+    throw new Error(`Invalid days-before-shutdown: ${getInput("days-before-shutdown")}`);
   }
-  const failWithinDays = parseOptionalDays(process.env.INPUT_FAIL_WITHIN_DAYS, "fail-within-days");
-  const maxFeedAgeDays = parseOptionalDays(process.env.INPUT_MAX_FEED_AGE_DAYS ?? String(DEFAULT_MAX_FEED_AGE_DAYS), "max-feed-age-days");
-  const feedUrl = process.env.INPUT_FEED_URL || DEFAULT_FEED_URL;
+  const failWithinDays = parseOptionalDays(getInput("fail-within-days"), "fail-within-days");
+  const maxFeedAgeDays = parseOptionalDays(getInput("max-feed-age-days") ?? String(DEFAULT_MAX_FEED_AGE_DAYS), "max-feed-age-days");
+  const feedUrl = getInput("feed-url") || DEFAULT_FEED_URL;
   const response = await fetch(feedUrl);
   if (!response.ok) {
     throw new Error(`Deprecations feed fetch failed: ${response.status} ${response.statusText}`);
@@ -166,10 +172,10 @@ async function run() {
   appendCommand(process.env.GITHUB_OUTPUT, "has-findings", String(findings.length > 0));
   appendCommand(process.env.GITHUB_OUTPUT, "findings", JSON.stringify(findings));
   const summaryFile = process.env.GITHUB_STEP_SUMMARY;
-  if (summaryFile && isTrue(process.env.INPUT_JOB_SUMMARY ?? "true")) {
+  if (summaryFile && isTrue(getInput("job-summary") ?? "true")) {
     import_node_fs.appendFileSync(summaryFile, renderSummary(findings, models.length, feed.length, windowDays));
   }
-  const slackWebhook = process.env.INPUT_SLACK_WEBHOOK;
+  const slackWebhook = getInput("slack-webhook");
   if (findings.length > 0 && slackWebhook) {
     await postSlack(slackWebhook, findings);
   }

@@ -168,6 +168,15 @@ function isTrue(value: string | undefined): boolean {
   return value?.trim().toLowerCase() === "true";
 }
 
+/** The runner upper-cases an input name and turns spaces into underscores, but leaves hyphens alone: `feed-url` -> `INPUT_FEED-URL`. */
+export function inputEnvName(name: string): string {
+  return `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
+}
+
+function getInput(name: string): string | undefined {
+  return process.env[inputEnvName(name)]?.trim();
+}
+
 /** Parse an optional day-count input; unset or blank disables whatever it gates. */
 export function parseOptionalDays(raw: string | undefined, inputName: string): number | null {
   const trimmed = raw?.trim() ?? "";
@@ -186,17 +195,17 @@ export function breachingFindings(findings: Finding[], failWithinDays: number | 
 }
 
 export async function run(): Promise<void> {
-  const models = parseModels(process.env.INPUT_MODELS ?? "");
-  const windowDays = Number(process.env.INPUT_DAYS_BEFORE_SHUTDOWN || DEFAULT_WINDOW_DAYS);
+  const models = parseModels(getInput("models") ?? "");
+  const windowDays = Number(getInput("days-before-shutdown") || DEFAULT_WINDOW_DAYS);
   if (!Number.isFinite(windowDays)) {
-    throw new Error(`Invalid days-before-shutdown: ${process.env.INPUT_DAYS_BEFORE_SHUTDOWN}`);
+    throw new Error(`Invalid days-before-shutdown: ${getInput("days-before-shutdown")}`);
   }
-  const failWithinDays = parseOptionalDays(process.env.INPUT_FAIL_WITHIN_DAYS, "fail-within-days");
+  const failWithinDays = parseOptionalDays(getInput("fail-within-days"), "fail-within-days");
   const maxFeedAgeDays = parseOptionalDays(
-    process.env.INPUT_MAX_FEED_AGE_DAYS ?? String(DEFAULT_MAX_FEED_AGE_DAYS),
+    getInput("max-feed-age-days") ?? String(DEFAULT_MAX_FEED_AGE_DAYS),
     "max-feed-age-days",
   );
-  const feedUrl = process.env.INPUT_FEED_URL || DEFAULT_FEED_URL;
+  const feedUrl = getInput("feed-url") || DEFAULT_FEED_URL;
 
   // A monitor that can't reach its feed should fail loudly, not silently report "nothing to worry about".
   const response = await fetch(feedUrl);
@@ -244,11 +253,11 @@ export async function run(): Promise<void> {
   appendCommand(process.env.GITHUB_OUTPUT, "findings", JSON.stringify(findings));
 
   const summaryFile = process.env.GITHUB_STEP_SUMMARY;
-  if (summaryFile && isTrue(process.env.INPUT_JOB_SUMMARY ?? "true")) {
+  if (summaryFile && isTrue(getInput("job-summary") ?? "true")) {
     appendFileSync(summaryFile, renderSummary(findings, models.length, feed.length, windowDays));
   }
 
-  const slackWebhook = process.env.INPUT_SLACK_WEBHOOK;
+  const slackWebhook = getInput("slack-webhook");
   if (findings.length > 0 && slackWebhook) {
     await postSlack(slackWebhook, findings);
   }
