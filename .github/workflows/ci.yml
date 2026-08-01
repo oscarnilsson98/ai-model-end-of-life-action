@@ -38,3 +38,15 @@ jobs:
         run: |
           test "$HAS_FINDINGS" = "true" || { echo "::error::Expected gpt-4 to be flagged within a 10-year window."; exit 1; }
           echo "$FINDINGS" | grep -q '"id":"gpt-4"' || { echo "::error::findings output did not contain gpt-4."; exit 1; }
+
+  # Consumes the published ref the way a third party does — run this after moving the `v1` tag.
+  published-ref:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - id: eol
+        uses: oscarnilsson98/ai-model-end-of-life-action@v1
+        with:
+          models: '[{"id":"gpt-4","provider":"openai"}]'
+          days-before-shutdown: "3650"
+      - run: test "${{ steps.eol.outputs.has-findings }}" = "true"
