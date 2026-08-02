@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decodeJsonDocument, readJsonDocumentFile } from "./document.ts";
+import {
+  decodeJsonDocument,
+  readBoundedRegularFileBytes,
+  readJsonDocumentFile,
+} from "./document.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -41,6 +45,21 @@ describe("bounded JSON documents", () => {
     expect(() => readJsonDocumentFile(directory, directory, 10, "`feed-file`")).toThrow(
       "not a regular file",
     );
+  });
+
+  test("reads multi-chunk files through one bounded descriptor", () => {
+    const directory = mkdtempSync(join(tmpdir(), "model-eol-descriptor-"));
+    temporaryDirectories.push(directory);
+    const filePath = join(directory, "large.txt");
+    const expected = Buffer.from("x".repeat(70_000));
+    writeFileSync(filePath, expected);
+
+    expect(
+      Buffer.from(readBoundedRegularFileBytes(filePath, expected.length, "test file")),
+    ).toEqual(expected);
+    expect(() =>
+      readBoundedRegularFileBytes(filePath, expected.length - 1, "test file"),
+    ).toThrow(/limit is 69999 bytes/);
   });
 
   test("rejects local-document paths outside the workspace", () => {

@@ -257,6 +257,20 @@ describe("discovery resource bounds", () => {
     expect(result.models.map((model) => model.id)).toEqual([longestId]);
   });
 
+  test("keeps per-file skips distinct from aggregate-byte exhaustion", () => {
+    const root = workspace("model-eol-discovery-layered-byte-limits");
+    writeFileSync(join(root, "a-small.txt"), "x");
+    writeFileSync(join(root, "z-oversized.txt"), "123456");
+
+    const result = discoverModels([record("gpt-4")], root, ".", {
+      limits: { maxFileBytes: 5, maxTotalBytes: 1 },
+    });
+
+    expect(result.scannedByteCount).toBe(1);
+    expect(result.scannedFileCount).toBe(1);
+    expect(result.skippedFileCount).toBe(1);
+  });
+
   test("bounds stored locations while retaining the full occurrence count", () => {
     const root = workspace("model-eol-discovery-location-limit");
     writeFileSync(join(root, "models.txt"), "gpt-4\ngpt-4\ngpt-4\n");

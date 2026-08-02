@@ -6,6 +6,67 @@ var import_node_fs = require("node:fs");
 var import_node_path = require("node:path");
 var CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 var MAX_PATH_LENGTH = 4096;
+var READ_CHUNK_BYTES = 64 * 1024;
+
+class FileByteLimitError extends Error {
+  observedBytes;
+  limitBytes;
+  constructor(label, observedBytes, limitBytes, observedExactly) {
+    super(observedExactly ? `${label} is ${observedBytes} bytes; the limit is ${limitBytes} bytes.` : `${label} is at least ${observedBytes} bytes; the limit is ${limitBytes} bytes.`);
+    this.observedBytes = observedBytes;
+    this.limitBytes = limitBytes;
+    this.name = "FileByteLimitError";
+  }
+}
+function readBoundedRegularFileBytes(filePath, maxBytes, label) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new Error(`Invalid byte limit for ${label}.`);
+  }
+  const noFollow = typeof import_node_fs.constants.O_NOFOLLOW === "number" ? import_node_fs.constants.O_NOFOLLOW : 0;
+  let descriptor;
+  try {
+    descriptor = import_node_fs.openSync(filePath, import_node_fs.constants.O_RDONLY | noFollow);
+  } catch (error) {
+    throw new Error(`Could not access ${label} at ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    let size;
+    try {
+      const stats = import_node_fs.fstatSync(descriptor);
+      if (!stats.isFile())
+        throw new Error("path is not a regular file");
+      size = stats.size;
+    } catch (error) {
+      throw new Error(`Could not access ${label} at ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (size > maxBytes) {
+      throw new FileByteLimitError(label, size, maxBytes, true);
+    }
+    const chunks = [];
+    let totalBytes = 0;
+    while (totalBytes <= maxBytes) {
+      const chunk = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, maxBytes + 1 - totalBytes));
+      let bytesRead;
+      try {
+        bytesRead = import_node_fs.readSync(descriptor, chunk, 0, chunk.length, null);
+      } catch (error) {
+        throw new Error(`Could not read ${label} at ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (bytesRead === 0)
+        break;
+      chunks.push(bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead));
+      totalBytes += bytesRead;
+    }
+    if (totalBytes > maxBytes) {
+      throw new FileByteLimitError(label, totalBytes, maxBytes, false);
+    }
+    return Buffer.concat(chunks, totalBytes);
+  } finally {
+    try {
+      import_node_fs.closeSync(descriptor);
+    } catch {}
+  }
+}
 function withinWorkspace(workspace, candidate) {
   const pathFromWorkspace = import_node_path.relative(workspace, candidate);
   return pathFromWorkspace === "" || !import_node_path.isAbsolute(pathFromWorkspace) && pathFromWorkspace !== ".." && !pathFromWorkspace.startsWith(`..${import_node_path.sep}`);
@@ -35,28 +96,7 @@ function readBoundedFileBytes(requestedPath, workspace, maxBytes, label) {
   if (!withinWorkspace(workspacePath, filePath)) {
     throw new Error(`${label} must resolve within the GitHub workspace.`);
   }
-  let size;
-  try {
-    const stats = import_node_fs.statSync(filePath);
-    if (!stats.isFile())
-      throw new Error("path is not a regular file");
-    size = stats.size;
-  } catch (error) {
-    throw new Error(`Could not access ${label} at ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (size > maxBytes) {
-    throw new Error(`${label} is ${size} bytes; the limit is ${maxBytes} bytes.`);
-  }
-  let bytes;
-  try {
-    bytes = import_node_fs.readFileSync(filePath);
-  } catch (error) {
-    throw new Error(`Could not read ${label} at ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (bytes.byteLength > maxBytes) {
-    throw new Error(`${label} is ${bytes.byteLength} bytes; the limit is ${maxBytes} bytes.`);
-  }
-  return bytes;
+  return readBoundedRegularFileBytes(filePath, maxBytes, label);
 }
 function decodeJsonDocument(bytes, label) {
   let text;
@@ -1135,33 +1175,20 @@ function resolveExcludedFiles(workspace, lexicalWorkspace, requestedPaths) {
   return excluded;
 }
 function readText(filePath, limits, stats) {
-  let size;
-  try {
-    size = import_node_fs2.statSync(filePath).size;
-  } catch {
-    stats.skippedFileCount += 1;
-    return null;
-  }
-  if (size === 0)
-    return null;
-  if (size > limits.maxFileBytes) {
-    stats.skippedFileCount += 1;
-    return null;
-  }
-  if (stats.scannedByteCount + size > limits.maxTotalBytes) {
-    throw new Error(`Discovery input exceeds the ${limits.maxTotalBytes}-byte aggregate limit.`);
-  }
+  const remainingAggregateBytes = limits.maxTotalBytes - stats.scannedByteCount;
+  const readLimit = Math.min(limits.maxFileBytes, remainingAggregateBytes);
   let bytes;
   try {
-    bytes = import_node_fs2.readFileSync(filePath);
-  } catch {
+    bytes = readBoundedRegularFileBytes(filePath, readLimit, "discovery file");
+  } catch (error) {
+    if (error instanceof FileByteLimitError && error.observedBytes <= limits.maxFileBytes && readLimit === remainingAggregateBytes) {
+      throw new Error(`Discovery input exceeds the ${limits.maxTotalBytes}-byte aggregate limit.`);
+    }
     stats.skippedFileCount += 1;
     return null;
   }
-  if (bytes.length > limits.maxFileBytes) {
-    stats.skippedFileCount += 1;
+  if (bytes.length === 0)
     return null;
-  }
   if (stats.scannedByteCount + bytes.length > limits.maxTotalBytes) {
     throw new Error(`Discovery input exceeds the ${limits.maxTotalBytes}-byte aggregate limit.`);
   }

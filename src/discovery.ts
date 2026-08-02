@@ -1,11 +1,14 @@
 import {
   lstatSync,
   opendirSync,
-  readFileSync,
   realpathSync,
   statSync,
 } from "node:fs";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  FileByteLimitError,
+  readBoundedRegularFileBytes,
+} from "./document.ts";
 import { normalizeProvider } from "./input.ts";
 import type { DeprecationRecord, InputModel } from "./types.ts";
 
@@ -601,35 +604,29 @@ function readText(
   limits: DiscoveryLimits,
   stats: MutableStats,
 ): string | null {
-  let size: number;
+  const remainingAggregateBytes = limits.maxTotalBytes - stats.scannedByteCount;
+  const readLimit = Math.min(limits.maxFileBytes, remainingAggregateBytes);
+  let bytes: Uint8Array;
   try {
-    size = statSync(filePath).size;
-  } catch {
-    stats.skippedFileCount += 1;
-    return null;
-  }
-  if (size === 0) return null;
-  if (size > limits.maxFileBytes) {
-    stats.skippedFileCount += 1;
-    return null;
-  }
-  if (stats.scannedByteCount + size > limits.maxTotalBytes) {
-    throw new Error(
-      `Discovery input exceeds the ${limits.maxTotalBytes}-byte aggregate limit.`,
+    bytes = readBoundedRegularFileBytes(
+      filePath,
+      readLimit,
+      "discovery file",
     );
-  }
-
-  let bytes: Buffer;
-  try {
-    bytes = readFileSync(filePath);
-  } catch {
+  } catch (error) {
+    if (
+      error instanceof FileByteLimitError &&
+      error.observedBytes <= limits.maxFileBytes &&
+      readLimit === remainingAggregateBytes
+    ) {
+      throw new Error(
+        `Discovery input exceeds the ${limits.maxTotalBytes}-byte aggregate limit.`,
+      );
+    }
     stats.skippedFileCount += 1;
     return null;
   }
-  if (bytes.length > limits.maxFileBytes) {
-    stats.skippedFileCount += 1;
-    return null;
-  }
+  if (bytes.length === 0) return null;
   if (stats.scannedByteCount + bytes.length > limits.maxTotalBytes) {
     throw new Error(
       `Discovery input exceeds the ${limits.maxTotalBytes}-byte aggregate limit.`,
