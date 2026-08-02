@@ -1,0 +1,2 @@
+retired-fixture
+other-provider-fixture

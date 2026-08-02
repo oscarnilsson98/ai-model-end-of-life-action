@@ -1,272 +1,520 @@
-import { appendFileSync } from "node:fs";
-
-export type InputModel = { id: string; provider?: string };
-
-/** A deprecations.info record (https://deprecations.info/v1/deprecations.json). */
-export type DeprecationRecord = {
-  provider: string;
-  model_id: string;
-  shutdown_date?: string;
-  replacement_models?: string[] | null;
-  deprecation_context?: string;
-  url?: string;
-  last_observed?: string;
-  scraped_at?: string;
-};
-
-export type Finding = {
-  id: string;
-  provider: string;
-  shutdownDate: string;
-  daysUntilShutdown: number;
-  replacementModels: string[];
-  url?: string;
-  context?: string;
-};
+import {
+  assertNoFutureObservations,
+  assertRequestedProvidersExist,
+  breachingFindings,
+  feedContentAgeDays,
+  findingKey,
+  matchDeprecations,
+  relevantProviderFreshness,
+  validateFeed,
+} from "./feed.ts";
+import {
+  buildAuditRecord,
+  canonicalInventorySha256,
+  canonicalLifecycleFeedSha256,
+  stableAlertFingerprint,
+  type AuditRecord,
+} from "./digest.ts";
+import {
+  discoverModels,
+  publishDiscoveredModels,
+  type DiscoveryResult,
+} from "./discovery.ts";
+import { loadFeedDocument, parseExpectedSha256 } from "./feed-source.ts";
+import {
+  appendCommand,
+  appendSummary,
+  emitAnnotation,
+  emitCommand,
+  getInput,
+  maskSecret,
+  type Environment,
+  type Log,
+} from "./github.ts";
+import {
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  DEFAULT_RETRIES,
+  defaultRequestPolicy,
+  postSlack,
+  type FetchLike,
+} from "./http.ts";
+import {
+  loadModels,
+  parseBoolean,
+  parseHttpUrl,
+  parseHttpsUrl,
+  parseOptionalInteger,
+  parseRequiredInteger,
+} from "./input.ts";
+import {
+  decideNotification,
+  parseNotificationMode,
+  parsePreviousAlertFingerprint,
+  type NotificationReason,
+} from "./notification.ts";
+import {
+  renderDiscoveryAnnotation,
+  renderFindingAnnotation,
+  renderSlackText,
+  renderResolvedSlackText,
+  renderSummary,
+  renderUnmatchedAnnotation,
+} from "./render.ts";
+import type { Finding, InputModel, MatchResult, ProviderFreshness } from "./types.ts";
 
 export const DEFAULT_FEED_URL = "https://deprecations.info/v1/deprecations.json";
 export const DEFAULT_WINDOW_DAYS = 90;
-export const DEFAULT_MAX_FEED_AGE_DAYS = 30;
+export const MAX_DAYS = 36_500;
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const MAX_TOTAL_OUTPUT_CODE_UNITS = 400_000;
+const MAX_WARNING_ANNOTATIONS = 10;
+const MAX_ERROR_POLICY_ANNOTATIONS = 9;
 
-/**
- * Age in days of the freshest record in the feed, or null when no record carries a timestamp.
- * A feed that stopped updating reports a permanent all-clear, so age is the only signal that the monitor still works.
- */
-export function feedAgeDays(feed: DeprecationRecord[], now: number): number | null {
-  const observed = feed
-    .map((record) => Date.parse(record.last_observed ?? record.scraped_at ?? ""))
-    .filter((time) => !Number.isNaN(time));
-  if (observed.length === 0) return null;
-  return Math.floor((now - Math.max(...observed)) / DAY_MS);
+export class ReportedActionError extends Error {}
+export class PolicyBreachError extends ReportedActionError {}
+export class NotificationDeliveryError extends ReportedActionError {}
+
+export type RunDependencies = {
+  environment?: Environment;
+  fetch?: FetchLike;
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+  random?: () => number;
+  log?: Log;
+};
+
+export type RunResult = MatchResult & {
+  breaching: Finding[];
+  unmatchedBreaching: InputModel[];
+  breachCount: number;
+  feedSize: number;
+  feedContentAgeDays: number | null;
+  providerFreshness: ProviderFreshness[];
+  feedSha256: string;
+  lifecycleFeedSha256: string;
+  inventorySha256: string;
+  alertFingerprint: string;
+  nextAlertFingerprint: string;
+  auditRecord: AuditRecord;
+  notificationSent: boolean;
+  notificationReason: NotificationReason;
+  discovery: DiscoveryResult | null;
+};
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
-/** Normalize provider labels so "OpenAI"/"openai" match while "Azure" and "Google Vertex" stay distinct from "google"/"openai". */
-export function normalizeProvider(provider: string): string {
-  return provider.toLowerCase().trim().replace(/\s+/g, "-").replace(/-ai$/, "");
-}
-
-/** Parse the `models` input, accepting a JSON array of objects or of bare id strings. */
-export function parseModels(raw: string): InputModel[] {
-  const trimmed = raw.trim();
-  if (trimmed === "") throw new Error("`models` input is empty.");
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch (error) {
+function notificationMode(raw: string | undefined): "warn" | "error" {
+  const normalized = raw?.trim().toLowerCase() || "error";
+  if (normalized !== "warn" && normalized !== "error") {
     throw new Error(
-      `\`models\` input is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      "Invalid notification-failure-mode: expected `warn` or `error`.",
     );
   }
-  if (!Array.isArray(parsed)) {
-    throw new Error("`models` input must be a JSON array.");
-  }
-
-  return parsed.map((entry, index) => {
-    if (typeof entry === "string") return { id: entry };
-    if (entry !== null && typeof entry === "object" && typeof (entry as InputModel).id === "string") {
-      const { id, provider } = entry as InputModel;
-      return provider === undefined ? { id } : { id, provider };
-    }
-    throw new Error(`\`models[${index}]\` must be a string or an object with an \`id\` string.`);
-  });
+  return normalized;
 }
 
-/** Match models against the feed, returning those whose shutdown_date is within `windowDays` of `now` (or already passed). */
-export function matchDeprecations(
-  models: InputModel[],
-  feed: DeprecationRecord[],
-  windowDays: number,
-  now: number,
-): Finding[] {
-  const horizon = now + windowDays * DAY_MS;
-  const findings: Finding[] = [];
-  for (const model of models) {
-    const wantProvider = model.provider ? normalizeProvider(model.provider) : null;
-    for (const record of feed) {
-      if (record.model_id !== model.id) continue;
-      if (!record.shutdown_date) continue;
-      if (wantProvider !== null && normalizeProvider(record.provider) !== wantProvider) continue;
-      const shutdown = Date.parse(record.shutdown_date);
-      if (Number.isNaN(shutdown) || shutdown > horizon) continue;
-      findings.push({
-        id: model.id,
-        provider: record.provider,
-        shutdownDate: record.shutdown_date,
-        daysUntilShutdown: Math.round((shutdown - now) / DAY_MS),
-        replacementModels: record.replacement_models ?? [],
-        url: record.url,
-        context: record.deprecation_context,
-      });
-    }
-  }
-  return findings.sort((a, b) => a.daysUntilShutdown - b.daysUntilShutdown);
-}
-
-/** Markdown job-summary body: a findings table, or a one-line all-clear. */
-export function renderSummary(
-  findings: Finding[],
-  modelCount: number,
-  feedSize: number,
-  windowDays: number,
-): string {
-  const heading = "## AI model end-of-life check\n\n";
-  const footer = `\nChecked ${modelCount} model(s) against ${feedSize} feed entries — window: ${windowDays} day(s).\n`;
-  if (findings.length === 0) {
-    return `${heading}No models are within ${windowDays} day(s) of shutdown. ✅\n${footer}`;
-  }
-  const rows = findings
-    .map((f) => {
-      const model = f.url ? `[\`${f.id}\`](${f.url})` : `\`${f.id}\``;
-      const replacement = f.replacementModels.length > 0 ? f.replacementModels.join(", ") : "—";
-      const days = f.daysUntilShutdown < 0 ? `${Math.abs(f.daysUntilShutdown)} days ago` : `${f.daysUntilShutdown}`;
-      return `| ${model} | ${f.provider} | ${f.shutdownDate} | ${days} | ${replacement} |`;
-    })
-    .join("\n");
-  return (
-    `${heading}⚠️ **${findings.length} model(s) approaching end-of-life.**\n\n` +
-    "| Model | Provider | Shutdown | Days left | Replacement |\n" +
-    "| --- | --- | --- | --- | --- |\n" +
-    `${rows}\n${footer}`
+function outputCodeUnits(outputs: Readonly<Record<string, string>>): number {
+  // GitHub approximates the 1 MiB job-output limit using UTF-16 encoding.
+  return Object.entries(outputs).reduce(
+    (total, [key, value]) => total + key.length + value.length + 100,
+    0,
   );
 }
 
-/** Slack incoming-webhook message body for a non-empty finding set. */
-export function renderSlackText(findings: Finding[]): string {
-  const lines = findings
-    .map(
-      (f) =>
-        `• *${f.id}* (${f.provider}) — shuts down ${f.shutdownDate} (${f.daysUntilShutdown}d)${
-          f.replacementModels.length > 0 ? ` → ${f.replacementModels.join(", ")}` : ""
-        }${f.url ? ` <${f.url}|docs>` : ""}`,
-    )
-    .join("\n");
-  return `:rotating_light: *${findings.length} AI model(s) approaching end-of-life*\n${lines}`;
-}
-
-async function postSlack(webhook: string, findings: Finding[]): Promise<void> {
-  const response = await fetch(webhook, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: renderSlackText(findings) }),
-  });
-  if (!response.ok) {
-    throw new Error(`Slack post failed: ${response.status} ${response.statusText}`);
+function validateFreshness(
+  maxAgeDays: number | null,
+  globalAgeDays: number | null,
+  providerFreshness: ProviderFreshness[],
+): void {
+  if (maxAgeDays === null) return;
+  if (globalAgeDays === null) {
+    throw new Error(
+      "Feed content-age checking is enabled, but the feed carries no last_observed/scraped_at timestamps.",
+    );
+  }
+  if (globalAgeDays > maxAgeDays) {
+    throw new Error(
+      `Newest recorded feed content is ${globalAgeDays} day(s) old (max ${maxAgeDays}). This signal measures content observation, not scraper execution.`,
+    );
+  }
+  for (const freshness of providerFreshness) {
+    if (freshness.ageDays === null) {
+      throw new Error(
+        `Feed content-age checking is enabled, but serving platform ${freshness.provider} has no observation timestamps.`,
+      );
+    }
+    if (freshness.ageDays > maxAgeDays) {
+      throw new Error(
+        `Newest recorded ${freshness.provider} feed content is ${freshness.ageDays} day(s) old (max ${maxAgeDays}). This may mean a quiet source or a stale provider scraper.`,
+      );
+    }
   }
 }
 
-/** Append a key/value to a GitHub Actions file command, using the heredoc form so values with newlines survive. */
-function appendCommand(file: string | undefined, key: string, value: string): void {
-  if (!file) return;
-  const delimiter = `ghadelimiter_${key}`;
-  appendFileSync(file, `${key}<<${delimiter}\n${value}\n${delimiter}\n`);
-}
+export async function run(dependencies: RunDependencies = {}): Promise<RunResult> {
+  const environment = dependencies.environment ?? process.env;
+  const log = dependencies.log ?? console.log;
+  const now = (dependencies.now ?? Date.now)();
+  const workspace = environment.GITHUB_WORKSPACE ?? process.cwd();
 
-function isTrue(value: string | undefined): boolean {
-  return value?.trim().toLowerCase() === "true";
-}
-
-/** The runner upper-cases an input name and turns spaces into underscores, but leaves hyphens alone: `feed-url` -> `INPUT_FEED-URL`. */
-export function inputEnvName(name: string): string {
-  return `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
-}
-
-function getInput(name: string): string | undefined {
-  return process.env[inputEnvName(name)]?.trim();
-}
-
-/** Parse an optional day-count input; unset or blank disables whatever it gates. */
-export function parseOptionalDays(raw: string | undefined, inputName: string): number | null {
-  const trimmed = raw?.trim() ?? "";
-  if (trimmed === "") return null;
-  const days = Number(trimmed);
-  if (!Number.isFinite(days)) {
-    throw new Error(`Invalid ${inputName}: ${raw}`);
+  const modelsInput = getInput("models", environment);
+  const modelsFileInput = getInput("models-file", environment);
+  const models = loadModels(modelsInput, modelsFileInput, workspace);
+  const windowDays = parseRequiredInteger(
+    getInput("days-before-shutdown", environment),
+    "days-before-shutdown",
+    DEFAULT_WINDOW_DAYS,
+    { max: MAX_DAYS },
+  );
+  const failWithinDays = parseOptionalInteger(
+    getInput("fail-within-days", environment),
+    "fail-within-days",
+    { max: MAX_DAYS },
+  );
+  if (failWithinDays !== null && failWithinDays > windowDays) {
+    throw new Error(
+      `fail-within-days (${failWithinDays}) must not exceed days-before-shutdown (${windowDays}); otherwise failures can be hidden outside the reporting window.`,
+    );
   }
-  return days;
-}
-
-/** Findings urgent enough to fail the step — those at or inside the threshold, including already-passed shutdowns. */
-export function breachingFindings(findings: Finding[], failWithinDays: number | null): Finding[] {
-  if (failWithinDays === null) return [];
-  return findings.filter((f) => f.daysUntilShutdown <= failWithinDays);
-}
-
-export async function run(): Promise<void> {
-  const models = parseModels(getInput("models") ?? "");
-  const windowDays = Number(getInput("days-before-shutdown") || DEFAULT_WINDOW_DAYS);
-  if (!Number.isFinite(windowDays)) {
-    throw new Error(`Invalid days-before-shutdown: ${getInput("days-before-shutdown")}`);
+  const includeUndated = parseBoolean(
+    getInput("include-undated", environment),
+    "include-undated",
+    true,
+  );
+  const failOnUndated = parseBoolean(
+    getInput("fail-on-undated", environment),
+    "fail-on-undated",
+    false,
+  );
+  if (failOnUndated && !includeUndated) {
+    throw new Error(
+      "`fail-on-undated` cannot be true when `include-undated` is false; the failure policy must not hide the findings it evaluates.",
+    );
   }
-  const failWithinDays = parseOptionalDays(getInput("fail-within-days"), "fail-within-days");
-  const maxFeedAgeDays = parseOptionalDays(
-    getInput("max-feed-age-days") ?? String(DEFAULT_MAX_FEED_AGE_DAYS),
+  const failOnUnmatched = parseBoolean(
+    getInput("fail-on-unmatched", environment),
+    "fail-on-unmatched",
+    false,
+  );
+  const discoveryEnabled = parseBoolean(
+    getInput("discover-models", environment),
+    "discover-models",
+    false,
+  );
+  const discoveryPaths = getInput("discovery-paths", environment);
+  const maxFeedAgeDays = parseOptionalInteger(
+    getInput("max-feed-age-days", environment),
     "max-feed-age-days",
+    { max: MAX_DAYS },
   );
-  const feedUrl = getInput("feed-url") || DEFAULT_FEED_URL;
-
-  // A monitor that can't reach its feed should fail loudly, not silently report "nothing to worry about".
-  const response = await fetch(feedUrl);
-  if (!response.ok) {
-    throw new Error(`Deprecations feed fetch failed: ${response.status} ${response.statusText}`);
+  const jobSummary = parseBoolean(getInput("job-summary", environment), "job-summary", true);
+  const timeoutSeconds = parseRequiredInteger(
+    getInput("request-timeout-seconds", environment),
+    "request-timeout-seconds",
+    DEFAULT_REQUEST_TIMEOUT_MS / 1_000,
+    { min: 1, max: 300 },
+  );
+  const retries = parseRequiredInteger(
+    getInput("retries", environment),
+    "retries",
+    DEFAULT_RETRIES,
+    { max: 5 },
+  );
+  const failureMode = notificationMode(getInput("notification-failure-mode", environment));
+  const notificationModeValue = parseNotificationMode(
+    getInput("notification-mode", environment),
+  );
+  const previousAlertFingerprint = parsePreviousAlertFingerprint(
+    getInput("previous-alert-fingerprint", environment),
+  );
+  const feedUrlInput = getInput("feed-url", environment);
+  const feedFileInput = getInput("feed-file", environment);
+  const expectedFeedSha256 = parseExpectedSha256(
+    getInput("expected-feed-sha256", environment),
+  );
+  if (feedUrlInput) {
+    const parsedFeedUrl = parseHttpUrl(feedUrlInput, "feed-url");
+    if (new URL(parsedFeedUrl).search !== "") maskSecret(parsedFeedUrl, log);
   }
-  const feed = (await response.json()) as DeprecationRecord[];
-  if (!Array.isArray(feed) || feed.length === 0) {
-    throw new Error(`Deprecations feed at ${feedUrl} did not return a non-empty JSON array.`);
-  }
+  const slackWebhookInput = getInput("slack-webhook", environment);
+  if (slackWebhookInput) maskSecret(slackWebhookInput, log);
+  const slackWebhook = slackWebhookInput
+    ? parseHttpsUrl(slackWebhookInput, "slack-webhook")
+    : undefined;
 
-  const now = Date.now();
-  const feedAge = feedAgeDays(feed, now);
-  if (feedAge === null) {
-    console.log(
-      `::warning::Feed at ${feedUrl} carries no last_observed/scraped_at timestamps — staleness can't be checked.`,
+  const requestPolicy = defaultRequestPolicy(dependencies.fetch ?? fetch);
+  requestPolicy.timeoutMs = timeoutSeconds * 1_000;
+  requestPolicy.retries = retries;
+  if (dependencies.sleep) requestPolicy.sleep = dependencies.sleep;
+  if (dependencies.random) requestPolicy.random = dependencies.random;
+
+  const feedDocument = await loadFeedDocument({
+    feedUrl: feedUrlInput,
+    feedFile: feedFileInput,
+    expectedSha256: expectedFeedSha256,
+    defaultFeedUrl: DEFAULT_FEED_URL,
+    workspace,
+    requestPolicy,
+  });
+  const feed = validateFeed(feedDocument.value);
+  assertNoFutureObservations(feed, now);
+  assertRequestedProvidersExist(models, feed);
+  const contentAge = feedContentAgeDays(feed, now);
+  const providerFreshness = relevantProviderFreshness(models, feed, now);
+  validateFreshness(maxFeedAgeDays, contentAge, providerFreshness);
+
+  const discovery = discoveryEnabled
+    ? discoverModels(feed, workspace, discoveryPaths, {
+        inventory: models,
+        excludedPaths: [feedFileInput ?? "", modelsFileInput ?? ""],
+      })
+    : null;
+
+  const matched = matchDeprecations(models, feed, windowDays, now, includeUndated);
+  const breaching = breachingFindings(matched.findings, failWithinDays, failOnUndated);
+  const unmatchedBreaching = failOnUnmatched ? matched.unmatchedModels : [];
+  const breachCount = breaching.length + unmatchedBreaching.length;
+  const inventorySha256 = canonicalInventorySha256(models);
+  const lifecycleFeedSha256 = canonicalLifecycleFeedSha256(feed);
+  const alertFingerprint = stableAlertFingerprint({
+    findings: matched.findings,
+    breaching,
+    unmatchedBreaching,
+  });
+  const auditRecord = buildAuditRecord({
+    inventory: models,
+    feed,
+    rawFeedBytes: feedDocument.bytes,
+    findings: matched.findings,
+    breaching,
+    unmatchedBreaching,
+  });
+  const alertCount = matched.findings.length + unmatchedBreaching.length;
+  const notificationDecision = slackWebhook
+    ? decideNotification({
+        mode: notificationModeValue,
+        previousFingerprint: previousAlertFingerprint,
+        currentFingerprint: alertFingerprint,
+        alertCount,
+      })
+    : { shouldNotify: false, reason: "disabled" as const };
+  let notificationSent = false;
+  let notificationReason: NotificationReason = notificationDecision.reason;
+  let nextAlertFingerprint =
+    notificationDecision.reason === "disabled"
+      ? (previousAlertFingerprint ?? "")
+      : alertFingerprint;
+  let notificationError: Error | null = null;
+  let notificationFailureMessage: string | null = null;
+  const discoveryPublication = publishDiscoveredModels(discovery?.models ?? []);
+  const untrackedDiscoveredModels =
+    discovery?.models.filter((model) => !model.tracked) ?? [];
+  const outputs: Record<string, string> = {
+    "has-findings": String(matched.findings.length > 0),
+    findings: JSON.stringify(matched.findings),
+    "finding-count": String(matched.findings.length),
+    "has-breaches": String(breachCount > 0),
+    "breach-count": String(breachCount),
+    "checked-model-count": String(models.length),
+    "matched-model-count": String(matched.matchedModelCount),
+    "unmatched-model-count": String(matched.unmatchedModels.length),
+    "feed-content-age-days": contentAge === null ? "" : String(contentAge),
+    "feed-record-count": String(feed.length),
+    "feed-sha256": feedDocument.rawSha256,
+    "lifecycle-feed-sha256": lifecycleFeedSha256,
+    "inventory-sha256": inventorySha256,
+    "alert-fingerprint": alertFingerprint,
+    "next-alert-fingerprint": nextAlertFingerprint,
+    "audit-record": JSON.stringify(auditRecord),
+    "notification-sent": "false",
+    "notification-reason": notificationReason,
+    "unmatched-models": JSON.stringify(matched.unmatchedModels),
+    "discovered-models": discoveryPublication.json,
+    "discovered-model-count": String(discovery?.models.length ?? 0),
+    "untracked-discovered-model-count": String(untrackedDiscoveredModels.length),
+    "discovery-match-count": String(discovery?.matchCount ?? 0),
+    "discovery-output-truncated": String(discoveryPublication.truncated),
+  };
+  if (
+    outputCodeUnits(outputs) > MAX_TOTAL_OUTPUT_CODE_UNITS &&
+    outputs["discovered-models"] !== "[]"
+  ) {
+    outputs["discovered-models"] = "[]";
+    outputs["discovery-output-truncated"] = "true";
+    emitCommand(
+      "notice",
+      "The combined GitHub outputs exceeded the safe size budget, so detailed discovery results were omitted. Discovery counts remain available in outputs and the job summary.",
+      log,
     );
-  } else if (maxFeedAgeDays !== null && feedAge > maxFeedAgeDays) {
+  }
+  if (
+    outputCodeUnits(outputs) > MAX_TOTAL_OUTPUT_CODE_UNITS &&
+    matched.findings.some((finding) => finding.context !== undefined)
+  ) {
+    outputs.findings = JSON.stringify(
+      matched.findings.map(({ context: _context, ...finding }) => finding),
+    );
+    emitCommand(
+      "notice",
+      "The combined GitHub outputs exceeded the safe size budget, so verbose finding context was omitted. Source URLs remain available.",
+      log,
+    );
+  }
+  const totalOutputSize = outputCodeUnits(outputs);
+  if (totalOutputSize > MAX_TOTAL_OUTPUT_CODE_UNITS) {
     throw new Error(
-      `Deprecations feed at ${feedUrl} looks stale: newest entry was observed ${feedAge} day(s) ago (max ${maxFeedAgeDays}). A feed that stopped updating reports a permanent all-clear.`,
+      `The combined outputs are too large for GitHub Actions (${totalOutputSize} UTF-16 code units after omitting optional context where available; safe limit ${MAX_TOTAL_OUTPUT_CODE_UNITS}). Reduce the model inventory.`,
     );
   }
-
-  const findings = matchDeprecations(models, feed, windowDays, now);
-
-  const breaching = breachingFindings(findings, failWithinDays);
-
-  for (const f of findings) {
-    const level = breaching.includes(f) ? "error" : "warning";
-    console.log(
-      `::${level}::AI model ${f.id} (${f.provider}) shuts down ${f.shutdownDate} — ${
-        f.daysUntilShutdown < 0
-          ? `${Math.abs(f.daysUntilShutdown)} day(s) ago`
-          : `${f.daysUntilShutdown} day(s) left`
-      }. Replacement: ${
-        f.replacementModels.join(", ") || "none listed"
-      }. ${f.url ?? ""}`,
+  const breachKeys = new Set(breaching.map(findingKey));
+  const maxWarningAnnotations =
+    notificationDecision.shouldNotify && failureMode === "warn"
+      ? MAX_WARNING_ANNOTATIONS - 1
+      : MAX_WARNING_ANNOTATIONS;
+  let warningAnnotations = 0;
+  let errorAnnotations = 0;
+  let suppressedAnnotations = 0;
+  for (const finding of matched.findings) {
+    const isBreach = breachKeys.has(findingKey(finding));
+    if (isBreach && errorAnnotations >= MAX_ERROR_POLICY_ANNOTATIONS) {
+      suppressedAnnotations += 1;
+      continue;
+    }
+    if (!isBreach && warningAnnotations >= maxWarningAnnotations) {
+      suppressedAnnotations += 1;
+      continue;
+    }
+    emitCommand(
+      isBreach ? "error" : "warning",
+      renderFindingAnnotation(finding),
+      log,
+    );
+    if (isBreach) errorAnnotations += 1;
+    else warningAnnotations += 1;
+  }
+  for (const model of unmatchedBreaching) {
+    if (errorAnnotations >= MAX_ERROR_POLICY_ANNOTATIONS) {
+      suppressedAnnotations += 1;
+      continue;
+    }
+    emitCommand("error", renderUnmatchedAnnotation(model), log);
+    errorAnnotations += 1;
+  }
+  for (const model of untrackedDiscoveredModels) {
+    if (warningAnnotations >= maxWarningAnnotations) {
+      suppressedAnnotations += 1;
+      continue;
+    }
+    const location = model.locations[0];
+    if (location === undefined) continue;
+    emitAnnotation(
+      "warning",
+      renderDiscoveryAnnotation(model),
+      {
+        title: "Report-only AI model discovery",
+        file: location.path,
+        line: location.line,
+        col: location.column,
+      },
+      log,
+    );
+    warningAnnotations += 1;
+  }
+  if (suppressedAnnotations > 0) {
+    emitCommand(
+      "notice",
+      `${suppressedAnnotations} action annotation(s) were suppressed to stay within GitHub's per-step annotation limits; see the job summary and machine-readable outputs.`,
+      log,
     );
   }
-  console.log(
-    `Checked ${models.length} model(s) against ${feed.length} feed entries — ${findings.length} within ${windowDays}d of shutdown.`,
+  log(
+    `Checked ${models.length} model declaration(s) against ${feed.length} validated feed entries — ${matched.findings.length} lifecycle finding(s), ${breachCount} policy breach(es).`,
   );
 
-  appendCommand(process.env.GITHUB_OUTPUT, "has-findings", String(findings.length > 0));
-  appendCommand(process.env.GITHUB_OUTPUT, "findings", JSON.stringify(findings));
-
-  const summaryFile = process.env.GITHUB_STEP_SUMMARY;
-  if (summaryFile && isTrue(getInput("job-summary") ?? "true")) {
-    appendFileSync(summaryFile, renderSummary(findings, models.length, feed.length, windowDays));
+  if (notificationDecision.shouldNotify && slackWebhook) {
+    try {
+      await postSlack(
+        slackWebhook,
+        notificationDecision.reason === "resolved"
+          ? renderResolvedSlackText()
+          : renderSlackText(matched.findings, { breaching, unmatchedBreaching }),
+        requestPolicy,
+      );
+      notificationSent = true;
+    } catch (error) {
+      const message = formatError(error);
+      notificationReason = "error";
+      nextAlertFingerprint = previousAlertFingerprint ?? "";
+      notificationFailureMessage = message;
+      if (failureMode === "warn") emitCommand("warning", message, log);
+      else notificationError = new Error(message);
+    }
   }
 
-  const slackWebhook = getInput("slack-webhook");
-  if (findings.length > 0 && slackWebhook) {
-    await postSlack(slackWebhook, findings);
+  outputs["notification-sent"] = String(notificationSent);
+  outputs["notification-reason"] = notificationReason;
+  outputs["next-alert-fingerprint"] = nextAlertFingerprint;
+  for (const [name, value] of Object.entries(outputs)) {
+    appendCommand(environment.GITHUB_OUTPUT, name, value);
   }
 
-  if (breaching.length > 0) {
-    throw new Error(
-      `${breaching.length} model(s) within ${failWithinDays} day(s) of shutdown: ${breaching
-        .map((f) => `${f.id} (${f.shutdownDate})`)
-        .join(", ")}.`,
+  if (jobSummary) {
+    const summaryInput = {
+      ...matched,
+      breaching,
+      unmatchedBreaching,
+      models,
+      feedSize: feed.length,
+      windowDays,
+      feedContentAgeDays: contentAge,
+      providerFreshness,
+      includeUndated,
+      feedSourceKind: feedDocument.sourceKind,
+      feedSha256: feedDocument.rawSha256,
+      lifecycleFeedSha256,
+      inventorySha256,
+      ...(discovery === null ? {} : { discovery }),
+      notification: {
+        sent: notificationSent,
+        reason: notificationReason,
+        ...(notificationFailureMessage === null
+          ? {}
+          : { error: notificationFailureMessage }),
+      },
+    };
+    appendSummary(environment.GITHUB_STEP_SUMMARY, renderSummary(summaryInput));
+  }
+
+  if (breachCount > 0) {
+    const dated = breaching.filter((finding) => finding.daysUntilShutdown !== null).length;
+    const undated = breaching.length - dated;
+    const notificationSuffix = notificationError
+      ? ` Slack notification also failed: ${notificationError.message}`
+      : "";
+    throw new PolicyBreachError(
+      `${breachCount} item(s) breached the configured policy (${dated} dated lifecycle, ${undated} undated lifecycle, ${unmatchedBreaching.length} unmatched feed history).${notificationSuffix}`,
     );
   }
+  if (notificationError) throw new NotificationDeliveryError(notificationError.message);
+
+  return {
+    ...matched,
+    breaching,
+    unmatchedBreaching,
+    breachCount,
+    feedSize: feed.length,
+    feedContentAgeDays: contentAge,
+    providerFreshness,
+    feedSha256: feedDocument.rawSha256,
+    lifecycleFeedSha256,
+    inventorySha256,
+    alertFingerprint,
+    nextAlertFingerprint,
+    auditRecord,
+    notificationSent,
+    notificationReason,
+    discovery,
+  };
 }
