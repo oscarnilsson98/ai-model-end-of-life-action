@@ -1,5 +1,5 @@
 name: "AI Model End-of-Life Check"
-description: "Flag AI models your repo depends on that are approaching end-of-life, sourced from deprecations.info."
+description: "Flag declared AI models that are deprecated or approaching shutdown, sourced from deprecations.info."
 author: "oscarnilsson98"
 
 branding:
@@ -8,38 +8,135 @@ branding:
 
 inputs:
   models:
-    description: 'JSON array of models to check — objects `[{"id":"gpt-5.2","provider":"openai"}]` or bare ids `["gpt-5.2"]`. `provider` is optional but recommended: without it a model matches any provider (e.g. an Azure-hosted namesake).'
-    required: true
+    description: 'JSON array of models to check — objects `[{"id":"gpt-5.2","provider":"openai"}]` or bare ids `["gpt-5.2"]`. Supply this, `models-file`, or both. `provider` is optional but recommended and means serving platform, not model publisher.'
+    required: false
+    default: ""
+  models-file:
+    description: "Path to a checked-out JSON model inventory with the same schema as `models`. Entries are merged and deduplicated. Requires actions/checkout (or another step that creates the file)."
+    required: false
+    default: ""
   days-before-shutdown:
     description: "Flag a model when its shutdown date is within this many days (or already passed)."
     required: false
     default: "90"
   fail-within-days:
-    description: "Fail the step when a model is within this many days of shutdown (or already past it). Leave unset to only warn. Keep it below `days-before-shutdown` to warn early and fail late."
+    description: "Fail the step when a model is within this many days of shutdown (or already past it). Leave unset to only warn. Keep it at or below `days-before-shutdown`."
     required: false
     default: ""
+  include-undated:
+    description: "Report matching deprecations that have no published shutdown date."
+    required: false
+    default: "true"
+  fail-on-undated:
+    description: "Fail when a matching undated deprecation is found. Undated deprecations are warning-only by default. Cannot be true when `include-undated` is false."
+    required: false
+    default: "false"
+  fail-on-unmatched:
+    description: "Fail when an inventory declaration has no exact model/platform history in the feed. Disabled by default because active models are normally absent from a deprecations-only feed."
+    required: false
+    default: "false"
+  discover-models:
+    description: "Opt in to bounded, report-only scanning of checked-out files for exact, case-sensitive model IDs already present in the lifecycle feed. Discovery never changes policy or Slack alerts."
+    required: false
+    default: "false"
+  discovery-paths:
+    description: "Comma- or newline-separated workspace-local files/directories for report-only discovery. Defaults to the workspace root; symlinks, vendor/generated trees, lockfiles, binaries, and oversized inputs are skipped."
+    required: false
+    default: "."
   feed-url:
-    description: "Mirror of the deprecations.info feed — for air-gapped runners, an outage, or pinning a vendored snapshot. Must serve the same JSON schema."
+    description: "Optional HTTP(S) mirror of the deprecations.info feed. When empty, the action uses its built-in public URL. Mutually exclusive with `feed-file`."
     required: false
-    default: "https://deprecations.info/v1/deprecations.json"
+    default: ""
+  feed-file:
+    description: "Optional workspace-local raw-array or JSON Feed snapshot for deterministic/offline checks. Mutually exclusive with `feed-url`."
+    required: false
+    default: ""
+  expected-feed-sha256:
+    description: "Optional exact SHA-256 for the downloaded or local feed bytes. A mismatch fails before JSON parsing."
+    required: false
+    default: ""
   max-feed-age-days:
-    description: "Fail when the feed's newest entry was observed longer ago than this — a feed that stopped updating reports a permanent all-clear. Set to empty to disable."
+    description: "Optional maximum age of recorded feed content, checked globally and for configured platforms. This is not a scraper-health signal because unchanged records retain old timestamps. Disabled by default."
     required: false
-    default: "30"
+    default: ""
+  request-timeout-seconds:
+    description: "Timeout for each feed or Slack HTTP request."
+    required: false
+    default: "15"
+  retries:
+    description: "Retries for transient feed network, 408, 429, and 5xx failures (0–5). Slack POSTs are never retried to avoid duplicates."
+    required: false
+    default: "2"
   slack-webhook:
-    description: "Optional Slack incoming-webhook URL; when set, findings are posted to it."
+    description: "Optional HTTPS Slack incoming-webhook URL; when set, lifecycle findings and unmatched feed-history breaches are posted to it."
+    required: false
+    default: ""
+  notification-failure-mode:
+    description: "Whether a Slack delivery failure should `error` the step or only `warn`."
+    required: false
+    default: "error"
+  notification-mode:
+    description: "Send every non-empty snapshot (`always`) or only initial, changed, and resolved alert states (`on-change`). `on-change` is stateless and requires the caller to persist `next-alert-fingerprint`."
+    required: false
+    default: "always"
+  previous-alert-fingerprint:
+    description: "Caller-persisted 64-character `next-alert-fingerprint` from a prior run, used only by `notification-mode: on-change`."
     required: false
     default: ""
   job-summary:
-    description: "Write a findings table to the GitHub Actions job summary."
+    description: "Write a bounded lifecycle, feed-history, discovery, provenance, and notification report to the GitHub Actions job summary."
     required: false
     default: "true"
 
 outputs:
   findings:
-    description: "JSON array of matched deprecations (id, provider, shutdownDate, daysUntilShutdown, replacementModels, url, context), soonest shutdown first."
+    description: "JSON array of matched lifecycle findings, including a stable findingId, status, dates, replacements, source, and context; deterministic and soonest-first."
   has-findings:
-    description: "'true' when at least one model is within the shutdown window."
+    description: "'true' when at least one reported finding exists: a model is within the shutdown window, or `include-undated` is true and it has a matching undated deprecation."
+  finding-count:
+    description: "Number of lifecycle findings."
+  has-breaches:
+    description: "'true' when a lifecycle finding or unmatched inventory declaration breaches the configured policy."
+  breach-count:
+    description: "Total lifecycle and unmatched-feed-history policy breaches."
+  checked-model-count:
+    description: "Number of unique model declarations checked."
+  matched-model-count:
+    description: "Number of declarations with at least one exact model/platform record in the feed."
+  unmatched-model-count:
+    description: "Number of declarations with no exact model/platform history in the feed."
+  unmatched-models:
+    description: "JSON array of declarations with no exact feed history; absence from this deprecation feed does not prove a model is active."
+  feed-content-age-days:
+    description: "Age in days of the newest observation timestamp, or an empty string when unavailable. This measures content recency, not scraper health."
+  feed-record-count:
+    description: "Number of strictly validated lifecycle-feed records used by this run."
+  feed-sha256:
+    description: "SHA-256 of the exact feed bytes, sensitive to formatting and observation-only changes."
+  lifecycle-feed-sha256:
+    description: "Order-independent SHA-256 identity of normalized lifecycle fields, excluding observation timestamps and verbose context."
+  inventory-sha256:
+    description: "Order-independent SHA-256 identity of the normalized explicit model inventory."
+  alert-fingerprint:
+    description: "Stable SHA-256 identity of the current lifecycle alert set; excludes the daily countdown and supports caller-managed change detection."
+  next-alert-fingerprint:
+    description: "Fingerprint safe for caller persistence after notification handling. On disabled delivery or error it retains the previous fingerprint (or stays empty) so an unsent alert is not silently acknowledged."
+  audit-record:
+    description: "Compact deterministic JSON record containing run identities and counts."
+  notification-sent:
+    description: "'true' only when the action successfully sent a Slack notification during this run."
+  notification-reason:
+    description: "Slack decision: disabled, no-alerts, always, initial, changed, unchanged, resolved, or error."
+  discovered-models:
+    description: "Bounded JSON array of exact lifecycle-feed model IDs found by opt-in report-only source discovery, with possible platforms, inventory compatibility, and locations."
+  discovered-model-count:
+    description: "Total unique lifecycle-feed model IDs found by report-only source discovery."
+  untracked-discovered-model-count:
+    description: "Discovered IDs with no compatible explicit inventory declaration; report-only and not a policy breach."
+  discovery-match-count:
+    description: "Total exact source occurrences found by report-only discovery."
+  discovery-output-truncated:
+    description: "'true' when provider/location detail or model rows were omitted from the bounded discovered-models output."
 
 runs:
   using: "node24"

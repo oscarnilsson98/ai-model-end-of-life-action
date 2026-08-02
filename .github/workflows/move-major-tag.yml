@@ -1,40 +1,290 @@
-name: Move major tag
+name: Validate release and move major tag
 
-# Consumers use @v1, so the major tag has to follow every release — including ones
-# published from the web UI, which don't push tags of their own.
 on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "!v*-*"
   release:
     types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to point the major tag at, e.g. v1.5.0"
+        description: "Exact stable release tag to validate, for example v2.0.0"
         required: true
+        type: string
+      promote:
+        description: "Move the matching major tag after validation"
+        required: true
+        default: false
+        type: boolean
 
-permissions:
-  contents: write
+permissions: {}
+
+concurrency:
+  group: release-major-tag-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
-  move-major-tag:
-    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+  validate-release:
+    name: Validate release source and bundle
+    if: >-
+      ${{
+        github.event_name == 'push' ||
+        github.event_name == 'workflow_dispatch' ||
+        !github.event.release.prerelease
+      }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      major: ${{ steps.release.outputs.major }}
+      sha: ${{ steps.release.outputs.sha }}
+      tag_ref: ${{ steps.release.outputs.tag_ref }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out the complete repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
 
-      - name: Point the major tag at this release
+      - name: Resolve and validate the stable release tag
+        id: release
+        shell: bash
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          case "$TAG" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::notice::$TAG is not a vX.Y.Z tag — leaving major tags alone."; exit 0 ;;
-          esac
-          major="${TAG%%.*}"
-          sha=$(git rev-list -n 1 "$TAG")
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f "$major" "$sha"
-          git push -f origin "refs/tags/$major"
-          echo "::notice::$major now points at $TAG ($sha)."
+          set -Eeuo pipefail
+
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must use the exact stable vX.Y.Z format without leading zeroes." >&2
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/$TAG"; then
+            echo "The requested tag does not exist in the repository." >&2
+            exit 1
+          fi
+
+          tag_ref="$(git rev-parse --verify "refs/tags/$TAG")"
+          tag_sha="$(git rev-parse --verify "refs/tags/$TAG^{commit}")"
+          git checkout --detach "$tag_sha"
+
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "v$package_version" != "$TAG" ]]; then
+            echo "package.json version ($package_version) does not match the release tag." >&2
+            exit 1
+          fi
+
+          default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git show-ref --verify --quiet "$default_ref"; then
+            echo "The repository default branch was not fetched." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag_sha" "$default_ref"; then
+            echo "The release commit must be reachable from the repository default branch." >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "major=${TAG%%.*}" >> "$GITHUB_OUTPUT"
+          echo "sha=$tag_sha" >> "$GITHUB_OUTPUT"
+          echo "tag_ref=$tag_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install locked dependencies without lifecycle scripts
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Typecheck CI fixture helpers
+        run: bunx --bun tsc --project .github/tsconfig.json
+
+      - name: Run deterministic unit tests
+        run: bun run test
+
+      - name: Rebuild the action bundle
+        run: bun run build
+
+      - name: Verify the released dist is committed and reproducible
+        shell: bash
+        run: |
+          if ! git diff --exit-code -- dist; then
+            echo "The release bundle differs from a clean build." >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain --untracked-files=all -- dist)" ]]; then
+            echo "The release contains untracked dist output." >&2
+            exit 1
+          fi
+
+      - name: Start the local lifecycle-feed fixture
+        shell: bash
+        run: |
+          bun .github/scripts/fixture-server.ts 0 fixture-server.url > fixture-server.log 2>&1 &
+          echo "$!" > fixture-server.pid
+          for attempt in {1..30}; do
+            if [[ -s fixture-server.url ]]; then
+              fixture_url="$(cat fixture-server.url)"
+              fixture_url="${fixture_url%/}"
+              if FIXTURE_URL="$fixture_url" bun -e '
+                const response = await fetch(`${Bun.env.FIXTURE_URL}/health`);
+                if (!response.ok) process.exit(1);
+              ' 2>/dev/null; then
+                echo "FIXTURE_FEED_URL=$fixture_url/deprecations.json" >> "$GITHUB_ENV"
+                exit 0
+              fi
+            fi
+            sleep 1
+          done
+          cat fixture-server.log >&2
+          echo "Local lifecycle-feed fixture did not become ready." >&2
+          exit 1
+
+      - name: Run the release bundle against the local fixture
+        id: release-fixture-check
+        uses: ./
+        with:
+          models-file: .github/fixtures/models.json
+          days-before-shutdown: "0"
+          feed-url: ${{ env.FIXTURE_FEED_URL }}
+          retries: "0"
+
+      - name: Assert release-bundle findings, provenance, and feed-history outputs
+        shell: bash
+        env:
+          HAS_FINDINGS: ${{ steps.release-fixture-check.outputs.has-findings }}
+          FINDING_COUNT: ${{ steps.release-fixture-check.outputs.finding-count }}
+          HAS_BREACHES: ${{ steps.release-fixture-check.outputs.has-breaches }}
+          BREACH_COUNT: ${{ steps.release-fixture-check.outputs.breach-count }}
+          MATCHED_MODEL_COUNT: ${{ steps.release-fixture-check.outputs.matched-model-count }}
+          CHECKED_MODEL_COUNT: ${{ steps.release-fixture-check.outputs.checked-model-count }}
+          UNMATCHED_MODEL_COUNT: ${{ steps.release-fixture-check.outputs.unmatched-model-count }}
+          FINDINGS: ${{ steps.release-fixture-check.outputs.findings }}
+          UNMATCHED_MODELS: ${{ steps.release-fixture-check.outputs.unmatched-models }}
+          FEED_RECORD_COUNT: ${{ steps.release-fixture-check.outputs.feed-record-count }}
+          FEED_SHA256: ${{ steps.release-fixture-check.outputs.feed-sha256 }}
+          LIFECYCLE_FEED_SHA256: ${{ steps.release-fixture-check.outputs.lifecycle-feed-sha256 }}
+          INVENTORY_SHA256: ${{ steps.release-fixture-check.outputs.inventory-sha256 }}
+          ALERT_FINGERPRINT: ${{ steps.release-fixture-check.outputs.alert-fingerprint }}
+          NEXT_ALERT_FINGERPRINT: ${{ steps.release-fixture-check.outputs.next-alert-fingerprint }}
+          AUDIT_RECORD: ${{ steps.release-fixture-check.outputs.audit-record }}
+          NOTIFICATION_SENT: ${{ steps.release-fixture-check.outputs.notification-sent }}
+          NOTIFICATION_REASON: ${{ steps.release-fixture-check.outputs.notification-reason }}
+        run: bun .github/scripts/assert-e2e.ts success
+
+      - name: Stop the local fixture server
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f fixture-server.pid ]]; then
+            kill "$(cat fixture-server.pid)" 2>/dev/null || true
+          fi
+          rm -f fixture-server.pid fixture-server.log fixture-server.url
+
+  promote-major-tag:
+    name: Promote immutable release to major tag
+    needs: validate-release
+    if: >-
+      ${{
+        (github.event_name == 'release' && !github.event.release.prerelease) ||
+        (github.event_name == 'workflow_dispatch' && inputs.promote)
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Require an immutable published GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_TAG: ${{ needs.validate-release.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          if ! release_state="$(
+            gh api --method GET "repos/$GITHUB_REPOSITORY/releases/tags/$TARGET_TAG" \
+              --jq '[.tag_name, (.draft | tostring), (.prerelease | tostring), ((.immutable // false) | tostring), (.published_at // "")] | @tsv'
+          )"; then
+            echo "The validated tag does not have an accessible GitHub Release." >&2
+            exit 1
+          fi
+          IFS=$'\t' read -r release_tag draft prerelease immutable published_at <<< "$release_state"
+          if [[ "$release_tag" != "$TARGET_TAG" || "$draft" != "false" || "$prerelease" != "false" || "$immutable" != "true" || -z "$published_at" ]]; then
+            echo "Major-tag promotion requires a published, stable, immutable GitHub Release for the validated tag." >&2
+            exit 1
+          fi
+
+      - name: Check out the complete repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Move the major tag without allowing a version regression
+        shell: bash
+        env:
+          TARGET_TAG: ${{ needs.validate-release.outputs.tag }}
+          TARGET_TAG_REF: ${{ needs.validate-release.outputs.tag_ref }}
+          TARGET_SHA: ${{ needs.validate-release.outputs.sha }}
+          MAJOR_TAG: ${{ needs.validate-release.outputs.major }}
+        run: |
+          set -Eeuo pipefail
+          git fetch --force --tags origin
+
+          actual_ref="$(git rev-parse --verify "refs/tags/$TARGET_TAG")"
+          actual_sha="$(git rev-parse --verify "refs/tags/$TARGET_TAG^{commit}")"
+          if [[ "$actual_ref" != "$TARGET_TAG_REF" || "$actual_sha" != "$TARGET_SHA" ]]; then
+            echo "The validated release tag changed before promotion; refusing to continue." >&2
+            exit 1
+          fi
+
+          current_ref=""
+          current_sha=""
+          if git show-ref --verify --quiet "refs/tags/$MAJOR_TAG"; then
+            current_ref="$(git rev-parse --verify "refs/tags/$MAJOR_TAG")"
+            current_sha="$(git rev-parse --verify "refs/tags/$MAJOR_TAG^{commit}")"
+          fi
+          if [[ "$current_sha" == "$TARGET_SHA" ]]; then
+            echo "$MAJOR_TAG already points at $TARGET_TAG ($TARGET_SHA)."
+            exit 0
+          fi
+
+          if [[ -n "$current_sha" ]]; then
+            current_release_tag="$(
+              git tag --points-at "$current_sha" --list "$MAJOR_TAG.*.*" |
+                grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' |
+                sort -V |
+                tail -n 1 || true
+            )"
+            if [[ -z "$current_release_tag" ]]; then
+              echo "The existing major tag does not point at a stable release tag; refusing a blind force-update." >&2
+              exit 1
+            fi
+            newest="$(printf '%s\n%s\n' "$current_release_tag" "$TARGET_TAG" | sort -V | tail -n 1)"
+            if [[ "$newest" != "$TARGET_TAG" ]]; then
+              echo "Refusing to move $MAJOR_TAG backwards from $current_release_tag to $TARGET_TAG." >&2
+              exit 1
+            fi
+          fi
+
+          if [[ -n "$current_ref" ]]; then
+            git update-ref "refs/tags/$MAJOR_TAG" "$TARGET_SHA" "$current_ref"
+            major_lease="refs/tags/$MAJOR_TAG:$current_ref"
+          else
+            git update-ref "refs/tags/$MAJOR_TAG" "$TARGET_SHA"
+            major_lease="refs/tags/$MAJOR_TAG:"
+          fi
+          git push --atomic \
+            --force-with-lease="$major_lease" \
+            --force-with-lease="refs/tags/$TARGET_TAG:$TARGET_TAG_REF" \
+            origin "refs/tags/$TARGET_TAG" "refs/tags/$MAJOR_TAG"
+          echo "$MAJOR_TAG now points at $TARGET_TAG ($TARGET_SHA)."
