@@ -301,4 +301,4 @@ bun run build
 
 `dist/index.js` is committed and must match `src/main.ts`.
 
-The detailed behavioral guarantees are captured in [the product contract](docs/v3-product-contract.md) and [detector contract](docs/v3-detector-contract.md). See the [changelog](CHANGELOG.md) for release history. Maintainers should follow [the release runbook](docs/releasing.md) when publishing a version.
+The detailed behavioral guarantees are captured in [the product contract](docs/v3-product-contract.md) and [detector contract](docs/v3-detector-contract.md). See [GitHub Releases](https://github.com/oscarnilsson98/ai-model-end-of-life-action/releases) for release history. Maintainers should follow [the release runbook](docs/releasing.md) when publishing a version.

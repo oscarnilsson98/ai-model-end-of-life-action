@@ -1,3 +1,4 @@
+import { DETECTOR_MANIFEST_VERSION } from "../detection/manifest.ts";
 import { canonicalSha256 } from "../shared/status.ts";
 import type {
   CoverageDiagnostic,
@@ -347,7 +348,7 @@ export function inspectEvidenceDocument(
         scope: recordScope,
         environment: recordEnvironment,
         detectorRuleId: `claim.external.${kind}@1`,
-        detectorManifestVersion: "3.0.0-1",
+        detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
         rawValue: text(record.modelId, `${label}.modelId`, 256),
         modelId: text(record.modelId, `${label}.modelId`, 256),
         servingPlatform: platform(record.servingPlatform, `${label}.servingPlatform`),

@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DETECTOR_MANIFEST_VERSION } from "../../src/detection/manifest.ts";
 import type { DetectionResult } from "../../src/detection/detectors.ts";
 import type { ResolvedEventSelection } from "../../src/repository/event.ts";
 import { loadV3FeedJson, type LoadedV3Feed } from "../../src/lifecycle/feed.ts";
@@ -188,7 +189,7 @@ function evidence(evidenceId = "repository:model:gpt-old"): EvidenceFact {
     scope: "application",
     environment: "production",
     detectorRuleId: "source.ts.openai.request-model@1",
-    detectorManifestVersion: "3.0.0-1",
+    detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
     rawValue: "gpt-old",
     modelId: "gpt-old",
     servingPlatform: "openai",

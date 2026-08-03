@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { DETECTOR_MANIFEST_VERSION } from "../../src/detection/manifest.ts";
 import { evaluateEvidence } from "../../src/policy/evaluate.ts";
 import { buildV3FeedIndex } from "../../src/lifecycle/feed.ts";
 import { defaultPolicy } from "../../src/policy/policy.ts";
@@ -34,7 +35,7 @@ function fact(overrides: Partial<EvidenceFact> = {}): EvidenceFact {
     scope: "application",
     environment: "unknown",
     detectorRuleId: "source.ts.openai.request-model@1",
-    detectorManifestVersion: "3.0.0-1",
+    detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
     rawValue: "gpt-old",
     modelId: "gpt-old",
     servingPlatform: "openai",
