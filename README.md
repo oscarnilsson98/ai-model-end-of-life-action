@@ -124,6 +124,7 @@ Which combinations pass and which fail:
 | Partial scan without enforcement | Succeeds with a warning |
 | Definite policy breach | Fails |
 | Partial scan with enforcement and `allowPartial: false` | Fails closed |
+| Upstream feed older than `max-feed-age-days` | Partial: succeeds with a warning, or fails closed under enforcement |
 | Feed, trusted schema, target snapshot, resource-budget, or internal failure | Fails with `unknown + failed` |
 | Required PR base unavailable | Fails with `unknown + partial` |
 
@@ -187,6 +188,7 @@ All inputs are optional.
 | `warn-within-days` | Checked-in policy, otherwise `180` | Warning horizon in UTC calendar days. |
 | `fail-within-days` | Unset | Enables enforcement for definite eligible evidence inside the horizon. |
 | `allow-partial` | Checked-in policy, otherwise `false` | Permits enforced partial scans to succeed unless they contain a definite breach. |
+| `max-feed-age-days` | `30` | Upstream freshness horizon. An older lifecycle feed makes `scan-status` partial. Set to `""` to disable. |
 | `slack-webhook` | Unset | HTTPS Slack incoming webhook used only for commit targets on `schedule`, `workflow_dispatch`, or `push`; every other event is skipped. |
 | `notification-failure-mode` | `fail` | `fail` or `warn` when configured delivery fails. |
 
@@ -204,6 +206,7 @@ All outputs are strings; JSON values are serialized strings.
 | `exit-reason` | Highest-precedence reason for the final process exit. |
 | `target-kind` | Exact Git target selection used by the action. |
 | `evidence-health` | Worst checked-in claim freshness state. |
+| `feed-generated-at`, `feed-age-days` | When upstream produced the lifecycle feed, and how many whole days ago. Both are empty when the feed was unavailable. |
 | `report-path` | Runner-local path to the complete JSON report. |
 | `output-truncated` | Whether large detail outputs were compacted. |
 | `notification-status`, `notification-reason` | Independent Slack delivery result. |
@@ -276,6 +279,14 @@ The current public upstream feed is not typed. The action wraps it with a releas
 The adapter carries the exact reviewed source-pair registry. It strictly validates every upstream row, but only reviewed pairs enter the normalized lifecycle feed. New source rows are quarantined as unclassified diagnostics rather than guessed from identifier shape; missing reviewed pairs are also reported. An addition, removal, or rename therefore makes `scan-status: partial`: warning-only runs stay green with a visible diagnostic, while enforcement fails closed unless `allowPartial: true` is set. A later action release must review a new pair before it can gain model or non-model authority.
 
 Malformed rows, duplicate pairs, unknown fields or providers, invalid adapter metadata, and schema failures still produce `unknown + failed`. If no reviewed records remain after quarantine, the non-empty feed contract also fails.
+
+### Upstream freshness
+
+A feed that stops updating does not fail: it keeps serving a well-formed document that answers every lookup with a permanent all-clear. Nothing downstream can distinguish that from genuinely having no deprecations, so the action measures the feed itself.
+
+Each run compares the feed's production instant against `max-feed-age-days` (default 30). Beyond that horizon the run emits a `feed-stale` diagnostic and sets `scan-status: partial` — warning-only runs stay green with a visible signal, while enforced runs fail closed under the existing `allowPartial` rules. Set `max-feed-age-days: ""` to disable the guard, for example when pinning a deliberately frozen mirror.
+
+The instant is the feed's `generatedAt`: a typed producer states it directly, and the reviewed adapter derives it from the newest reviewed `scraped_at` in the untyped upstream feed. Both are published every run as `feed-generated-at` and `feed-age-days`, so an external monitor can alert on upstream silence directly instead of inferring it.
 
 Every run publishes the exact source, normalized feed, active-record, adapter-manifest, and detector-manifest identities.
 

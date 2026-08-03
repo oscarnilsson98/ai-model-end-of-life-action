@@ -56,6 +56,34 @@ const FEED: LoadedV3Feed = loadV3FeedJson(
   }),
 );
 
+/** Same feed contents, produced at an arbitrary earlier instant. */
+function feedGeneratedAt(generatedAt: string): LoadedV3Feed {
+  return loadV3FeedJson(
+    JSON.stringify({
+      schemaVersion: 3,
+      adapter: { id: "fixture", version: "1", sourceSha256: "d".repeat(64) },
+      generatedAt,
+      records: [
+        {
+          recordId: "openai-gpt-old",
+          servingPlatform: "openai",
+          primarySourceUrl: "https://example.com/openai/gpt-old",
+          supersedesRecordIds: [],
+          recordKind: "model",
+          modelId: "gpt-old",
+          literalScanEligible: true,
+          lifecycleStatus: "shutdown-scheduled",
+          shutdownDate: "2026-08-20",
+          replacementModels: [],
+        },
+      ],
+    }),
+  );
+}
+
+/** Frozen 62 days before NOW: well past the 30-day default horizon. */
+const STALE_FEED: LoadedV3Feed = feedGeneratedAt("2026-06-01T00:00:00Z");
+
 const PARTIAL_FEED: LoadedV3Feed = {
   ...FEED,
   index: {
@@ -548,6 +576,102 @@ describe("v3 production orchestration", () => {
         "No unreviewed row was normalized into lifecycle authority",
       );
     }
+  });
+
+  test("degrades coverage when the upstream feed stopped updating", async () => {
+    const fixture = fixtureEnvironment();
+    const report = await run(dependencies(fixture, { loadFeed: async () => STALE_FEED }));
+    expect(report).toMatchObject({
+      // Warning-only runs stay green, but the all-clear is no longer presented as complete.
+      result: "no-actionable-risk",
+      scanStatus: "partial",
+      exitReason: "none",
+    });
+    expect(report.diagnostics).toEqual([
+      expect.objectContaining({ code: "feed-stale", severity: "partial" }),
+    ]);
+    expect(report.diagnostics[0]?.message).toContain("2026-06-01T00:00:00Z");
+    expect(report.diagnostics[0]?.message).toContain("30 day(s)");
+    expect(report.feed).toMatchObject({ generatedAt: "2026-06-01T00:00:00Z", ageDays: 62 });
+    expect(readFileSync(fixture.summaryPath, "utf8")).toContain(
+      "A feed that stopped updating reports a permanent all-clear",
+    );
+  });
+
+  test("fails an enforced run closed on a stale feed unless partial is allowed", async () => {
+    const enforced = fixtureEnvironment({ "INPUT_FAIL-WITHIN-DAYS": "30" });
+    const failed = await rejectedReport(
+      run(dependencies(enforced, { loadFeed: async () => STALE_FEED })),
+    );
+    expect(failed).toMatchObject({
+      scanStatus: "partial",
+      exitReason: "partial-disallowed",
+    });
+
+    const permitted = fixtureEnvironment({
+      "INPUT_FAIL-WITHIN-DAYS": "30",
+      "INPUT_ALLOW-PARTIAL": "true",
+    });
+    const tolerated = await run(
+      dependencies(permitted, { loadFeed: async () => STALE_FEED }),
+    );
+    expect(tolerated).toMatchObject({ scanStatus: "partial", exitReason: "none" });
+  });
+
+  test("honours a configured feed-age horizon in both directions", async () => {
+    const cases = [
+      { horizon: "90", scanStatus: "complete", stale: false },
+      { horizon: "61", scanStatus: "partial", stale: true },
+      { horizon: "62", scanStatus: "complete", stale: false },
+      // An emptied input disables the guard outright, matching the v1 escape hatch.
+      { horizon: "", scanStatus: "complete", stale: false },
+      { horizon: "0", scanStatus: "partial", stale: true },
+    ] as const;
+
+    for (const testCase of cases) {
+      const fixture = fixtureEnvironment({ "INPUT_MAX-FEED-AGE-DAYS": testCase.horizon });
+      const report = await run(dependencies(fixture, { loadFeed: async () => STALE_FEED }));
+      expect(report.scanStatus).toBe(testCase.scanStatus);
+      expect(
+        report.diagnostics.some((diagnostic) => diagnostic.code === "feed-stale"),
+      ).toBe(testCase.stale);
+    }
+  });
+
+  test("publishes feed freshness as an output consumers can alert on", async () => {
+    const fresh = fixtureEnvironment();
+    await run(dependencies(fresh));
+    expect(outputs(fresh.outputPath)).toMatchObject({
+      "feed-generated-at": "2026-08-02T00:00:00Z",
+      "feed-age-days": "0",
+      "scan-status": "complete",
+    });
+
+    const stale = fixtureEnvironment();
+    await run(dependencies(stale, { loadFeed: async () => STALE_FEED }));
+    expect(outputs(stale.outputPath)).toMatchObject({
+      "feed-generated-at": "2026-06-01T00:00:00Z",
+      "feed-age-days": "62",
+      "scan-status": "partial",
+    });
+  });
+
+  test("leaves feed freshness outputs empty when the feed never loaded", async () => {
+    const fixture = fixtureEnvironment();
+    await rejectedReport(
+      run(
+        dependencies(fixture, {
+          loadFeed: async () => {
+            throw new Error("fixture feed unavailable");
+          },
+        }),
+      ),
+    );
+    expect(outputs(fixture.outputPath)).toMatchObject({
+      "feed-generated-at": "",
+      "feed-age-days": "",
+      "scan-status": "failed",
+    });
   });
 
   test("publishes unknown plus failed when the feed cannot be loaded", async () => {

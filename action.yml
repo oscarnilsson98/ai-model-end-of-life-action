@@ -16,6 +16,10 @@ inputs:
   allow-partial:
     description: "Allow an enforced run to succeed when declared assessment coverage is partial. Omit to use checked-in policy or false."
     required: false
+  max-feed-age-days:
+    description: "Upstream freshness horizon. A lifecycle feed that stopped updating reports a permanent all-clear, so an older feed makes `scan-status` partial. Set to an empty string to disable the guard."
+    required: false
+    default: "30"
   slack-webhook:
     description: "Optional HTTPS Slack incoming webhook for trusted scheduled, manual, and push snapshots. Never sent on pull requests or merge groups."
     required: false
@@ -63,6 +67,10 @@ outputs:
     description: "SHA-256 of active lifecycle records after explicit supersession."
   feed-adapter-manifest-sha256:
     description: "SHA-256 of the reviewed adapter manifest used for the upstream feed."
+  feed-generated-at:
+    description: "RFC 3339 instant the upstream lifecycle feed was produced; empty when the feed was unavailable."
+  feed-age-days:
+    description: "Whole days between feed production and this run; empty when the feed was unavailable."
   detector-manifest-sha256:
     description: "SHA-256 of the versioned detector/rule manifest."
   evidence-fingerprint:

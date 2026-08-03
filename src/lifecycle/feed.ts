@@ -445,6 +445,23 @@ export function isRfc3339UtcInstant(value: string): boolean {
   return isDateOnly(`${match[1]}-${match[2]}-${match[3]}`);
 }
 
+const MILLISECONDS_PER_DAY = 86_400_000;
+
+/**
+ * Whole days between feed production and now. `generatedAt` is the one freshness
+ * signal both feed paths carry: a typed producer states it directly, and the reviewed
+ * legacy adapter derives it from the newest reviewed `scraped_at`. Clock skew that puts
+ * the feed marginally ahead of the runner clamps to zero rather than reporting a
+ * negative age; the adapter already rejects anything more than a day ahead.
+ */
+export function feedAgeInDays(generatedAt: string, nowMs: number): number {
+  const generatedMs = Date.parse(generatedAt);
+  if (!Number.isFinite(generatedMs)) {
+    throw new Error(`Cannot measure feed age from generatedAt ${JSON.stringify(generatedAt)}.`);
+  }
+  return Math.max(0, Math.floor((nowMs - generatedMs) / MILLISECONDS_PER_DAY));
+}
+
 function dateField(
   object: Record<string, unknown>,
   field: string,

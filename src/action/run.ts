@@ -9,7 +9,7 @@ import { detectSnapshot, type DetectionResult } from "../detection/detectors.ts"
 import { evaluateEvidence } from "../policy/evaluate.ts";
 import { resolveEventSelection, type ResolvedEventSelection } from "../repository/event.ts";
 import { loadLifecycleFeed } from "../lifecycle/feed-source.ts";
-import type { LoadedV3Feed } from "../lifecycle/feed.ts";
+import { feedAgeInDays, type LoadedV3Feed } from "../lifecycle/feed.ts";
 import {
   readGitTreeSnapshot,
   GitTreeSnapshotError,
@@ -55,6 +55,7 @@ import {
   scanFingerprint,
 } from "../shared/status.ts";
 import { compact } from "../shared/text.ts";
+import { DEFAULT_MAX_FEED_AGE_DAYS } from "../shared/limits.ts";
 import type {
   ActionInputs,
   AssessmentReport,
@@ -77,6 +78,7 @@ const DEFAULT_INPUTS: ActionInputs = {
   warnWithinDays: null,
   failWithinDays: null,
   allowPartial: null,
+  maxFeedAgeDays: DEFAULT_MAX_FEED_AGE_DAYS,
   notificationFailureMode: "fail",
 };
 
@@ -165,11 +167,59 @@ function unavailableFeed(): FeedIdentity {
     normalizedFeedSha256: UNAVAILABLE_SHA256,
     activeRecordsSha256: UNAVAILABLE_SHA256,
     feedAdapterManifestSha256: UNAVAILABLE_SHA256,
+    generatedAt: "",
+    ageDays: null,
   };
 }
 
-function feedDiagnostics(feed: LoadedV3Feed): CoverageDiagnostic[] {
-  return feed.index.diagnostics.map((diagnostic): CoverageDiagnostic => {
+type FeedFreshness = {
+  readonly generatedAt: string;
+  readonly ageDays: number;
+  readonly maxAgeDays: number | null;
+  readonly stale: boolean;
+};
+
+/**
+ * Measure the loaded feed against the configured freshness horizon. A frozen upstream keeps
+ * serving a well-formed document, so nothing else in the pipeline can tell the difference
+ * between "nothing is deprecated" and "nobody has looked since May".
+ */
+function feedFreshness(
+  feed: LoadedV3Feed,
+  maxAgeDays: number | null,
+  nowMs: number,
+): FeedFreshness {
+  const generatedAt = feed.index.envelope.generatedAt;
+  const ageDays = feedAgeInDays(generatedAt, nowMs);
+  return {
+    generatedAt,
+    ageDays,
+    maxAgeDays,
+    stale: maxAgeDays !== null && ageDays > maxAgeDays,
+  };
+}
+
+function feedIdentity(feed: LoadedV3Feed, freshness: FeedFreshness): FeedIdentity {
+  return { ...feed.digests, generatedAt: freshness.generatedAt, ageDays: freshness.ageDays };
+}
+
+function feedDiagnostics(
+  feed: LoadedV3Feed,
+  freshness: FeedFreshness,
+): CoverageDiagnostic[] {
+  const staleness: CoverageDiagnostic[] = freshness.stale
+    ? [
+        {
+          code: "feed-stale",
+          // Deliberately states the production instant and the horizon rather than the elapsed
+          // day count: a frozen feed then yields a stable diagnostic, so scan-fingerprint does
+          // not churn daily while the outage persists. The live age is a published output.
+          message: `The upstream lifecycle feed was generated at ${freshness.generatedAt}, which is older than the configured max-feed-age-days horizon of ${String(freshness.maxAgeDays)} day(s). A feed that stopped updating reports a permanent all-clear, so lifecycle coverage is not trustworthy.`,
+          severity: "partial",
+        },
+      ]
+    : [];
+  const upstream = feed.index.diagnostics.map((diagnostic): CoverageDiagnostic => {
     if (diagnostic.kind === "feed-conflict") {
       return {
         code: diagnostic.kind,
@@ -188,15 +238,18 @@ function feedDiagnostics(feed: LoadedV3Feed): CoverageDiagnostic[] {
       severity: "partial",
     };
   });
+  return [...upstream, ...staleness];
 }
 
 function applyFeedCoverage(
   detection: DetectionResult,
   feed: LoadedV3Feed,
+  freshness: FeedFreshness,
 ): DetectionResult {
-  if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change")) {
-    return detection;
-  }
+  const degraded =
+    freshness.stale ||
+    feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change");
+  if (!degraded) return detection;
   return detection.scanStatus === "partial"
     ? detection
     : { ...detection, scanStatus: "partial" };
@@ -358,6 +411,7 @@ function diagnosticTargetEvaluation(input: {
   detection: DetectionResult;
   claims: SnapshotClaimsInspection;
   feed: LoadedV3Feed;
+  freshness: FeedFreshness;
   inputs: ActionInputs;
   now: number;
   extraDiagnostics: readonly CoverageDiagnostic[];
@@ -385,7 +439,7 @@ function diagnosticTargetEvaluation(input: {
         ...input.extraDiagnostics,
         ...input.detection.diagnostics,
         ...claimDiagnostics,
-        ...feedDiagnostics(input.feed),
+        ...feedDiagnostics(input.feed, input.freshness),
       ],
     }),
     policy,
@@ -405,6 +459,7 @@ async function assess(
   let inputs = DEFAULT_INPUTS;
   let resolvedEvent: ResolvedEventSelection | undefined;
   let feed: LoadedV3Feed | undefined;
+  let freshness: FeedFreshness | undefined;
   try {
     const rawWebhook = getInput("slack-webhook", environment);
     if (rawWebhook !== undefined && rawWebhook !== "") maskSecret(rawWebhook, log);
@@ -423,6 +478,7 @@ async function assess(
 
     stage = "feed";
     feed = await (dependencies.loadFeed?.() ?? loadLifecycleFeed());
+    freshness = feedFreshness(feed, inputs.maxFeedAgeDays, evaluatedAtMs);
 
     const readSnapshot =
       dependencies.readSnapshot ??
@@ -435,7 +491,11 @@ async function assess(
     stage = "target-snapshot";
     const targetSnapshot = readSnapshot(repositoryPath, resolvedEvent.selection.targetOid);
     stage = "target-detection";
-    const targetDetection = applyFeedCoverage(detector(targetSnapshot, feed.index), feed);
+    const targetDetection = applyFeedCoverage(
+      detector(targetSnapshot, feed.index),
+      feed,
+      freshness,
+    );
     const targetPolicy = policyInspector(targetSnapshot);
 
     if (resolvedEvent.comparisonStatus === "unavailable") {
@@ -449,6 +509,7 @@ async function assess(
         detection: targetDetection,
         claims: targetClaims,
         feed,
+        freshness,
         inputs,
         now: evaluatedAtMs,
         extraDiagnostics: resolvedEvent.diagnostics,
@@ -466,7 +527,7 @@ async function assess(
           policyDiff: targetClaims.policy.valid
             ? []
             : ["Target policy/configuration is invalid and non-authoritative."],
-          feed: feed.digests,
+          feed: feedIdentity(feed, freshness),
           evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims]),
           reportPath: localReportPath,
         }),
@@ -486,6 +547,7 @@ async function assess(
         detection: targetDetection,
         claims: targetClaims,
         feed,
+        freshness,
         inputs,
         now: evaluatedAtMs,
         extraDiagnostics: resolvedEvent.diagnostics,
@@ -503,9 +565,9 @@ async function assess(
             diagnostics: [
               ...targetClaims.diagnostics,
               ...targetDetection.diagnostics,
-              ...feedDiagnostics(feed),
+              ...feedDiagnostics(feed, freshness),
             ],
-            feed: feed.digests,
+            feed: feedIdentity(feed, freshness),
             evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims]),
             reportPath: localReportPath,
           }),
@@ -528,7 +590,7 @@ async function assess(
           event: reportEvent(resolvedEvent),
           evaluation: diagnostic.evaluation,
           diagnostics: diagnostic.evaluation.diagnostics,
-          feed: feed.digests,
+          feed: feedIdentity(feed, freshness),
           evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims]),
           reportPath: localReportPath,
         }),
@@ -564,6 +626,7 @@ async function assess(
           detection: targetDetection,
           claims: targetClaims,
           feed,
+          freshness,
           inputs,
           now: evaluatedAtMs,
           extraDiagnostics: unavailableDiagnostics,
@@ -578,7 +641,7 @@ async function assess(
             event: reportEvent(resolvedEvent),
             evaluation: diagnostic.evaluation,
             diagnostics: diagnostic.evaluation.diagnostics,
-            feed: feed.digests,
+            feed: feedIdentity(feed, freshness),
             evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims]),
             reportPath: localReportPath,
           }),
@@ -610,7 +673,11 @@ async function assess(
       additionalEvidencePatterns: basePolicy.policy.usageEvidenceFiles,
     });
     stage = "base-detection";
-    const baseDetection = applyFeedCoverage(detector(baseSnapshot, feed.index), feed);
+    const baseDetection = applyFeedCoverage(
+      detector(baseSnapshot, feed.index),
+      feed,
+      freshness,
+    );
     stage = "comparison-evaluation";
     const comparison = evaluateComparison({
       baseDetection,
@@ -625,7 +692,7 @@ async function assess(
       ...resolvedEvent.diagnostics,
       ...comparison.evaluation.diagnostics,
       ...comparison.baseline.diagnostics,
-      ...feedDiagnostics(feed),
+      ...feedDiagnostics(feed, freshness),
     ];
     const exitReason = decisionFor(
       comparison.result,
@@ -647,7 +714,7 @@ async function assess(
         evaluation: comparison.evaluation,
         diagnostics,
         policyDiff: comparison.policyDiff,
-        feed: feed.digests,
+        feed: feedIdentity(feed, freshness),
         evidenceSources: reportEvidenceSources(
           comparison.evaluation,
           [targetClaims],
@@ -669,7 +736,9 @@ async function assess(
       ...(resolvedEvent === undefined
         ? {}
         : { comparisonStatus: resolvedEvent.comparisonStatus }),
-      ...(feed === undefined ? {} : { feed: feed.digests }),
+      ...(feed === undefined || freshness === undefined
+        ? {}
+        : { feed: feedIdentity(feed, freshness) }),
       inputs,
       ...(resolvedEvent === undefined ? {} : { diagnostics: resolvedEvent.diagnostics }),
     });

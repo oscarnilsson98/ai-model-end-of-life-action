@@ -202,8 +202,12 @@ export function renderSummary(
       "",
     );
   }
+  const feedFreshness =
+    report.feed.generatedAt === "" || report.feed.ageDays === null
+      ? "unavailable"
+      : `${escapeHtml(report.feed.generatedAt)} (${report.feed.ageDays}d old)`;
   lines.push(
-    `Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code>`,
+    `Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code> · generated ${feedFreshness}`,
     `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact(report.reportPath, 500))}</code>`,
     "",
   );
@@ -328,6 +332,8 @@ export function publishCoreOutputs(report: AssessmentReport, environment: Enviro
     "normalized-feed-sha256": report.feed.normalizedFeedSha256,
     "active-records-sha256": report.feed.activeRecordsSha256,
     "feed-adapter-manifest-sha256": report.feed.feedAdapterManifestSha256,
+    "feed-generated-at": report.feed.generatedAt,
+    "feed-age-days": report.feed.ageDays === null ? "" : String(report.feed.ageDays),
     "detector-manifest-sha256": report.detectorManifestSha256,
     "evidence-fingerprint": evidenceFingerprint,
     "finding-fingerprint": findingFingerprint,
