@@ -74,6 +74,48 @@ export const DETECTOR_QUALIFICATION: readonly DetectorQualificationEntry[] =
       version: "4.79.0",
       sourceUrl: "https://registry.terraform.io/providers/hashicorp/azurerm/4.79.0",
     }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "ai",
+      version: "7.0.49",
+      sourceUrl: "https://www.npmjs.com/package/ai/v/7.0.49",
+    }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "@ai-sdk/openai",
+      version: "4.0.27",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/openai/v/4.0.27",
+    }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "@ai-sdk/anthropic",
+      version: "4.0.27",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/anthropic/v/4.0.27",
+    }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "@ai-sdk/google",
+      version: "4.0.31",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/google/v/4.0.31",
+    }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "@ai-sdk/google-vertex",
+      version: "5.0.38",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/google-vertex/v/5.0.38",
+    }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "@ai-sdk/azure",
+      version: "4.0.28",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/azure/v/4.0.28",
+    }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "@ai-sdk/amazon-bedrock",
+      version: "5.0.40",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/amazon-bedrock/v/5.0.40",
+    }),
   ]);
 
 export const DETECTOR_RULES: readonly DetectorRuleManifestEntry[] = Object.freeze([
@@ -134,6 +176,45 @@ export const DETECTOR_RULES: readonly DetectorRuleManifestEntry[] = Object.freez
   {
     ruleId: "source.py.aws-bedrock.converse-model@1",
     languages: ["python"],
+    confidence: "high",
+    policyEligible: false,
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.openai-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true,
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.anthropic-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true,
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.google-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true,
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.google-vertex-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true,
+  },
+  {
+    // Azure names a deployment, not an exact model ID, exactly as in the
+    // official Azure client and Terraform rules.
+    ruleId: "source.ts.vercel-ai-sdk.azure-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: false,
+  },
+  {
+    // Bedrock selectors are polymorphic, matching the official Bedrock rules.
+    ruleId: "source.ts.vercel-ai-sdk.amazon-bedrock-model@1",
+    languages: ["javascript", "typescript"],
     confidence: "high",
     policyEligible: false,
   },

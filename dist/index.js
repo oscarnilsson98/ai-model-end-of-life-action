@@ -8007,6 +8007,48 @@ var DETECTOR_QUALIFICATION = Object.freeze([
     package: "hashicorp/azurerm",
     version: "4.79.0",
     sourceUrl: "https://registry.terraform.io/providers/hashicorp/azurerm/4.79.0"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "ai",
+    version: "7.0.49",
+    sourceUrl: "https://www.npmjs.com/package/ai/v/7.0.49"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "@ai-sdk/openai",
+    version: "4.0.27",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/openai/v/4.0.27"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "@ai-sdk/anthropic",
+    version: "4.0.27",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/anthropic/v/4.0.27"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "@ai-sdk/google",
+    version: "4.0.31",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/google/v/4.0.31"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "@ai-sdk/google-vertex",
+    version: "5.0.38",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/google-vertex/v/5.0.38"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "@ai-sdk/azure",
+    version: "4.0.28",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/azure/v/4.0.28"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "@ai-sdk/amazon-bedrock",
+    version: "5.0.40",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/amazon-bedrock/v/5.0.40"
   })
 ]);
 var DETECTOR_RULES = Object.freeze([
@@ -8067,6 +8109,42 @@ var DETECTOR_RULES = Object.freeze([
   {
     ruleId: "source.py.aws-bedrock.converse-model@1",
     languages: ["python"],
+    confidence: "high",
+    policyEligible: false
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.openai-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.anthropic-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.google-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.google-vertex-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.azure-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: false
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.amazon-bedrock-model@1",
+    languages: ["javascript", "typescript"],
     confidence: "high",
     policyEligible: false
   },
@@ -8659,6 +8737,12 @@ var TRUSTED_RESOLUTION_POLICY_RULES = new Set([
   "source.ts.aws-bedrock.converse-model@1",
   "source.py.aws-bedrock.invoke-model@1",
   "source.py.aws-bedrock.converse-model@1",
+  "source.ts.vercel-ai-sdk.openai-model@1",
+  "source.ts.vercel-ai-sdk.anthropic-model@1",
+  "source.ts.vercel-ai-sdk.google-model@1",
+  "source.ts.vercel-ai-sdk.google-vertex-model@1",
+  "source.ts.vercel-ai-sdk.azure-model@1",
+  "source.ts.vercel-ai-sdk.amazon-bedrock-model@1",
   "deploy.hcl.azure.cognitive-deployment-model@1"
 ]);
 function compareText3(left, right) {
@@ -10203,32 +10287,39 @@ var UNSUPPORTED_INTEGRATION_FRAMEWORKS = Object.freeze([
   Object.freeze({
     frameworkId: "vercel-ai-sdk",
     displayName: "The Vercel AI SDK",
-    modulePrefixes: Object.freeze(["ai", "@ai-sdk"])
+    modulePrefixes: Object.freeze(["ai", "@ai-sdk"]),
+    semanticSupport: "partial",
+    rulePrefix: "source.ts.vercel-ai-sdk."
   }),
   Object.freeze({
     frameworkId: "langchain",
     displayName: "LangChain",
-    modulePrefixes: Object.freeze(["langchain", "@langchain"])
+    modulePrefixes: Object.freeze(["langchain", "@langchain"]),
+    semanticSupport: "none"
   }),
   Object.freeze({
     frameworkId: "llamaindex",
     displayName: "LlamaIndex",
-    modulePrefixes: Object.freeze(["llamaindex", "llama_index"])
+    modulePrefixes: Object.freeze(["llamaindex", "llama_index"]),
+    semanticSupport: "none"
   }),
   Object.freeze({
     frameworkId: "litellm",
     displayName: "LiteLLM",
-    modulePrefixes: Object.freeze(["litellm"])
+    modulePrefixes: Object.freeze(["litellm"]),
+    semanticSupport: "none"
   }),
   Object.freeze({
     frameworkId: "google-generative-ai-legacy",
     displayName: "The legacy Google Generative AI SDK",
-    modulePrefixes: Object.freeze(["@google/generative-ai", "google.generativeai"])
+    modulePrefixes: Object.freeze(["@google/generative-ai", "google.generativeai"]),
+    semanticSupport: "none"
   }),
   Object.freeze({
     frameworkId: "vertex-ai-generative-legacy",
     displayName: "The retired Vertex AI generative SDK module",
-    modulePrefixes: Object.freeze(["vertexai", "@google-cloud/vertexai"])
+    modulePrefixes: Object.freeze(["vertexai", "@google-cloud/vertexai"]),
+    semanticSupport: "none"
   })
 ]);
 function unsupportedFrameworkForModule(specifier) {
@@ -10241,12 +10332,17 @@ function unsupportedFrameworkForModule(specifier) {
   }
   return;
 }
-function unsupportedFrameworkIds(specifiers) {
+function unsupportedFrameworkIds(specifiers, facts) {
   const ids = new Set;
   for (const specifier of specifiers) {
     const framework = unsupportedFrameworkForModule(specifier);
-    if (framework !== undefined)
-      ids.add(framework.frameworkId);
+    if (framework === undefined)
+      continue;
+    const prefix = framework.rulePrefix;
+    if (framework.semanticSupport === "partial" && prefix !== undefined && facts.some((fact) => fact.detectorRuleId.startsWith(prefix))) {
+      continue;
+    }
+    ids.add(framework.frameworkId);
   }
   return [...ids];
 }
@@ -10272,6 +10368,90 @@ var AWS_COMMANDS = new Set([
   "ConverseCommand",
   "ConverseStreamCommand"
 ]);
+var AI_SDK_PROVIDERS = Object.freeze([
+  Object.freeze({
+    providerId: "openai",
+    module: "@ai-sdk/openai",
+    integration: "openai",
+    platform: "openai",
+    selectorKind: "model-id",
+    instanceNames: Object.freeze(["openai"]),
+    factoryNames: Object.freeze(["createOpenAI"])
+  }),
+  Object.freeze({
+    providerId: "azure",
+    module: "@ai-sdk/azure",
+    integration: "openai",
+    platform: "azure",
+    selectorKind: "deployment-name",
+    instanceNames: Object.freeze(["azure"]),
+    factoryNames: Object.freeze(["createAzure"])
+  }),
+  Object.freeze({
+    providerId: "anthropic",
+    module: "@ai-sdk/anthropic",
+    integration: "anthropic",
+    platform: "anthropic",
+    selectorKind: "model-id",
+    instanceNames: Object.freeze(["anthropic"]),
+    factoryNames: Object.freeze(["createAnthropic"])
+  }),
+  Object.freeze({
+    providerId: "google",
+    module: "@ai-sdk/google",
+    integration: "google",
+    platform: "google",
+    selectorKind: "model-id",
+    instanceNames: Object.freeze(["google"]),
+    factoryNames: Object.freeze(["createGoogle", "createGoogleGenerativeAI"])
+  }),
+  Object.freeze({
+    providerId: "google-vertex",
+    module: "@ai-sdk/google-vertex",
+    integration: "google",
+    platform: "google-vertex",
+    selectorKind: "model-id",
+    instanceNames: Object.freeze(["googleVertex", "vertex"]),
+    factoryNames: Object.freeze(["createGoogleVertex", "createVertex"])
+  }),
+  Object.freeze({
+    providerId: "amazon-bedrock",
+    module: "@ai-sdk/amazon-bedrock",
+    integration: "aws-bedrock",
+    platform: "aws-bedrock",
+    selectorKind: "polymorphic",
+    instanceNames: Object.freeze(["amazonBedrock", "bedrock"]),
+    factoryNames: Object.freeze(["createAmazonBedrock"])
+  })
+]);
+var AI_SDK_MODEL_METHODS = new Set([
+  "languageModel",
+  "chat",
+  "messages",
+  "responses",
+  "completion",
+  "deepseek",
+  "generativeAI",
+  "interactions",
+  "embedding",
+  "embeddingModel",
+  "textEmbedding",
+  "textEmbeddingModel",
+  "image",
+  "imageModel",
+  "video",
+  "videoModel",
+  "speech",
+  "speechModel",
+  "speechTranslationModel",
+  "transcription",
+  "transcriptionModel",
+  "translation",
+  "reranking",
+  "rerankingModel",
+  "experimental_realtime"
+]);
+var AI_SDK_PROVIDER_BY_MODULE = new Map(AI_SDK_PROVIDERS.map((provider) => [provider.module, provider]));
 function importProvenance(tokens, language) {
   const constructors = new Map;
   const awsCommands = new Map;
@@ -10281,7 +10461,19 @@ function importProvenance(tokens, language) {
   const pythonGetenvFunctions = new Set;
   const pythonEnvironObjects = new Set;
   const moduleSpecifiers = new Set;
+  const aiSdkInstances = new Map;
+  const aiSdkFactories = new Map;
   const conflicted = new Set;
+  const addAiSdkImport = (moduleName, canonicalName, localName) => {
+    const provider = AI_SDK_PROVIDER_BY_MODULE.get(moduleName);
+    if (provider === undefined)
+      return;
+    if (provider.instanceNames.includes(canonicalName)) {
+      aiSdkInstances.set(localName, provider);
+    } else if (provider.factoryNames.includes(canonicalName)) {
+      aiSdkFactories.set(localName, provider);
+    }
+  };
   const addConstructor = (moduleName, canonicalName, localName) => {
     const integration = CONSTRUCTORS_BY_MODULE[moduleName]?.[canonicalName];
     if (integration === undefined || conflicted.has(localName))
@@ -10296,6 +10488,7 @@ function importProvenance(tokens, language) {
   };
   const addNamedImport = (moduleName, canonicalName, localName) => {
     addConstructor(moduleName, canonicalName, localName);
+    addAiSdkImport(moduleName, canonicalName, localName);
     if (moduleName === "@aws-sdk/client-bedrock-runtime" && AWS_COMMANDS.has(canonicalName)) {
       awsCommands.set(localName, canonicalName);
     }
@@ -10436,7 +10629,9 @@ function importProvenance(tokens, language) {
     ...boto3Namespaces,
     ...pythonOsNamespaces,
     ...pythonGetenvFunctions,
-    ...pythonEnvironObjects
+    ...pythonEnvironObjects,
+    ...aiSdkInstances.keys(),
+    ...aiSdkFactories.keys()
   ]);
   const shadowed = new Set;
   for (const name of functionParameterNames(tokens, language)) {
@@ -10490,6 +10685,8 @@ function importProvenance(tokens, language) {
     pythonOsNamespaces.delete(name);
     pythonGetenvFunctions.delete(name);
     pythonEnvironObjects.delete(name);
+    aiSdkInstances.delete(name);
+    aiSdkFactories.delete(name);
   }
   return {
     constructors,
@@ -10499,7 +10696,9 @@ function importProvenance(tokens, language) {
     pythonOsNamespaces,
     pythonGetenvFunctions,
     pythonEnvironObjects,
-    moduleSpecifiers
+    moduleSpecifiers,
+    aiSdkInstances,
+    aiSdkFactories
   };
 }
 function chainBefore(tokens, openIndex) {
@@ -11108,6 +11307,151 @@ function directSemanticLiteralSpan(token, resolved) {
     endOffset: startOffset + literalContent.length
   };
 }
+function aiSdkFactoryPlatform(provider, arguments_) {
+  const endpoint = endpointSignal(arguments_);
+  if (!endpoint.safe)
+    return { platformResolution: "unknown", endpointSafe: false };
+  if (!endpoint.present || endpoint.platform === provider.platform) {
+    return {
+      servingPlatform: provider.platform,
+      platformResolution: "resolved",
+      endpointSafe: true
+    };
+  }
+  return { platformResolution: "ambiguous", endpointSafe: false };
+}
+function aiSdkProviderBindings(tokens, imports) {
+  const bindings = new Map;
+  const conflicted = new Set;
+  const setBinding = (binding) => {
+    if (conflicted.has(binding.variable))
+      return;
+    const existing = bindings.get(binding.variable);
+    if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(binding)) {
+      bindings.delete(binding.variable);
+      conflicted.add(binding.variable);
+      return;
+    }
+    bindings.set(binding.variable, binding);
+  };
+  for (const [variable, provider] of imports.aiSdkInstances) {
+    setBinding({
+      variable,
+      provider,
+      servingPlatform: provider.platform,
+      platformResolution: "resolved",
+      endpointSafe: true
+    });
+  }
+  for (let index = 0;index < tokens.length; index += 1) {
+    if (tokens[index]?.kind !== "identifier")
+      continue;
+    const provider = imports.aiSdkFactories.get(tokens[index]?.value ?? "");
+    if (provider === undefined || structuralValue(tokens[index + 1]) !== "(")
+      continue;
+    if (tokens[index - 1]?.value !== "=" || tokens[index - 2]?.kind !== "identifier")
+      continue;
+    const close = matchingIndex(tokens, index + 1, "(", ")");
+    const arguments_ = close === null ? [] : tokens.slice(index + 2, close);
+    setBinding({
+      variable: tokens[index - 2]?.value,
+      provider,
+      ...aiSdkFactoryPlatform(provider, arguments_)
+    });
+  }
+  const parameterNames = functionParameterNames(tokens, "javascript");
+  const assignmentCounts = new Map;
+  for (let index = 0;index < tokens.length - 1; index += 1) {
+    const token = tokens[index];
+    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
+      assignmentCounts.set(token.value, (assignmentCounts.get(token.value) ?? 0) + 1);
+    }
+  }
+  for (const [variable] of bindings) {
+    if ((assignmentCounts.get(variable) ?? 0) > 1 || parameterNames.has(variable)) {
+      bindings.delete(variable);
+    }
+  }
+  return bindings;
+}
+function detectAiSdkModelCalls(input) {
+  const { tokens } = input;
+  const bindings = aiSdkProviderBindings(tokens, input.imports);
+  const facts = [];
+  const consumed = [];
+  const literalSpans = [];
+  if (bindings.size === 0 && input.imports.aiSdkFactories.size === 0) {
+    return { facts, consumed, literalSpans };
+  }
+  const occurrenceByAnchor = new Map;
+  for (let openIndex = 0;openIndex < tokens.length; openIndex += 1) {
+    if (structuralValue(tokens[openIndex]) !== "(")
+      continue;
+    const chain = chainBefore(tokens, openIndex);
+    let binding;
+    let anchorChain = chain;
+    const root = chain[0];
+    if (root !== undefined) {
+      if (chain.length > 2)
+        continue;
+      binding = bindings.get(root);
+      const method = chain[1];
+      if (binding !== undefined && method !== undefined && !AI_SDK_MODEL_METHODS.has(method)) {
+        continue;
+      }
+    } else if (structuralValue(tokens[openIndex - 1]) === ")") {
+      const factoryOpen = matchingOpenIndex(tokens, openIndex - 1, "(", ")");
+      const nameIndex = factoryOpen === null ? -1 : factoryOpen - 1;
+      const provider = nameIndex < 0 ? undefined : input.imports.aiSdkFactories.get(tokens[nameIndex]?.value ?? "");
+      if (provider === undefined || tokens[nameIndex]?.kind !== "identifier")
+        continue;
+      binding = {
+        variable: tokens[nameIndex]?.value,
+        provider,
+        ...aiSdkFactoryPlatform(provider, tokens.slice(factoryOpen + 1, openIndex - 1))
+      };
+      anchorChain = [tokens[nameIndex]?.value, "()"];
+    }
+    if (binding === undefined)
+      continue;
+    const valueIndex = openIndex + 1;
+    const valueToken = tokens[valueIndex];
+    if (valueToken === undefined || structuralValue(valueToken) === ")")
+      continue;
+    const clientBinding = {
+      variable: binding.variable,
+      integration: binding.provider.integration,
+      ...binding.servingPlatform === undefined ? {} : { servingPlatform: binding.servingPlatform },
+      platformResolution: binding.platformResolution,
+      selectorKind: binding.provider.selectorKind,
+      endpointSafe: binding.endpointSafe
+    };
+    const environmentReference = environmentReferenceAt(tokens, valueIndex, "javascript", input.imports, input.shadowedEnvironmentGlobals);
+    const resolved = guardIntegrationSelector(clientBinding, resolveTokenValue(tokens, valueIndex, input.constants, binding.provider.selectorKind, environmentReference));
+    const ruleId = `source.ts.vercel-ai-sdk.${binding.provider.providerId}-model@1`;
+    const anchor = anchorChain.join(".");
+    const occurrence = occurrenceByAnchor.get(anchor) ?? 0;
+    occurrenceByAnchor.set(anchor, occurrence + 1);
+    const fact = createSemanticFact({
+      ruleId,
+      path: input.path,
+      blobOid: input.blobOid,
+      scope: input.scope,
+      token: valueToken,
+      binding: clientBinding,
+      resolved,
+      occurrence,
+      anchor
+    });
+    facts.push(fact);
+    const literalSpan = directSemanticLiteralSpan(valueToken, resolved);
+    if (literalSpan !== undefined)
+      literalSpans.push(literalSpan);
+    consumed.push({ fact, binding: clientBinding, resolved });
+    assertEvidenceBudget(facts.length);
+  }
+  return { facts, consumed, literalSpans };
+}
 function detectSdkCalls(source, path, blobOid, language, scope) {
   const tokenization = tokenize(source, language);
   if (tokenization.issue !== undefined) {
@@ -11248,11 +11592,28 @@ function detectSdkCalls(source, path, blobOid, language, scope) {
       assertEvidenceBudget(facts.length);
     }
   }
+  if (language === "javascript") {
+    const aiSdk = detectAiSdkModelCalls({
+      tokens,
+      constants,
+      imports: analyzedClients.imports,
+      path,
+      blobOid,
+      scope,
+      shadowedEnvironmentGlobals
+    });
+    facts.push(...aiSdk.facts);
+    literalSpans.push(...aiSdk.literalSpans);
+    for (const entry of aiSdk.consumed) {
+      recordConsumedEnvironment(entry.fact, entry.binding, entry.resolved);
+    }
+    assertEvidenceBudget(facts.length);
+  }
   return {
     facts,
     consumedEnvironmentSelectors,
     literalSpans,
-    unsupportedFrameworkIds: unsupportedFrameworkIds(analyzedClients.imports.moduleSpecifiers)
+    unsupportedFrameworkIds: unsupportedFrameworkIds(analyzedClients.imports.moduleSpecifiers, facts)
   };
 }
 function terraformStringAttribute(tokens, valueIndex, blockClose) {
@@ -11769,9 +12130,10 @@ function unsupportedFrameworkDiagnostics(byFramework) {
     const sorted = [...paths].sort(compareText5);
     const sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
     const remaining = sorted.length - sample.length;
+    const cause = framework.semanticSupport === "partial" ? "but no published rule for it resolved a model in those files, so the selector shape is one this " + 'manifest does not read yet (for example a gateway model string such as "openai/gpt-5", or a ' + "provider member outside the published set)" : "and this detector manifest publishes no semantic rule for it";
     diagnostics.push({
       code: "unsupported-integration-import@1",
-      message: `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + "and this detector manifest publishes no semantic rule for it. Model selections made through it were " + "assessed by bounded lexical fallback only, so they cannot block and may be missed entirely when the " + `selector is dynamic or the model ID is not literal-scan eligible. Files: ${sample.join(", ")}` + `${remaining > 0 ? ` (+${remaining} more)` : ""}.`,
+      message: `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${cause}. Model selections made that way were assessed by bounded lexical fallback only, so they ` + "cannot block, are excluded from notifications as low confidence, and produce nothing at all when the " + `selector is dynamic or the model ID is not literal-scan eligible. Files: ${sample.join(", ")}` + `${remaining > 0 ? ` (+${remaining} more)` : ""}.`,
       severity: "notice"
     });
   }

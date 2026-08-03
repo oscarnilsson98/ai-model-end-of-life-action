@@ -38,6 +38,12 @@ const TRUSTED_RESOLUTION_POLICY_RULES = new Set([
   "source.ts.aws-bedrock.converse-model@1",
   "source.py.aws-bedrock.invoke-model@1",
   "source.py.aws-bedrock.converse-model@1",
+  "source.ts.vercel-ai-sdk.openai-model@1",
+  "source.ts.vercel-ai-sdk.anthropic-model@1",
+  "source.ts.vercel-ai-sdk.google-model@1",
+  "source.ts.vercel-ai-sdk.google-vertex-model@1",
+  "source.ts.vercel-ai-sdk.azure-model@1",
+  "source.ts.vercel-ai-sdk.amazon-bedrock-model@1",
   "deploy.hcl.azure.cognitive-deployment-model@1",
 ]);
 

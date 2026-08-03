@@ -955,50 +955,66 @@ type ImportProvenance = {
   pythonGetenvFunctions: Set<string>;
   pythonEnvironObjects: Set<string>;
   moduleSpecifiers: Set<string>;
+  aiSdkInstances: Map<string, AiSdkProvider>;
+  aiSdkFactories: Map<string, AiSdkProvider>;
 };
 
 type UnsupportedFramework = {
   frameworkId: string;
   displayName: string;
   modulePrefixes: readonly string[];
+  /**
+   * `partial` means published rules cover this framework's common shapes, so the
+   * notice fires only for a file where none of them resolved. `none` means no
+   * rule exists and every model choice degrades to lexical fallback.
+   */
+  semanticSupport: "partial" | "none";
+  /** Rule-ID prefix that counts as having understood this framework. */
+  rulePrefix?: string;
 };
 
 /**
- * Integrations that route model selection through their own abstraction and
- * therefore publish no v3 semantic rule. Importing one is not a defect, but it
- * does mean the file's model choices reach the assessment through bounded
- * lexical fallback only, so the gap is reported instead of left silent.
+ * Integrations that route model selection through their own abstraction. Where
+ * no rule matches, model choices reach the assessment through bounded lexical
+ * fallback only, so the gap is reported instead of left silent.
  */
 const UNSUPPORTED_INTEGRATION_FRAMEWORKS: readonly UnsupportedFramework[] = Object.freeze([
   Object.freeze({
     frameworkId: "vercel-ai-sdk",
     displayName: "The Vercel AI SDK",
     modulePrefixes: Object.freeze(["ai", "@ai-sdk"]),
+    semanticSupport: "partial" as const,
+    rulePrefix: "source.ts.vercel-ai-sdk.",
   }),
   Object.freeze({
     frameworkId: "langchain",
     displayName: "LangChain",
     modulePrefixes: Object.freeze(["langchain", "@langchain"]),
+    semanticSupport: "none" as const,
   }),
   Object.freeze({
     frameworkId: "llamaindex",
     displayName: "LlamaIndex",
     modulePrefixes: Object.freeze(["llamaindex", "llama_index"]),
+    semanticSupport: "none" as const,
   }),
   Object.freeze({
     frameworkId: "litellm",
     displayName: "LiteLLM",
     modulePrefixes: Object.freeze(["litellm"]),
+    semanticSupport: "none" as const,
   }),
   Object.freeze({
     frameworkId: "google-generative-ai-legacy",
     displayName: "The legacy Google Generative AI SDK",
     modulePrefixes: Object.freeze(["@google/generative-ai", "google.generativeai"]),
+    semanticSupport: "none" as const,
   }),
   Object.freeze({
     frameworkId: "vertex-ai-generative-legacy",
     displayName: "The retired Vertex AI generative SDK module",
     modulePrefixes: Object.freeze(["vertexai", "@google-cloud/vertexai"]),
+    semanticSupport: "none" as const,
   }),
 ]);
 
@@ -1023,11 +1039,23 @@ function unsupportedFrameworkForModule(specifier: string): UnsupportedFramework 
   return undefined;
 }
 
-function unsupportedFrameworkIds(specifiers: ReadonlySet<string>): string[] {
+function unsupportedFrameworkIds(
+  specifiers: ReadonlySet<string>,
+  facts: readonly EvidenceFact[],
+): string[] {
   const ids = new Set<string>();
   for (const specifier of specifiers) {
     const framework = unsupportedFrameworkForModule(specifier);
-    if (framework !== undefined) ids.add(framework.frameworkId);
+    if (framework === undefined) continue;
+    const prefix = framework.rulePrefix;
+    if (
+      framework.semanticSupport === "partial" &&
+      prefix !== undefined &&
+      facts.some((fact) => fact.detectorRuleId.startsWith(prefix))
+    ) {
+      continue;
+    }
+    ids.add(framework.frameworkId);
   }
   return [...ids];
 }
@@ -1057,6 +1085,123 @@ const AWS_COMMANDS = new Set([
   "ConverseStreamCommand",
 ]);
 
+type AiSdkProvider = {
+  /** Rule-ID segment, and the qualified provider package identity. */
+  providerId: string;
+  module: string;
+  integration: ClientBinding["integration"];
+  platform: string;
+  /**
+   * Azure names a deployment and Bedrock accepts profiles and ARNs, exactly as
+   * in the official-SDK rules, so neither selector is an exact model ID.
+   */
+  selectorKind: ModelSelectorKind;
+  /** Exported provider instances, including the package's own aliases. */
+  instanceNames: readonly string[];
+  /** Exported provider factories, including the package's own aliases. */
+  factoryNames: readonly string[];
+};
+
+/**
+ * Vercel AI SDK provider packages. The package pins the serving platform, and a
+ * provider call's first positional argument is the model selector, so these are
+ * exact rules rather than generic framework matching. Instance and factory
+ * names are taken from each package's published type surface.
+ */
+const AI_SDK_PROVIDERS: readonly AiSdkProvider[] = Object.freeze([
+  Object.freeze({
+    providerId: "openai",
+    module: "@ai-sdk/openai",
+    integration: "openai" as const,
+    platform: "openai",
+    selectorKind: "model-id" as const,
+    instanceNames: Object.freeze(["openai"]),
+    factoryNames: Object.freeze(["createOpenAI"]),
+  }),
+  Object.freeze({
+    providerId: "azure",
+    module: "@ai-sdk/azure",
+    integration: "openai" as const,
+    platform: "azure",
+    selectorKind: "deployment-name" as const,
+    instanceNames: Object.freeze(["azure"]),
+    factoryNames: Object.freeze(["createAzure"]),
+  }),
+  Object.freeze({
+    providerId: "anthropic",
+    module: "@ai-sdk/anthropic",
+    integration: "anthropic" as const,
+    platform: "anthropic",
+    selectorKind: "model-id" as const,
+    instanceNames: Object.freeze(["anthropic"]),
+    factoryNames: Object.freeze(["createAnthropic"]),
+  }),
+  Object.freeze({
+    providerId: "google",
+    module: "@ai-sdk/google",
+    integration: "google" as const,
+    platform: "google",
+    selectorKind: "model-id" as const,
+    instanceNames: Object.freeze(["google"]),
+    factoryNames: Object.freeze(["createGoogle", "createGoogleGenerativeAI"]),
+  }),
+  Object.freeze({
+    providerId: "google-vertex",
+    module: "@ai-sdk/google-vertex",
+    integration: "google" as const,
+    platform: "google-vertex",
+    selectorKind: "model-id" as const,
+    instanceNames: Object.freeze(["googleVertex", "vertex"]),
+    factoryNames: Object.freeze(["createGoogleVertex", "createVertex"]),
+  }),
+  Object.freeze({
+    providerId: "amazon-bedrock",
+    module: "@ai-sdk/amazon-bedrock",
+    integration: "aws-bedrock" as const,
+    platform: "aws-bedrock",
+    selectorKind: "polymorphic" as const,
+    instanceNames: Object.freeze(["amazonBedrock", "bedrock"]),
+    factoryNames: Object.freeze(["createAmazonBedrock"]),
+  }),
+]);
+
+/**
+ * Provider members whose first positional argument is a model selector. An
+ * allowlist keeps an unrecognized future member a reported gap rather than a
+ * guessed model ID; `tools`, `files`, and `skills` are not model factories.
+ */
+const AI_SDK_MODEL_METHODS: ReadonlySet<string> = new Set([
+  "languageModel",
+  "chat",
+  "messages",
+  "responses",
+  "completion",
+  "deepseek",
+  "generativeAI",
+  "interactions",
+  "embedding",
+  "embeddingModel",
+  "textEmbedding",
+  "textEmbeddingModel",
+  "image",
+  "imageModel",
+  "video",
+  "videoModel",
+  "speech",
+  "speechModel",
+  "speechTranslationModel",
+  "transcription",
+  "transcriptionModel",
+  "translation",
+  "reranking",
+  "rerankingModel",
+  "experimental_realtime",
+]);
+
+const AI_SDK_PROVIDER_BY_MODULE = new Map(
+  AI_SDK_PROVIDERS.map((provider) => [provider.module, provider] as const),
+);
+
 function importProvenance(
   tokens: readonly Token[],
   language: "javascript" | "python",
@@ -1069,7 +1214,18 @@ function importProvenance(
   const pythonGetenvFunctions = new Set<string>();
   const pythonEnvironObjects = new Set<string>();
   const moduleSpecifiers = new Set<string>();
+  const aiSdkInstances = new Map<string, AiSdkProvider>();
+  const aiSdkFactories = new Map<string, AiSdkProvider>();
   const conflicted = new Set<string>();
+  const addAiSdkImport = (moduleName: string, canonicalName: string, localName: string): void => {
+    const provider = AI_SDK_PROVIDER_BY_MODULE.get(moduleName);
+    if (provider === undefined) return;
+    if (provider.instanceNames.includes(canonicalName)) {
+      aiSdkInstances.set(localName, provider);
+    } else if (provider.factoryNames.includes(canonicalName)) {
+      aiSdkFactories.set(localName, provider);
+    }
+  };
   const addConstructor = (moduleName: string, canonicalName: string, localName: string): void => {
     const integration = CONSTRUCTORS_BY_MODULE[moduleName]?.[canonicalName];
     if (integration === undefined || conflicted.has(localName)) return;
@@ -1086,6 +1242,7 @@ function importProvenance(
   };
   const addNamedImport = (moduleName: string, canonicalName: string, localName: string): void => {
     addConstructor(moduleName, canonicalName, localName);
+    addAiSdkImport(moduleName, canonicalName, localName);
     if (moduleName === "@aws-sdk/client-bedrock-runtime" && AWS_COMMANDS.has(canonicalName)) {
       awsCommands.set(localName, canonicalName);
     }
@@ -1248,6 +1405,8 @@ function importProvenance(
     ...pythonOsNamespaces,
     ...pythonGetenvFunctions,
     ...pythonEnvironObjects,
+    ...aiSdkInstances.keys(),
+    ...aiSdkFactories.keys(),
   ]);
   const shadowed = new Set<string>();
   for (const name of functionParameterNames(tokens, language)) {
@@ -1316,6 +1475,8 @@ function importProvenance(
     pythonOsNamespaces.delete(name);
     pythonGetenvFunctions.delete(name);
     pythonEnvironObjects.delete(name);
+    aiSdkInstances.delete(name);
+    aiSdkFactories.delete(name);
   }
   return {
     constructors,
@@ -1326,6 +1487,8 @@ function importProvenance(
     pythonGetenvFunctions,
     pythonEnvironObjects,
     moduleSpecifiers,
+    aiSdkInstances,
+    aiSdkFactories,
   };
 }
 
@@ -2207,6 +2370,201 @@ function directSemanticLiteralSpan(
   };
 }
 
+type AiSdkProviderBinding = {
+  variable: string;
+  provider: AiSdkProvider;
+  servingPlatform?: string;
+  platformResolution: PlatformResolution;
+  endpointSafe: boolean;
+};
+
+/**
+ * An explicit recognized endpoint must agree with the provider package. A
+ * custom or computed endpoint leaves the platform unknown, exactly as a custom
+ * `baseURL` does for the official OpenAI client.
+ */
+function aiSdkFactoryPlatform(
+  provider: AiSdkProvider,
+  arguments_: readonly Token[],
+): Pick<AiSdkProviderBinding, "servingPlatform" | "platformResolution" | "endpointSafe"> {
+  const endpoint = endpointSignal(arguments_);
+  if (!endpoint.safe) return { platformResolution: "unknown", endpointSafe: false };
+  if (!endpoint.present || endpoint.platform === provider.platform) {
+    return {
+      servingPlatform: provider.platform,
+      platformResolution: "resolved",
+      endpointSafe: true,
+    };
+  }
+  return { platformResolution: "ambiguous", endpointSafe: false };
+}
+
+function aiSdkProviderBindings(
+  tokens: readonly Token[],
+  imports: ImportProvenance,
+): Map<string, AiSdkProviderBinding> {
+  const bindings = new Map<string, AiSdkProviderBinding>();
+  const conflicted = new Set<string>();
+  const setBinding = (binding: AiSdkProviderBinding): void => {
+    if (conflicted.has(binding.variable)) return;
+    const existing = bindings.get(binding.variable);
+    if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(binding)) {
+      bindings.delete(binding.variable);
+      conflicted.add(binding.variable);
+      return;
+    }
+    bindings.set(binding.variable, binding);
+  };
+  for (const [variable, provider] of imports.aiSdkInstances) {
+    setBinding({
+      variable,
+      provider,
+      servingPlatform: provider.platform,
+      platformResolution: "resolved",
+      endpointSafe: true,
+    });
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index]?.kind !== "identifier") continue;
+    const provider = imports.aiSdkFactories.get(tokens[index]?.value ?? "");
+    if (provider === undefined || structuralValue(tokens[index + 1]) !== "(") continue;
+    if (tokens[index - 1]?.value !== "=" || tokens[index - 2]?.kind !== "identifier") continue;
+    const close = matchingIndex(tokens, index + 1, "(", ")");
+    const arguments_ = close === null ? [] : tokens.slice(index + 2, close);
+    setBinding({
+      variable: tokens[index - 2]?.value as string,
+      provider,
+      ...aiSdkFactoryPlatform(provider, arguments_),
+    });
+  }
+  const parameterNames = functionParameterNames(tokens, "javascript");
+  const assignmentCounts = new Map<string, number>();
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    const token = tokens[index];
+    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
+      assignmentCounts.set(token.value, (assignmentCounts.get(token.value) ?? 0) + 1);
+    }
+  }
+  for (const [variable] of bindings) {
+    if ((assignmentCounts.get(variable) ?? 0) > 1 || parameterNames.has(variable)) {
+      bindings.delete(variable);
+    }
+  }
+  return bindings;
+}
+
+/**
+ * A provider call is anchored on the provider, not on the surrounding `ai`
+ * function: the call itself constructs the model specification, so it is
+ * evidence wherever the result is used — passed straight to `generateText`,
+ * held in a constant, or wrapped by middleware.
+ */
+function detectAiSdkModelCalls(input: {
+  tokens: readonly Token[];
+  constants: ReadonlyMap<string, string>;
+  imports: ImportProvenance;
+  path: string;
+  blobOid: string;
+  scope: EvidenceScope;
+  shadowedEnvironmentGlobals: ReadonlySet<string>;
+}): {
+  facts: EvidenceFact[];
+  consumed: Array<{ fact: EvidenceFact; binding: ClientBinding; resolved: ResolvedValue }>;
+  literalSpans: SemanticLiteralSpan[];
+} {
+  const { tokens } = input;
+  const bindings = aiSdkProviderBindings(tokens, input.imports);
+  const facts: EvidenceFact[] = [];
+  const consumed: Array<{ fact: EvidenceFact; binding: ClientBinding; resolved: ResolvedValue }> = [];
+  const literalSpans: SemanticLiteralSpan[] = [];
+  // A factory can also be invoked directly, without ever binding a variable.
+  if (bindings.size === 0 && input.imports.aiSdkFactories.size === 0) {
+    return { facts, consumed, literalSpans };
+  }
+  const occurrenceByAnchor = new Map<string, number>();
+  for (let openIndex = 0; openIndex < tokens.length; openIndex += 1) {
+    if (structuralValue(tokens[openIndex]) !== "(") continue;
+    const chain = chainBefore(tokens, openIndex);
+    let binding: AiSdkProviderBinding | undefined;
+    let anchorChain = chain;
+    const root = chain[0];
+    if (root !== undefined) {
+      if (chain.length > 2) continue;
+      binding = bindings.get(root);
+      const method = chain[1];
+      if (binding !== undefined && method !== undefined && !AI_SDK_MODEL_METHODS.has(method)) {
+        continue;
+      }
+    } else if (structuralValue(tokens[openIndex - 1]) === ")") {
+      // `createOpenAI({ ... })("model")` calls the factory result directly.
+      const factoryOpen = matchingOpenIndex(tokens, openIndex - 1, "(", ")");
+      const nameIndex = factoryOpen === null ? -1 : factoryOpen - 1;
+      const provider = nameIndex < 0
+        ? undefined
+        : input.imports.aiSdkFactories.get(tokens[nameIndex]?.value ?? "");
+      if (provider === undefined || tokens[nameIndex]?.kind !== "identifier") continue;
+      binding = {
+        variable: tokens[nameIndex]?.value as string,
+        provider,
+        ...aiSdkFactoryPlatform(provider, tokens.slice((factoryOpen as number) + 1, openIndex - 1)),
+      };
+      anchorChain = [tokens[nameIndex]?.value as string, "()"];
+    }
+    if (binding === undefined) continue;
+    const valueIndex = openIndex + 1;
+    const valueToken = tokens[valueIndex];
+    if (valueToken === undefined || structuralValue(valueToken) === ")") continue;
+    const clientBinding: ClientBinding = {
+      variable: binding.variable,
+      integration: binding.provider.integration,
+      ...(binding.servingPlatform === undefined
+        ? {}
+        : { servingPlatform: binding.servingPlatform }),
+      platformResolution: binding.platformResolution,
+      selectorKind: binding.provider.selectorKind,
+      endpointSafe: binding.endpointSafe,
+    };
+    const environmentReference = environmentReferenceAt(
+      tokens,
+      valueIndex,
+      "javascript",
+      input.imports,
+      input.shadowedEnvironmentGlobals,
+    );
+    const resolved = guardIntegrationSelector(
+      clientBinding,
+      resolveTokenValue(
+        tokens,
+        valueIndex,
+        input.constants,
+        binding.provider.selectorKind,
+        environmentReference,
+      ),
+    );
+    const ruleId = `source.ts.vercel-ai-sdk.${binding.provider.providerId}-model@1`;
+    const anchor = anchorChain.join(".");
+    const occurrence = occurrenceByAnchor.get(anchor) ?? 0;
+    occurrenceByAnchor.set(anchor, occurrence + 1);
+    const fact = createSemanticFact({
+      ruleId,
+      path: input.path,
+      blobOid: input.blobOid,
+      scope: input.scope,
+      token: valueToken,
+      binding: clientBinding,
+      resolved,
+      occurrence,
+      anchor,
+    });
+    facts.push(fact);
+    const literalSpan = directSemanticLiteralSpan(valueToken, resolved);
+    if (literalSpan !== undefined) literalSpans.push(literalSpan);
+    consumed.push({ fact, binding: clientBinding, resolved });
+    assertEvidenceBudget(facts.length);
+  }
+  return { facts, consumed, literalSpans };
+}
+
 function detectSdkCalls(
   source: string,
   path: string,
@@ -2411,11 +2769,31 @@ function detectSdkCalls(
       assertEvidenceBudget(facts.length);
     }
   }
+  if (language === "javascript") {
+    const aiSdk = detectAiSdkModelCalls({
+      tokens,
+      constants,
+      imports: analyzedClients.imports,
+      path,
+      blobOid,
+      scope,
+      shadowedEnvironmentGlobals,
+    });
+    facts.push(...aiSdk.facts);
+    literalSpans.push(...aiSdk.literalSpans);
+    for (const entry of aiSdk.consumed) {
+      recordConsumedEnvironment(entry.fact, entry.binding, entry.resolved);
+    }
+    assertEvidenceBudget(facts.length);
+  }
   return {
     facts,
     consumedEnvironmentSelectors,
     literalSpans,
-    unsupportedFrameworkIds: unsupportedFrameworkIds(analyzedClients.imports.moduleSpecifiers),
+    unsupportedFrameworkIds: unsupportedFrameworkIds(
+      analyzedClients.imports.moduleSpecifiers,
+      facts,
+    ),
   };
 }
 
@@ -3064,12 +3442,17 @@ function unsupportedFrameworkDiagnostics(
     const sorted = [...paths].sort(compareText);
     const sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
     const remaining = sorted.length - sample.length;
+    const cause = framework.semanticSupport === "partial"
+      ? "but no published rule for it resolved a model in those files, so the selector shape is one this " +
+        "manifest does not read yet (for example a gateway model string such as \"openai/gpt-5\", or a " +
+        "provider member outside the published set)"
+      : "and this detector manifest publishes no semantic rule for it";
     diagnostics.push({
       code: "unsupported-integration-import@1",
       message:
         `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` +
-        "and this detector manifest publishes no semantic rule for it. Model selections made through it were " +
-        "assessed by bounded lexical fallback only, so they cannot block and may be missed entirely when the " +
+        `${cause}. Model selections made that way were assessed by bounded lexical fallback only, so they ` +
+        "cannot block, are excluded from notifications as low confidence, and produce nothing at all when the " +
         `selector is dynamic or the model ID is not literal-scan eligible. Files: ${sample.join(", ")}` +
         `${remaining > 0 ? ` (+${remaining} more)` : ""}.`,
       severity: "notice",

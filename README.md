@@ -97,12 +97,15 @@ The action detects static model values in these supported integrations:
 - Anthropic's JavaScript/TypeScript and Python SDKs
 - Google's current Gen AI JavaScript/TypeScript and Python SDKs
 - Amazon Bedrock Runtime calls through the AWS JavaScript SDK and boto3
+- the Vercel AI SDK's OpenAI, Anthropic, Google, Google Vertex, Azure, and Amazon Bedrock providers
 - Azure Cognitive Services model deployments in Terraform
 - model-valued environment bindings connected to supported calls
 
 Other tracked UTF-8 files are checked for exact eligible model IDs from the lifecycle feed. Those text-only matches, documentation, examples, tests, dynamic selectors, and ambiguous serving platforms can warn or appear as notices, but never block.
 
-Some popular integrations route model selection through their own abstraction and have no semantic rule yet — the Vercel AI SDK, LangChain, LlamaIndex, LiteLLM, and the legacy Google generative SDKs. Importing one is reported as an `unsupported-integration-import@1` notice naming the framework and the files that import it, so a run cannot look clean while your real call sites went unread. Coverage stays `complete` and enforcement is unaffected; the notice exists because model choices made through those frameworks reach the assessment only as low-confidence text matches, which never block and are excluded from notifications.
+For the Vercel AI SDK, a provider call is read wherever it appears — `generateText({ model: openai("gpt-5") })`, a `const model = openai(id)` held for later, or a middleware wrapper — because the provider call itself is what selects the model. The provider package pins the serving platform, so these resolve and can block on the same terms as the official SDKs. `azure(...)` names a deployment and `bedrock(...)` is polymorphic, so both need a trusted resolution before they block, exactly as their official-SDK counterparts do.
+
+Integrations that still route model selection through their own abstraction — LangChain, LlamaIndex, LiteLLM, the legacy Google generative SDKs, and AI SDK shapes outside the published rules such as a `"openai/gpt-5"` gateway string — are reported as an `unsupported-integration-import@1` notice naming the framework and the files that import it, so a run cannot look clean while your real call sites went unread. Coverage stays `complete` and enforcement is unaffected; the notice exists because model choices made that way reach the assessment only as low-confidence text matches, which never block and are excluded from notifications.
 
 Static evidence has limits. Remote databases, secrets, provider consoles, external deployment repositories, and runtime routers are outside it. A clean result means only that no actionable lifecycle risk was found in the evidence actually assessed. [Checked-in claims](#optional-runtime-only-claims) can represent known runtime-only facts; they do not prove complete coverage.
 

@@ -19,7 +19,7 @@ describe("v3 detector manifest", () => {
         ),
       ).size,
     ).toBe(DETECTOR_QUALIFICATION.length);
-    expect(DETECTOR_QUALIFICATION).toHaveLength(9);
+    expect(DETECTOR_QUALIFICATION).toHaveLength(16);
     for (const entry of DETECTOR_QUALIFICATION) {
       expect(entry.version).toMatch(/^[0-9]+\.[0-9]+\.[0-9]+$/);
       expect(new URL(entry.sourceUrl).protocol).toBe("https:");

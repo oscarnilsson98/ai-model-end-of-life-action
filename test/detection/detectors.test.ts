@@ -460,6 +460,197 @@ const names = { __proto__: null, hasOwnProperty: true };
   });
 });
 
+describe("v3 Vercel AI SDK provider rules", () => {
+  const providerFact = (source: string, path = "src/model.ts") =>
+    detectSnapshot(snapshot(path, source), feed).evidence.find((fact) =>
+      fact.detectorRuleId.startsWith("source.ts.vercel-ai-sdk."),
+    );
+
+  test("resolves each provider package to its pinned serving platform", () => {
+    const cases = [
+      {
+        source: `import { openai } from "@ai-sdk/openai";\nawait openai("gpt-old");\n`,
+        ruleId: "source.ts.vercel-ai-sdk.openai-model@1",
+        servingPlatform: "openai",
+        selectorKind: "model-id",
+        policyEligible: true,
+      },
+      {
+        source: `import { anthropic } from "@ai-sdk/anthropic";\nawait anthropic("gpt-old");\n`,
+        ruleId: "source.ts.vercel-ai-sdk.anthropic-model@1",
+        servingPlatform: "anthropic",
+        selectorKind: "model-id",
+        policyEligible: true,
+      },
+      {
+        source: `import { google } from "@ai-sdk/google";\nawait google("gpt-old");\n`,
+        ruleId: "source.ts.vercel-ai-sdk.google-model@1",
+        servingPlatform: "google",
+        selectorKind: "model-id",
+        policyEligible: true,
+      },
+      {
+        // The package's own `googleVertex as vertex` alias.
+        source: `import { vertex } from "@ai-sdk/google-vertex";\nawait vertex("gpt-old");\n`,
+        ruleId: "source.ts.vercel-ai-sdk.google-vertex-model@1",
+        servingPlatform: "google-vertex",
+        selectorKind: "model-id",
+        policyEligible: true,
+      },
+      {
+        // Azure names a deployment, so it can never be policy eligible without
+        // a trusted resolution, exactly as in the official Azure rules.
+        source: `import { azure } from "@ai-sdk/azure";\nawait azure("gpt-old");\n`,
+        ruleId: "source.ts.vercel-ai-sdk.azure-model@1",
+        servingPlatform: "azure",
+        selectorKind: "deployment-name",
+        policyEligible: false,
+      },
+      {
+        source: `import { bedrock } from "@ai-sdk/amazon-bedrock";\nawait bedrock("gpt-old");\n`,
+        ruleId: "source.ts.vercel-ai-sdk.amazon-bedrock-model@1",
+        servingPlatform: "aws-bedrock",
+        selectorKind: "polymorphic",
+        policyEligible: false,
+      },
+    ] as const;
+    for (const testCase of cases) {
+      expect(providerFact(testCase.source), testCase.ruleId).toMatchObject({
+        detectorRuleId: testCase.ruleId,
+        kind: "sdk-argument",
+        confidence: "high",
+        modelId: "gpt-old",
+        servingPlatform: testCase.servingPlatform,
+        modelResolution: "resolved",
+        platformResolution: "resolved",
+        selectorKind: testCase.selectorKind,
+        scope: "application",
+        policyEligible: testCase.policyEligible,
+      });
+    }
+  });
+
+  test("reads the published model-factory members and rejects the rest", () => {
+    for (const member of ["chat", "responses", "completion", "languageModel", "textEmbeddingModel", "imageModel"]) {
+      expect(
+        providerFact(`import { openai } from "@ai-sdk/openai";\nawait openai.${member}("gpt-old");\n`),
+        member,
+      ).toMatchObject({ modelId: "gpt-old", policyEligible: true });
+    }
+    for (const member of ["tools", "files", "skills"]) {
+      expect(
+        providerFact(`import { openai } from "@ai-sdk/openai";\nawait openai.${member}("gpt-old");\n`),
+        member,
+      ).toBeUndefined();
+    }
+  });
+
+  test("anchors on the provider call rather than the surrounding ai function", () => {
+    // The provider call constructs the model specification, so it is evidence
+    // wherever the result is used.
+    const sources = [
+      `import { openai } from "@ai-sdk/openai";\nimport { generateText } from "ai";\nawait generateText({ model: openai("gpt-old") });\n`,
+      `import { openai } from "@ai-sdk/openai";\nexport const model = openai("gpt-old");\n`,
+      `import { openai } from "@ai-sdk/openai";\nimport { wrapLanguageModel } from "ai";\nwrapLanguageModel({ model: openai("gpt-old"), middleware: [] });\n`,
+    ];
+    for (const source of sources) {
+      expect(providerFact(source), source).toMatchObject({
+        modelId: "gpt-old",
+        policyEligible: true,
+      });
+    }
+  });
+
+  test("resolves a same-file constant and keeps a runtime selector visible", () => {
+    expect(
+      providerFact(`import { google } from "@ai-sdk/google";\nconst modelId = "gpt-old";\nexport const g = google(modelId);\n`),
+    ).toMatchObject({
+      modelId: "gpt-old",
+      modelResolution: "resolved",
+      selectorKind: "model-id",
+      policyEligible: true,
+    });
+    expect(
+      providerFact(`import { openai } from "@ai-sdk/openai";\nawait openai(process.env.MODEL_ID);\n`),
+    ).toMatchObject({
+      modelResolution: "dynamic",
+      selectorKind: "dynamic",
+      policyEligible: false,
+    });
+  });
+
+  test("links a committed dotenv value to an AI SDK runtime selector", () => {
+    const evidence = detectSnapshot(
+      repositorySnapshot({
+        "src/chat.ts": `import { openai } from "@ai-sdk/openai";\nawait openai(process.env.MODEL_ID);\n`,
+        ".env": "MODEL_ID=gpt-old\n",
+      }),
+      feed,
+    ).evidence;
+    const binding = evidence.find((fact) => fact.kind === "env-binding");
+    expect(binding).toMatchObject({
+      detectorRuleId: "binding.env.consumed-model@1",
+      modelId: "gpt-old",
+      servingPlatform: "openai",
+    });
+    expect(binding?.locations.map((location) => location.path)).toEqual([".env", "src/chat.ts"]);
+  });
+
+  test("resolves a provider factory and leaves a custom gateway unresolved", () => {
+    expect(
+      providerFact(`import { createOpenAI } from "@ai-sdk/openai";\nconst p = createOpenAI({ apiKey: "k" });\nawait p("gpt-old");\n`),
+    ).toMatchObject({ servingPlatform: "openai", platformResolution: "resolved", policyEligible: true });
+    expect(
+      providerFact(`import { createGoogleGenerativeAI } from "@ai-sdk/google";\nconst p = createGoogleGenerativeAI();\nawait p("gpt-old");\n`),
+    ).toMatchObject({ servingPlatform: "google", platformResolution: "resolved" });
+    // A factory invoked directly never binds a variable.
+    expect(
+      providerFact(`import { createOpenAI } from "@ai-sdk/openai";\nawait createOpenAI({ apiKey: "k" })("gpt-old");\n`),
+    ).toMatchObject({ servingPlatform: "openai", platformResolution: "resolved", policyEligible: true });
+    expect(
+      providerFact(`import { createOpenAI } from "@ai-sdk/openai";\nawait createOpenAI({ baseURL: "https://gateway.example" })("gpt-old");\n`),
+    ).toMatchObject({ platformResolution: "unknown", policyEligible: false });
+    for (const source of [
+      // A custom gateway cannot be attributed to the package's platform.
+      `import { createOpenAI } from "@ai-sdk/openai";\nconst p = createOpenAI({ baseURL: "https://gateway.example" });\nawait p("gpt-old");\n`,
+      // A recognized endpoint that disagrees with the package is ambiguous.
+      `import { createOpenAI } from "@ai-sdk/openai";\nconst p = createOpenAI({ baseURL: "https://x.openai.azure.com" });\nawait p("gpt-old");\n`,
+    ]) {
+      const fact = providerFact(source);
+      expect(fact?.policyEligible, source).toBe(false);
+      expect(["unknown", "ambiguous"], source).toContain(fact?.platformResolution ?? "");
+    }
+  });
+
+  test("does not trust a shadowed, reassigned, or type-only provider import", () => {
+    const sources = [
+      `import { openai } from "@ai-sdk/openai";\nfunction build(openai) {\n  return openai("gpt-old");\n}\n`,
+      `import { openai } from "@ai-sdk/openai";\nopenai = other;\nawait openai("gpt-old");\n`,
+      `import type { openai } from "@ai-sdk/openai";\nawait openai("gpt-old");\n`,
+      // A provider name that was never imported from an @ai-sdk package.
+      `const openai = (id) => id;\nawait openai("gpt-old");\n`,
+    ];
+    for (const source of sources) {
+      expect(providerFact(source), source).toBeUndefined();
+    }
+  });
+
+  test("treats a Google resource path as a resource name rather than a model ID", () => {
+    expect(
+      providerFact(`import { google } from "@ai-sdk/google";\nawait google("projects/p/locations/l/models/gpt-old");\n`),
+    ).toMatchObject({ modelResolution: "unresolved", selectorKind: "resource-name" });
+  });
+
+  test("suppresses the duplicate lexical fact for a resolved provider literal", () => {
+    const evidence = detectSnapshot(
+      snapshot("src/model.ts", `import { openai } from "@ai-sdk/openai";\nawait openai("gpt-old");\n`),
+      feed,
+    ).evidence;
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.kind).toBe("sdk-argument");
+  });
+});
+
 describe("v3 unsupported integration notices", () => {
   const unsupportedNotices = (files: Readonly<Record<string, string>>) =>
     detectSnapshot(repositorySnapshot(files), feed).diagnostics.filter(
@@ -469,21 +660,16 @@ describe("v3 unsupported integration notices", () => {
   test("reports a framework whose model selection reaches no semantic rule", () => {
     const cases = [
       {
-        path: "src/factory.ts",
-        source:
-          `import { openai } from "@ai-sdk/openai";\nimport { generateText } from "ai";\nawait generateText({ model: openai("gpt-old"), prompt: "hi" });\n`,
-      },
-      {
-        // Nothing at all is detected here: the gateway prefix makes the feed ID
-        // fail the lexical identifier-boundary rule.
+        // The AI SDK gateway string yields no evidence at all: its provider
+        // prefix makes the feed ID fail the lexical identifier-boundary rule.
         path: "src/gateway.ts",
         source:
           `import { generateText } from "ai";\nawait generateText({ model: "openai/gpt-old", prompt: "hi" });\n`,
       },
       {
-        path: "src/dynamic.ts",
-        source:
-          `import { openai } from "@ai-sdk/openai";\nimport { generateText } from "ai";\nawait generateText({ model: openai(process.env.MODEL_ID), prompt: "hi" });\n`,
+        // A provider member outside the published model-factory set.
+        path: "src/tools.ts",
+        source: `import { openai } from "@ai-sdk/openai";\nconst t = openai.tools.webSearch({});\n`,
       },
       { path: "app/chain.py", source: `from langchain_openai import ChatOpenAI\nllm = ChatOpenAI()\n` },
       { path: "app/legacy.py", source: `import google.generativeai as genai\ngenai.configure()\n` },
@@ -534,9 +720,28 @@ describe("v3 unsupported integration notices", () => {
     }
   });
 
+  test("stays silent for a file where a published AI SDK rule resolved a model", () => {
+    // Partial support: a resolved provider call means the file was understood,
+    // so a bare `ai` import alongside it is not a coverage gap.
+    expect(
+      unsupportedNotices({
+        "src/chat.ts":
+          `import { openai } from "@ai-sdk/openai";\nimport { generateText } from "ai";\nawait generateText({ model: openai("gpt-old") });\n`,
+      }),
+    ).toEqual([]);
+    // A dynamic selector still counts as understood: the call site is visible
+    // and its environment variable can be joined from a committed assignment.
+    expect(
+      unsupportedNotices({
+        "src/dynamic.ts":
+          `import { openai } from "@ai-sdk/openai";\nawait openai(process.env.MODEL_ID);\n`,
+      }),
+    ).toEqual([]);
+  });
+
   test("aggregates one deterministic notice per framework across files", () => {
     const notices = unsupportedNotices({
-      "apps/b/src/y.ts": `import { anthropic } from "@ai-sdk/anthropic";\nimport { streamText } from "ai";\nawait streamText({ model: anthropic("x") });\n`,
+      "apps/b/src/y.ts": `import { generateText } from "ai";\nawait generateText({ model: "anthropic/x" });\n`,
       "apps/a/src/x.ts": `import { generateText } from "ai";\nawait generateText({ model: "openai/gpt-old" });\n`,
       "svc/chain.py": `from langchain.chat_models import init_chat_model\n`,
     });
