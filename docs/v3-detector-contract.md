@@ -148,7 +148,7 @@ Support is syntax-based because the action does not install repository dependenc
 
 V3.0 does not claim semantic support for Go, Java, Kotlin, C#, Ruby, PHP, Vercel AI SDK, LiteLLM, legacy `@google/generative-ai`, the retired Vertex AI generative SDK module, platform-specific Anthropic clients, arbitrary framework wrappers, broad Kubernetes/Helm schemas, generic Terraform resources, or arbitrary keys named `model`. Those files still receive bounded lexical fallback where eligible. These higher-ambiguity integrations may ship in v3.x only with separate provider-specific rule IDs and fixtures; they are not stretched into v3.0 by generic matching.
 
-The published tokenizers also do not accept every construct in the languages they do cover; JSX and TSX element syntax is the most common example. A file the tokenizer rejects is reported as a `semantic-tokenization-incomplete@1` notice, its semantic evidence is discarded, and the file falls back to bounded lexical matching. That is the same coverage tier an unsupported language already receives, so it is degraded fidelity rather than a coverage blind spot and it does not make `scan-status` partial.
+The published tokenizers also do not accept every construct in the languages they do cover; the residual gaps are listed under [Source tokenization coverage](#source-tokenization-coverage). A file the tokenizer rejects is reported as a `semantic-tokenization-incomplete@1` notice, its semantic evidence is discarded, and the file falls back to bounded lexical matching. That is the same coverage tier an unsupported language already receives, so it is degraded fidelity rather than a coverage blind spot and it does not make `scan-status` partial.
 
 Primary qualification references are the official [OpenAI Node](https://github.com/openai/openai-node) and [Python](https://github.com/openai/openai-python) SDKs, [Anthropic TypeScript](https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/typescript) and [Python](https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python) SDKs, [Google GenAI library status](https://ai.google.dev/gemini-api/docs/libraries) and [endpoint options](https://googleapis.github.io/js-genai/release_docs/interfaces/types.HttpOptions.html), [AWS Bedrock Runtime](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-api.html) and [boto3 client endpoint configuration](https://docs.aws.amazon.com/boto3/latest/reference/core/session.html), and the [AzureRM cognitive deployment resource](https://registry.terraform.io/providers/hashicorp/Azurerm/latest/docs/resources/cognitive_deployment). `DETECTOR_QUALIFICATION` is the executable version manifest.
 
@@ -166,6 +166,22 @@ V3.0 semantic rules may resolve:
 V3.0 does not resolve object-property indirection, string concatenation, template substitutions, local factories, broad cross-file or interprocedural dataflow, arbitrary code evaluation, package execution, remote lookup, source-map reconstruction, or reachability. An unresolved selector remains first-class high/medium/low evidence with model/platform resolution states; it is not guessed.
 
 Exact-name environment linking is scope-aware. Conflicting values from production, staging, tests, or several deployment files remain separate candidates with their provenance; file order or an undocumented precedence rule never selects one.
+
+## Source tokenization coverage
+
+Every semantic detector tokenizes a file before matching. Tokenization is fail-closed per file: an unterminated literal, an unbalanced delimiter, or any other construct that could desynchronize later string boundaries discards all semantic evidence from that file, reports the `semantic-tokenization-incomplete@1` notice described above, and leaves only lexical fallback evidence. Semantic fidelity is therefore a lexer property, not a matcher property: a file the lexer cannot follow can never produce policy-eligible evidence, even though the blob stays assessed and declared coverage stays complete.
+
+JSX is lexed for `.js`, `.jsx`, `.mjs`, `.cjs`, and `.tsx`. Element tags, attributes, children, closing tags, fragments, `{…}` expression containers, element type-argument lists such as `<Tooltip<Datum> …>`, comments inside a tag, and multi-line attribute text are all recognized. Element children are text: an apostrophe, a quote, a slash, or a stray `<` there never opens a string, a regex literal, or a nested element. Code inside an expression container is lexed as ordinary JavaScript, so an SDK call in an event handler or a `.map` callback still produces semantic evidence.
+
+`.ts`, `.mts`, and `.cts` are deliberately excluded: `tsc` rejects JSX in those files, while the `<Type>value` assertion form is legal there, so JSX lexing would desynchronize valid TypeScript rather than recover it.
+
+`<` opens an element only in a value position, so `a < b`, `useState<string>()`, `new Map<string, number>()`, and `i << 1` remain operators. A bounded opening-tag lookahead additionally rejects the TypeScript type-parameter lists that share those positions in `.tsx`: `<T,>(value) => value` and `<T extends Props>(value) => value` stay generic arrow functions. That lookahead steps over strings, template literals, comments, and regex literals rather than counting their delimiters, so `code={"if (ready) {"}` and `test={/^\{/.source}` are still recognized as attribute values.
+
+Two forms remain unsupported, and both degrade fidelity rather than mismatching silently: JSX inside a template-literal substitution, and an opening tag longer than the 4,096-character lookahead.
+
+`/` disambiguation tracks the preceding value, including the postfix TypeScript non-null assertion, so `filters[0]! / 100` divides while `!/pending/.test(state)` is a regex literal. A leading `#!` line is skipped rather than lexed as JavaScript.
+
+Repeated detector diagnostic codes are aggregated. A code and severity that occur more than once are reported as one entry carrying the occurrence count and a bounded sample of affected paths; a single occurrence keeps its own `path`. Aggregation preserves first-occurrence order so a report stays byte-stable for its fingerprint. Claim-document and policy diagnostics are not aggregated: they are already one-per-document.
 
 ## Scope and noise classification
 
