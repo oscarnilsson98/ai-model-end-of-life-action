@@ -967,9 +967,10 @@ client.invoke_model_with_response_stream(modelId="gpt-old", body=b"{}")
   });
 
   test("keeps a static Azure Terraform deployment as an unresolved tuple", () => {
-    const fact = ruleEvidence(
-      "deploy/main.tf",
-      `resource "azurerm_cognitive_deployment" "chat" {
+    const result = detectSnapshot(
+      snapshot(
+        "deploy/main.tf",
+        `resource "azurerm_cognitive_deployment" "chat" {
   model {
     format  = "OpenAI"
     name    = "gpt-old"
@@ -977,8 +978,14 @@ client.invoke_model_with_response_stream(modelId="gpt-old", body=b"{}")
   }
 }
 `,
-      "deploy.hcl.azure.cognitive-deployment-model@1",
+      ),
+      feed,
     );
+    const facts = result.evidence.filter(
+      (fact) => fact.detectorRuleId === "deploy.hcl.azure.cognitive-deployment-model@1",
+    );
+    expect(facts).toHaveLength(1);
+    const fact = facts[0];
     expect(fact).toMatchObject({
       kind: "deployment-resource",
       scope: "deployment",
@@ -990,6 +997,154 @@ client.invoke_model_with_response_stream(modelId="gpt-old", body=b"{}")
       policyEligible: false,
     });
     expect(fact?.modelId).toBeUndefined();
+  });
+
+  test("keeps an omitted Azure Terraform model version as an unresolved tuple", () => {
+    const result = detectSnapshot(
+      snapshot(
+        "deploy/main.tf",
+        `resource "azurerm_cognitive_deployment" "chat" {
+  model {
+    format = "OpenAI"
+    name   = "gpt-azure-omitted"
+  }
+}
+`,
+      ),
+      feed,
+    );
+    const facts = result.evidence.filter(
+      (fact) => fact.detectorRuleId === "deploy.hcl.azure.cognitive-deployment-model@1",
+    );
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({
+      kind: "deployment-resource",
+      rawValue: `["OpenAI","gpt-azure-omitted",null]`,
+      servingPlatform: "azure",
+      modelResolution: "unresolved",
+      selectorKind: "deployment-name",
+      platformResolution: "resolved",
+      policyEligible: false,
+    });
+    expect(facts[0]?.modelId).toBeUndefined();
+  });
+
+  test("does not treat a dynamic Azure Terraform model version as omitted", () => {
+    const result = detectSnapshot(
+      snapshot(
+        "deploy/main.tf",
+        `resource "azurerm_cognitive_deployment" "chat" {
+  model {
+    format  = "OpenAI"
+    name    = "gpt-old"
+    version = var.model_version
+  }
+}
+`,
+      ),
+      feed,
+    );
+    expect(result.scanStatus).toBe("complete");
+    expect(result.evidence.filter((fact) => fact.kind === "deployment-resource")).toEqual([]);
+    expect(
+      result.evidence.filter(
+        (fact) =>
+          fact.detectorRuleId === "fallback.text.lifecycle-id@1" &&
+          fact.rawValue === "gpt-old",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "lexical",
+        confidence: "low",
+        scope: "deployment",
+        modelId: "gpt-old",
+        modelResolution: "resolved",
+        selectorKind: "model-id",
+        policyEligible: false,
+      }),
+    ]);
+  });
+
+  test("does not treat an interpolated Azure Terraform model name as static", () => {
+    const result = detectSnapshot(
+      snapshot(
+        "deploy/main.tf",
+        `resource "azurerm_cognitive_deployment" "chat" {
+  model {
+    format  = "OpenAI"
+    name    = "\${var.model_prefix}gpt-old"
+    version = "0613"
+  }
+}
+`,
+      ),
+      feed,
+    );
+    expect(result.scanStatus).toBe("complete");
+    expect(result.evidence.filter((fact) => fact.kind === "deployment-resource")).toEqual([]);
+    expect(
+      result.evidence.filter(
+        (fact) =>
+          fact.detectorRuleId === "fallback.text.lifecycle-id@1" &&
+          fact.rawValue === "gpt-old",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "lexical",
+        confidence: "low",
+        scope: "deployment",
+        modelId: "gpt-old",
+        modelResolution: "resolved",
+        selectorKind: "model-id",
+        policyEligible: false,
+      }),
+    ]);
+  });
+
+  test("does not promote the quoted prefix of an unsupported HCL expression", () => {
+    const result = detectSnapshot(
+      snapshot(
+        "deploy/main.tf",
+        `resource "azurerm_cognitive_deployment" "chat" {
+  model {
+    format = "OpenAI"
+    name = "gpt-old"
+      + var.model_suffix
+  }
+}
+`,
+      ),
+      feed,
+    );
+    expect(result.scanStatus).toBe("complete");
+    expect(result.evidence.filter((fact) => fact.kind === "deployment-resource")).toEqual([]);
+    expect(result.evidence).toContainEqual(expect.objectContaining({
+      detectorRuleId: "fallback.text.lifecycle-id@1",
+      kind: "lexical",
+      rawValue: "gpt-old",
+      policyEligible: false,
+    }));
+  });
+
+  test("keeps ordinary template-adjacent characters in a direct HCL string static", () => {
+    const fact = ruleEvidence(
+      "deploy/main.tf",
+      `resource "azurerm_cognitive_deployment" "chat" {
+  model {
+    format  = "OpenAI"
+    name    = "gpt-$cash-100%-v1.preview/0613"
+    version = "0613"
+  }
+}
+`,
+      "deploy.hcl.azure.cognitive-deployment-model@1",
+    );
+    expect(fact).toMatchObject({
+      kind: "deployment-resource",
+      rawValue: `["OpenAI","gpt-$cash-100%-v1.preview/0613","0613"]`,
+      modelResolution: "unresolved",
+      selectorKind: "deployment-name",
+    });
   });
 
   test("resolves same-file constants and static environment fallbacks without making fallbacks enforceable", () => {
