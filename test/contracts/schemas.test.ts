@@ -155,5 +155,13 @@ describe("published v3 JSON Schemas", () => {
     expect(targetParents?.maxItems).toBe(2);
     expect(required(definition(document, "evidenceFact"))).toContain("policyEligible");
     expect(required(definition(document, "lifecycleFinding"))).toContain("feedConflict");
+    // The finding definition is additionalProperties:false, so every emitted lifecycle
+    // day-count must be declared or real reports stop validating.
+    const findingProperties = definition(document, "lifecycleFinding").properties as Record<
+      string,
+      JsonSchema
+    >;
+    expect(findingProperties.daysUntilDeprecation).toEqual({ type: "integer" });
+    expect(findingProperties.deprecationDate).toBeDefined();
   });
 });

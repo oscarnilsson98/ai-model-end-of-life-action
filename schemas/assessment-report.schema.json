@@ -326,6 +326,7 @@
             { "type": "null" }
           ]
         },
+        "daysUntilDeprecation": { "type": "integer" },
         "replacementModels": {
           "type": "array",
           "items": { "$ref": "#/$defs/replacementModel" }
