@@ -1,15 +1,24 @@
 # Releasing the action
 
-This repository publishes immutable `vX.Y.Z` releases and a movable `vX` convenience tag. The release workflow validates the exact versioned tag before it moves the major tag; it never promotes prereleases or a version older than the current major tag.
+Versioned Git tags are the sole source of action release versions, and GitHub Releases
+are the release history. `package.json` is intentionally unversioned because this
+private package is not published to a package registry. There is no changelog or
+package-version field to update.
+
+The repository publishes immutable `vX.Y.Z` releases and maintains a movable `vX`
+convenience tag. Publishing a stable GitHub Release starts one workflow that validates
+the exact versioned tag before moving the major tag. It never promotes prereleases or
+a version older than the current major tag.
 
 ## One-time repository setting
 
 [Enable release immutability](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes) in the repository's GitHub settings before publishing. The promotion job deliberately refuses to move the major tag unless the GitHub Release API reports a stable, published, immutable release.
 
-## Prepare the release commit
+## Prepare the release
 
-1. Set the exact stable version in `package.json` without a `v` prefix.
-2. Install and verify with the pinned toolchain:
+1. Merge the intended source and rebuilt `dist/index.js` to the default branch.
+2. Confirm CI and CodeQL pass on that commit.
+3. Optionally reproduce the release checks locally with the pinned toolchain:
 
    ```bash
    npx --yes bun@1.3.14 install --frozen-lockfile --ignore-scripts
@@ -22,18 +31,25 @@ This repository publishes immutable `vX.Y.Z` releases and a movable `vX` conveni
    git diff --check
    ```
 
-3. Commit the rebuilt `dist/index.js` with the source and version change.
-4. Merge the exact release commit to the repository's default branch and confirm CI and CodeQL pass on that commit.
-
 The live-feed validation command is intentionally stricter than the shipped action's warning-only mode. It fails when the upstream provider/identifier pair set has changed and prints exact addition/removal counts with bounded previews. Review and classify those pairs, then update the pinned adapter registry, count, and digest before cutting a release. Lifecycle-record conflicts are reported separately.
 
 ## Publish
 
-1. Create and push a stable tag whose version exactly matches `package.json`, for example `v3.0.0`. Never move or reuse a versioned tag.
-2. Wait for the tag-triggered **Validate release and move major tag** run to pass. A tag push validates but does not promote the movable major tag.
-3. Publish a stable GitHub Release for that existing tag. With release immutability enabled, publication locks the versioned tag.
-4. Confirm the release-triggered workflow validates the same tag and moves `v3` to its commit.
+1. Open **Releases → Draft a new release** in GitHub.
+2. Create or select a new stable `vX.Y.Z` tag, targeting the intended commit on the
+   default branch. Never move or reuse a versioned tag.
+3. Choose **Generate release notes**, review the result, and publish the release.
+4. Confirm **Validate published release and move major tag** passes and moves `vX`
+   to the released commit.
 
-The validation job checks default-branch ancestry, the package/tag version match, immutable external action references, the exact toolchain, locked dependencies, tests, a reproducible bundle, the live reviewed feed adapter, and a hermetic packaged-action run. The packaged run explicitly scans the validated release commit rather than the workflow-dispatch commit.
+The validation job checks the tag format and target, default-branch ancestry,
+immutable external action references, the exact toolchain, locked dependencies,
+tests, a reproducible bundle, the live reviewed feed adapter, and a hermetic
+packaged-action run. Promotion also requires GitHub to report the release as stable,
+published, and immutable.
 
-`workflow_dispatch` is a recovery path for an existing versioned tag. Set `promote: false` to validate only. Promotion still requires an immutable published release and all normal validation checks.
+Validation happens after publication because publication is the only release event.
+With release immutability enabled, GitHub has already locked the `vX.Y.Z` tag at that
+point. If validation fails, `vX` remains on the previous good release. Rerun the
+workflow for a transient failure; for a real defect, fix it and publish the next patch
+version because the failed version must not be reused.

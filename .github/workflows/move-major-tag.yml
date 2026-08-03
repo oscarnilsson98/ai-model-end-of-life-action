@@ -1,23 +1,8 @@
-name: Validate release and move major tag
+name: Validate published release and move major tag
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
-      - "!v*-*"
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Exact stable release tag to validate, for example v3.0.0"
-        required: true
-        type: string
-      promote:
-        description: "Move the matching major tag after validation"
-        required: true
-        default: false
-        type: boolean
 
 permissions: {}
 
@@ -28,12 +13,7 @@ concurrency:
 jobs:
   validate-release:
     name: Validate release source and bundle
-    if: >-
-      ${{
-        github.event_name == 'push' ||
-        github.event_name == 'workflow_dispatch' ||
-        !github.event.release.prerelease
-      }}
+    if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -55,7 +35,7 @@ jobs:
         id: release
         shell: bash
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+          TAG: ${{ github.event.release.tag_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -Eeuo pipefail
@@ -72,12 +52,6 @@ jobs:
           tag_ref="$(git rev-parse --verify "refs/tags/$TAG")"
           tag_sha="$(git rev-parse --verify "refs/tags/$TAG^{commit}")"
           git checkout --detach "$tag_sha"
-
-          package_version="$(node -p "require('./package.json').version")"
-          if [[ "v$package_version" != "$TAG" ]]; then
-            echo "package.json version ($package_version) does not match the release tag." >&2
-            exit 1
-          fi
 
           default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
           if ! git show-ref --verify --quiet "$default_ref"; then
@@ -175,11 +149,7 @@ jobs:
   promote-major-tag:
     name: Promote immutable release to major tag
     needs: validate-release
-    if: >-
-      ${{
-        (github.event_name == 'release' && !github.event.release.prerelease) ||
-        (github.event_name == 'workflow_dispatch' && inputs.promote)
-      }}
+    if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -218,6 +188,7 @@ jobs:
           TARGET_TAG_REF: ${{ needs.validate-release.outputs.tag_ref }}
           TARGET_SHA: ${{ needs.validate-release.outputs.sha }}
           MAJOR_TAG: ${{ needs.validate-release.outputs.major }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -Eeuo pipefail
           git fetch --force --tags origin
@@ -226,6 +197,12 @@ jobs:
           actual_sha="$(git rev-parse --verify "refs/tags/$TARGET_TAG^{commit}")"
           if [[ "$actual_ref" != "$TARGET_TAG_REF" || "$actual_sha" != "$TARGET_SHA" ]]; then
             echo "The validated release tag changed before promotion; refusing to continue." >&2
+            exit 1
+          fi
+          default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git show-ref --verify --quiet "$default_ref" ||
+             ! git merge-base --is-ancestor "$TARGET_SHA" "$default_ref"; then
+            echo "The release commit is no longer reachable from the repository default branch." >&2
             exit 1
           fi
 
@@ -265,8 +242,5 @@ jobs:
             git update-ref "refs/tags/$MAJOR_TAG" "$TARGET_SHA"
             major_lease="refs/tags/$MAJOR_TAG:"
           fi
-          git push --atomic \
-            --force-with-lease="$major_lease" \
-            --force-with-lease="refs/tags/$TARGET_TAG:$TARGET_TAG_REF" \
-            origin "refs/tags/$TARGET_TAG" "refs/tags/$MAJOR_TAG"
+          git push --force-with-lease="$major_lease" origin "refs/tags/$MAJOR_TAG"
           echo "$MAJOR_TAG now points at $TARGET_TAG ($TARGET_SHA)."

@@ -1,6 +1,5 @@
 {
   "name": "ai-model-end-of-life-action",
-  "version": "3.0.0",
   "description": "GitHub Action that discovers model usage in committed repository code and warns before known AI model shutdowns.",
   "license": "MIT",
   "private": true,

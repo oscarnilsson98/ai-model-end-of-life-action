@@ -3,6 +3,7 @@ import {
   evaluateComparison,
   monotonicEvidenceSourceDocuments,
 } from "../../src/policy/comparison.ts";
+import { DETECTOR_MANIFEST_VERSION } from "../../src/detection/manifest.ts";
 import { buildV3FeedIndex } from "../../src/lifecycle/feed.ts";
 import { assertionsToEvidence, inspectPolicy } from "../../src/policy/policy.ts";
 import type { DetectionResult } from "../../src/detection/detectors.ts";
@@ -39,7 +40,7 @@ function evidence(id: string): EvidenceFact {
     scope: "application",
     environment: "production",
     detectorRuleId: "source.ts.openai.request-model@1",
-    detectorManifestVersion: "3.0.0-1",
+    detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
     rawValue: "gpt-old",
     modelId: "gpt-old",
     servingPlatform: "openai",

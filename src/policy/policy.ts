@@ -1,4 +1,5 @@
 import { parseDocument } from "yaml";
+import { DETECTOR_MANIFEST_VERSION } from "../detection/manifest.ts";
 import { MAX_POLICY_DAYS } from "../shared/limits.ts";
 import { canonicalSha256, combineEvidenceHealth } from "../shared/status.ts";
 import type {
@@ -622,7 +623,7 @@ export function assertionsToEvidence(
       scope: assertion.scope,
       environment: assertion.environment,
       detectorRuleId: "claim.manual.assertion@1",
-      detectorManifestVersion: "3.0.0-1",
+      detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
       rawValue: assertion.modelId,
       modelId: assertion.modelId,
       servingPlatform: assertion.servingPlatform,
