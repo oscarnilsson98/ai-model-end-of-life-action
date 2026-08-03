@@ -3392,7 +3392,15 @@ function supportedSemanticPath(path: string): boolean {
     GITHUB_WORKFLOW_PATH.test(path);
 }
 
-function tokenizationCoverageDiagnostic(
+/**
+ * A tokenization failure is degraded fidelity, not a coverage blind spot: the
+ * blob is still assessed by the lexical fallback, whose evidence is already
+ * capped at advisory authority. Declared coverage therefore stays complete, so a
+ * construct no published tokenizer accepts — JSX, most visibly — cannot pin a
+ * repository to `scan-status: partial` and force `allowPartial: true`, which
+ * would also switch off fail-closed enforcement for genuinely unassessed blobs.
+ */
+function tokenizationFidelityDiagnostic(
   path: string,
   language: "javascript" | "python" | "hcl",
   issue: TokenizationIssue,
@@ -3407,9 +3415,9 @@ function tokenizationCoverageDiagnostic(
   return {
     code: "semantic-tokenization-incomplete@1",
     message:
-      `The ${language} semantic detector found ${descriptions[issue.kind]} at line ${issue.line}, column ${issue.column}. Semantic evidence from this file was discarded; lexical fallback evidence remains available.`,
+      `The ${language} semantic detector found ${descriptions[issue.kind]} at line ${issue.line}, column ${issue.column}. Semantic evidence from this file was discarded; the blob remains assessed by lexical fallback, so declared coverage is unchanged.`,
     path,
-    severity: "partial",
+    severity: "notice",
   };
 }
 
@@ -3452,7 +3460,7 @@ function unsupportedFrameworkDiagnostics(
       message:
         `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` +
         `${cause}. Model selections made that way were assessed by bounded lexical fallback only, so they ` +
-        "cannot block, are excluded from notifications as low confidence, and produce nothing at all when the " +
+        "cannot block, are reported only as text matches, and produce nothing at all when the " +
         `selector is dynamic or the model ID is not literal-scan eligible. Files: ${sample.join(", ")}` +
         `${remaining > 0 ? ` (+${remaining} more)` : ""}.`,
       severity: "notice",
@@ -3544,9 +3552,8 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
       tokenizationIssue = detected.tokenizationIssue;
     }
     if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
-      partial = true;
       diagnostics.push(
-        tokenizationCoverageDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue),
+        tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue),
       );
     }
     const lexical = lexicalFacts(
