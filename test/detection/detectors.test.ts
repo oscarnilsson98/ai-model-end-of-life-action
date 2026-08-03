@@ -238,20 +238,98 @@ const names = { __proto__: null, hasOwnProperty: true };
     });
   });
 
-  test("reports an out-of-range unicode escape as partial instead of throwing", () => {
+  test("reports an out-of-range unicode escape as a notice instead of throwing", () => {
     const result = detectSnapshot(
       snapshot("src/limits.ts", `const boundary = "\\u{110000}";\n`),
       feed,
     );
-    expect(result.scanStatus).toBe("partial");
+    expect(result.scanStatus).toBe("complete");
     expect(result.diagnostics).toContainEqual(expect.objectContaining({
       code: "semantic-tokenization-incomplete@1",
       path: "src/limits.ts",
+      severity: "notice",
+    }));
+  });
+
+  test("keeps declared coverage complete for JSX the tokenizer cannot accept", () => {
+    const source = `import { useChat } from "ai/react";
+
+export default function Page() {
+  const { messages } = useChat({ model: "gpt-old" });
+  return (
+    <ul className="messages">
+      {messages.map((message) => <li key={message.id}>{message.text}</li>)}
+    </ul>
+  );
+}
+`;
+    const result = detectSnapshot(snapshot("app/page.tsx", source), feed);
+    expect(result.scanStatus).toBe("complete");
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        code: "semantic-tokenization-incomplete@1",
+        path: "app/page.tsx",
+        severity: "notice",
+      }),
+    ]);
+    // The blob is still assessed: the lexical fallback reports the model at
+    // advisory-only authority, which is the whole reason coverage stays complete.
+    expect(
+      result.evidence.some((fact) => fact.kind === "lexical" && fact.modelId === "gpt-old"),
+    ).toBe(true);
+    expect(result.evidence.every((fact) => !fact.policyEligible)).toBe(true);
+  });
+
+  test("keeps an unassessed blob partial even when other blobs only degrade fidelity", () => {
+    const result = detectSnapshot(
+      {
+        ...repositorySnapshot({
+          "app/page.tsx": "export const view = <div>gpt-old</div>;\n",
+        }),
+        scanStatus: "partial",
+        diagnostics: [
+          {
+            code: "blob-too-large",
+            coverageImpact: "partial",
+            displayPath: "assets/model-dump.bin",
+            objectId: "c".repeat(40),
+            objectSize: 3_000_000,
+            limitBytes: 2_097_152,
+          },
+        ],
+      },
+      feed,
+    );
+    expect(result.scanStatus).toBe("partial");
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: "blob-too-large",
+      path: "assets/model-dump.bin",
+      severity: "partial",
+    }));
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: "semantic-tokenization-incomplete@1",
+      path: "app/page.tsx",
+      severity: "notice",
+    }));
+  });
+
+  test("keeps a non-UTF-8 blob partial because no detector assessed it", () => {
+    const path = "src/client.ts";
+    const base = repositorySnapshot({ [path]: "" });
+    const bytes = Buffer.from([0x63, 0x6f, 0x6e, 0x73, 0x74, 0x20, 0xff, 0xfe, 0x0a]);
+    const entry = { ...(base.entries[0] as (typeof base.entries)[number]) };
+    entry.objectSize = bytes.byteLength;
+    entry.content = { state: "available", bytes };
+    const result = detectSnapshot({ ...base, entries: [entry] }, feed);
+    expect(result.scanStatus).toBe("partial");
+    expect(result.diagnostics).toContainEqual(expect.objectContaining({
+      code: "invalid-detector-encoding",
+      path,
       severity: "partial",
     }));
   });
 
-  test("marks incomplete token constructs partial and keeps only lexical fallback evidence", () => {
+  test("reports incomplete token constructs as fidelity notices and keeps only lexical fallback evidence", () => {
     const cases = [
       {
         path: "src/regex.ts",
@@ -272,12 +350,13 @@ const names = { __proto__: null, hasOwnProperty: true };
     ] as const;
     for (const testCase of cases) {
       const result = detectSnapshot(snapshot(testCase.path, testCase.source), feed);
-      expect(result.scanStatus, testCase.path).toBe("partial");
+      expect(result.scanStatus, testCase.path).toBe("complete");
       expect(
         result.diagnostics.some(
           (diagnostic) =>
             diagnostic.code === "semantic-tokenization-incomplete@1" &&
-            diagnostic.path === testCase.path,
+            diagnostic.path === testCase.path &&
+            diagnostic.severity === "notice",
         ),
         testCase.path,
       ).toBe(true);
@@ -1326,10 +1405,12 @@ resource "azurerm_cognitive_deployment" "malformed" {
       ).toEqual([]);
       expect(result.evidence.every((fact) => !fact.policyEligible)).toBe(true);
       expect(result.evidence.some((fact) => fact.kind === "lexical")).toBe(true);
-      expect(result.scanStatus).toBe("partial");
+      expect(result.scanStatus).toBe("complete");
       expect(
         result.diagnostics.some(
-          (diagnostic) => diagnostic.code === "semantic-tokenization-incomplete@1",
+          (diagnostic) =>
+            diagnostic.code === "semantic-tokenization-incomplete@1" &&
+            diagnostic.severity === "notice",
         ),
       ).toBe(true);
     }

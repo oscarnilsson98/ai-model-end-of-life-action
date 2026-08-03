@@ -8,7 +8,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DETECTOR_MANIFEST_VERSION } from "../../src/detection/manifest.ts";
-import type { DetectionResult } from "../../src/detection/detectors.ts";
+import { detectSnapshot, type DetectionResult } from "../../src/detection/detectors.ts";
 import type { ResolvedEventSelection } from "../../src/repository/event.ts";
 import { loadV3FeedJson, type LoadedV3Feed } from "../../src/lifecycle/feed.ts";
 import {
@@ -177,6 +177,39 @@ function snapshot(
       metadataBytes: 0,
     },
     limits: { ...DEFAULT_GIT_TREE_SNAPSHOT_LIMITS },
+  };
+}
+
+const JSX_SOURCE = `import { useChat } from "ai/react";
+
+export default function Page() {
+  const { messages } = useChat({ model: "gpt-old" });
+  return <ul>{messages.map((message) => <li key={message.id}>{message.text}</li>)}</ul>;
+}
+`;
+
+/** A snapshot whose only source blob is JSX that no published tokenizer accepts. */
+function jsxSnapshot(treeObjectId: string): GitTreeSnapshot {
+  const entries = [entry("app/page.tsx", JSX_SOURCE, 2)];
+  const assessedBytes = entries.reduce(
+    (total, candidate) => total + (candidate.objectSize ?? 0),
+    0,
+  );
+  const base = snapshot(treeObjectId);
+  return {
+    ...base,
+    entries,
+    stats: {
+      ...base.stats,
+      entryCount: entries.length,
+      blobEntryCount: entries.length,
+      uniqueObjectCount: entries.length,
+      uniqueBlobObjectCount: entries.length,
+      availableBlobEntryCount: entries.length,
+      assessedBlobBytes: assessedBytes,
+      readObjectBytes: assessedBytes,
+      readObjectCount: entries.length,
+    },
   };
 }
 
@@ -503,6 +536,36 @@ describe("v3 production orchestration", () => {
       result: "no-actionable-risk",
       scanStatus: "partial",
       exitReason: "none",
+    });
+  });
+
+  test("enforces on a JSX repository without requiring allow-partial", async () => {
+    const fixture = fixtureEnvironment({ "INPUT_FAIL-WITHIN-DAYS": "30" });
+    const report = await run(
+      dependencies(fixture, {
+        readSnapshot: (_repositoryPath, treeish) => jsxSnapshot(treeish),
+        detect: detectSnapshot,
+      }),
+    );
+
+    // The tokenizer cannot accept JSX, so the semantic pass is discarded on every
+    // run. The lexical fallback still assessed the blob, so coverage stays complete
+    // and enforcement remains usable without buying `allow-partial: true`.
+    expect(report).toMatchObject({
+      scanStatus: "complete",
+      exitReason: "none",
+    });
+    expect(report.diagnostics).toContainEqual(expect.objectContaining({
+      code: "semantic-tokenization-incomplete@1",
+      path: "app/page.tsx",
+      severity: "notice",
+    }));
+    expect(
+      report.evidenceFacts.some((fact) => fact.kind === "lexical" && fact.modelId === "gpt-old"),
+    ).toBe(true);
+    expect(outputs(fixture.outputPath)).toMatchObject({
+      "scan-status": "complete",
+      "exit-reason": "none",
     });
   });
 
