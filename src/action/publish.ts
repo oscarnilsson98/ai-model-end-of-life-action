@@ -183,7 +183,7 @@ export function renderSummary(
       ...suppressed.slice(0, 100).map(
         (finding) =>
           `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(
-            compact(finding.servingPlatform, 80),
+            compact(servingPlatformLabel(finding), 300),
           )} — <code>${escapeHtml(compact(finding.suppressedBy, 160))}</code>`,
       ),
       ...(suppressed.length > 100

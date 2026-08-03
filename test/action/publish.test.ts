@@ -130,6 +130,17 @@ test("one collapsed finding annotates once and names every candidate platform", 
   expect(lines).toHaveLength(1);
   expect(lines[0]).toContain("o4-mini on azure or openai: shutdown 2026-10-16 (74 day(s))");
   expect(renderSummary(report)).toContain("azure or openai");
+
+  // A suppression may name any covered platform, so the suppression list must not
+  // attribute the suppression to the reported record's platform alone.
+  const suppressed = cleanReport();
+  suppressed.lifecycleFindings = [
+    { ...report.lifecycleFindings[0]!, outcome: "none", suppressedBy: "registry-listing" },
+  ];
+  const suppressionLine = renderSummary(suppressed)
+    .split("\n")
+    .find((line) => line.includes("registry-listing"));
+  expect(suppressionLine).toContain("azure or openai");
 });
 
 test("active suppressions stay visible in the summary", () => {

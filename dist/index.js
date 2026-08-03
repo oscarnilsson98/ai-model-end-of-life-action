@@ -14133,7 +14133,7 @@ function renderSummary(report, options = {}) {
   }
   const suppressed = report.lifecycleFindings.filter((finding) => finding.suppressedBy !== undefined);
   if (suppressed.length > 0) {
-    lines.push("### Active suppressions", "", ...suppressed.slice(0, 100).map((finding) => `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(compact(finding.servingPlatform, 80))} — <code>${escapeHtml(compact(finding.suppressedBy, 160))}</code>`), ...suppressed.length > 100 ? [`- ${suppressed.length - 100} additional suppressed finding(s) are in the JSON report.`] : [], "");
+    lines.push("### Active suppressions", "", ...suppressed.slice(0, 100).map((finding) => `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(compact(servingPlatformLabel(finding), 300))} — <code>${escapeHtml(compact(finding.suppressedBy, 160))}</code>`), ...suppressed.length > 100 ? [`- ${suppressed.length - 100} additional suppressed finding(s) are in the JSON report.`] : [], "");
   }
   if (report.diagnostics.length > 0) {
     lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...report.diagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact(diagnostic.message, 800))}`), "", "</details>", "");
