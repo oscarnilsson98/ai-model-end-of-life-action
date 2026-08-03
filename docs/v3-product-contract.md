@@ -380,6 +380,8 @@ The zero-input workflow MUST work without this file. When present, `.github/ai-m
 
 All configured paths are root-anchored POSIX repository paths. The only pattern operators are `*` within one segment, `?` for one non-separator character, and `**` across segments. Negation, brace expansion, backslashes, absolute paths, empty segments, and `..` are invalid. Matching is case-sensitive against Git path bytes that are valid UTF-8; non-UTF-8 paths remain scannable but cannot be targeted by a policy pattern. The strict schema publishes pattern/count/length bounds.
 
+All timestamps in the examples below are illustrative. Users MUST replace them with the actual creation, observation, review, freshness, and expiry dates before copying an example into a policy or evidence document.
+
 ```yaml
 schemaVersion: 1
 
@@ -475,6 +477,8 @@ V3.0 ingests optional evidence documents only as checked-in Git blobs. By defaul
 Every document represents one named source and every record remains a repository-supplied claim. On pull requests, base documents are trusted facts; target additions may add or strengthen preview evidence, but target deletion or mutation cannot weaken base-derived external evidence during that PR.
 
 Stable IDs provide the refresh/remediation path. If the target supplies a valid document with the same source ID and strictly later generation/capture, freshness/review, and expiry boundaries, that target document controls target `evidence-health`. Source kind, environment, and named source-boundary identity are immutable within a source ID; changing them requires a new ID. Base records omitted or weakened by the refresh are still carried at their baseline lifecycle severity for the current PR, while new/strengthened records are added. Thus deleting an expired source leaves target health expired and fails closed under enforcement; committing a valid fresh replacement can restore complete target coverage without letting the PR erase the base findings it is evaluating. After merge, the replacement becomes the next trusted baseline.
+
+The timestamps in this JSON example are illustrative and MUST be replaced with values from the source being represented.
 
 ```json
 {
@@ -575,7 +579,7 @@ notification-status: disabled | skipped | sent | failed
 
 If a channel is explicitly configured, delivery failure defaults to failing the step on eligible `schedule`, `workflow_dispatch`, or `push` commit targets. `notification-failure-mode: warn` MAY override this. Secrets MUST NOT be used for untrusted fork pull requests. Notification failure never changes `result` or `scan-status`; it changes only `notification-status`, `exit-reason`, and possibly the final step exit.
 
-V3 MUST NOT claim on-change delivery unless prior state is durably restored and next state is durably persisted. A stateless webhook can expose `alert-fingerprint`, `notification-payload`, and next-state outputs, but unchanged-alert suppression is the caller’s responsibility until the action owns durable state.
+V3 MUST NOT claim on-change delivery unless prior state is durably restored and next state is durably persisted. The action exposes `alert-fingerprint` so a caller that persists prior state can implement unchanged-alert suppression. V3.0 publishes no notification payload or next-state token and owns no durable state.
 
 ## Outputs and summary
 

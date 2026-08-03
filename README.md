@@ -54,19 +54,32 @@ The default is advisory: a known lifecycle risk warns but does not fail the job.
 schemaVersion: 1
 
 policy:
-  warnWithinDays: 180
   failWithinDays: 30
-  allowPartial: false
 ```
 
-Setting `failWithinDays` is what turns enforcement on. Once enforced, partial declared coverage fails closed unless trusted policy explicitly sets `allowPartial: true`.
+Setting `failWithinDays` turns enforcement on. The built-in 180-day warning horizon and fail-closed handling for partial coverage remain in effect unless the policy explicitly overrides them.
 
-The same values work as action inputs for simple non-PR workflows:
+Only resolved deployment evidence, or resolved application evidence established as production, can block. Ordinary SDK calls remain advisory because source code alone does not prove where it is deployed. If a known application path is production, add this top-level `scopeRules` section to the same policy file, using the relevant stable rule ID from [the detector contract](docs/v3-detector-contract.md):
+
+```yaml
+scopeRules:
+  - scopeRuleId: production-api
+    detectorRuleIds:
+      - source.ts.openai.request-model@1
+    paths:
+      - services/api/**
+    scope: application
+    environment: production
+    reason: This service is deployed to production
+```
+
+Resolved deployment evidence and current production claims can block without a scope rule. Once enforcement is enabled, partial declared coverage fails closed unless trusted policy explicitly sets `allowPartial: true`.
+
+The threshold also works as an action input for simple non-PR workflows:
 
 ```yaml
 - uses: oscarnilsson98/ai-model-end-of-life-action@v3
   with:
-    warn-within-days: "180"
     fail-within-days: "30"
 ```
 
@@ -78,7 +91,7 @@ On pull requests and merge groups, base-branch policy stays authoritative. Head 
 
 The action reads tracked blobs from the selected Git tree, not arbitrary files in the runner workspace. It never executes repository code or installs repository dependencies.
 
-The v3.0 semantic detectors recognize bounded forms from:
+The action detects static model values in these supported integrations:
 
 - OpenAI's JavaScript/TypeScript and Python SDKs
 - Anthropic's JavaScript/TypeScript and Python SDKs
@@ -87,9 +100,9 @@ The v3.0 semantic detectors recognize bounded forms from:
 - Azure Cognitive Services model deployments in Terraform
 - model-valued environment bindings connected to supported calls
 
-Other bounded UTF-8 files receive an exact, boundary-safe fallback match against model records explicitly eligible for lexical scanning in the typed feed. Lexical evidence, documentation, examples, tests, dynamic selectors, and ambiguous serving platforms can warn or appear as notices, but never block.
+Other tracked UTF-8 files are checked for exact eligible model IDs from the lifecycle feed. Those text-only matches, documentation, examples, tests, dynamic selectors, and ambiguous serving platforms can warn or appear as notices, but never block.
 
-Static evidence has limits. Remote databases, secrets, provider consoles, external deployment repositories, and runtime routers are outside it. A clean result means only that no actionable lifecycle risk was found in the evidence actually assessed — [runtime-only claims](#optional-runtime-only-claims) cover the rest.
+Static evidence has limits. Remote databases, secrets, provider consoles, external deployment repositories, and runtime routers are outside it. A clean result means only that no actionable lifecycle risk was found in the evidence actually assessed. [Checked-in claims](#optional-runtime-only-claims) can represent known runtime-only facts; they do not prove complete coverage.
 
 The exact support matrix and stable rule IDs are published in [the detector contract](docs/v3-detector-contract.md).
 
@@ -120,15 +133,16 @@ Existing base-branch debt stays visible but does not fail an unrelated pull requ
 
 Keep the scheduled trigger even if pull requests are already checked — a provider can announce a shutdown without any repository change.
 
-A warning-only scheduled job finishes green, so it may not attract attention. For operational visibility, either set `failWithinDays` so GitHub sends its normal workflow-failure notifications near the deadline, or configure a Slack incoming webhook:
+A warning-only scheduled job finishes green, so it may not attract attention. A Slack incoming webhook makes actionable advisories visible without changing enforcement:
 
 ```yaml
 - name: Check AI model lifecycle
   uses: oscarnilsson98/ai-model-end-of-life-action@v3
   with:
-    fail-within-days: "30"
     slack-webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
+
+To rely on GitHub's workflow-failure notifications instead, set `failWithinDays` and make sure the relevant evidence is established as a resolved deployment or as production application use, as described above.
 
 Slack is a snapshot, not a stateful alert subscription. Delivery is attempted only when the event name is exactly `schedule`, `workflow_dispatch`, or `push` and the selected target is a commit. Every other event — including `pull_request`, `merge_group`, `release`, and local or unknown events — is skipped, so untrusted changes cannot consume a webhook.
 
@@ -138,7 +152,7 @@ A delivery failure does not change `result` or `scan-status`. It changes `notifi
 
 Static scanning cannot see a model selected in a remote control plane. Additive checked-in claims describe that evidence without turning the ordinary workflow back into an inventory.
 
-For a small number of facts, use an assertion in the policy file:
+For a small number of facts, use an assertion in the policy file. The timestamps below are examples; replace all four with the claim's real assertion, review, review-after, and expiry timestamps:
 
 ```yaml
 schemaVersion: 1
