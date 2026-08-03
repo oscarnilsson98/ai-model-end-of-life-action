@@ -17,7 +17,13 @@ const TRUSTED_NOTIFICATION_EVENTS = new Set(["schedule", "workflow_dispatch", "p
 const PROTECTED_SCOPES = new Set(["documentation", "example", "test"]);
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const RUN_ID_PATTERN = /^[0-9]{1,20}$/;
+/** Only RFC 3986 HTTP(S) characters, so report-owned text can never break out of Slack link syntax. */
+const SAFE_LINK_PATTERN = /^https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]{1,2000}$/;
 const BIDI_CONTROL_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/** A finding the snapshot may name: a live breach or warning that the target still carries. */
+type NotifiableFinding = LifecycleFinding & { outcome: "breach" | "warning" };
 
 export type SlackDeliveryStatus = Extract<
   NotificationStatus,
@@ -81,22 +87,38 @@ function selectedTarget(report: AssessmentReport): string {
   return OID_PATTERN.test(report.event.targetOid) ? report.event.targetOid : "unavailable";
 }
 
-function actionableFindings(report: AssessmentReport): LifecycleFinding[] {
+/** Lexical evidence names a model without proving a call site, so its lines say so. */
+function isTextMatch(finding: LifecycleFinding): boolean {
+  return finding.confidence === "low";
+}
+
+/**
+ * Split live breach and warning findings into the ones the snapshot names and the ones it
+ * only counts. Every counted finding lands in exactly one side, so `Counts:` always
+ * reconciles with the finding list. Low-confidence lexical matches are named and labelled
+ * rather than dropped: a repository with no typed SDK call site has nothing else to report.
+ */
+function partitionFindings(report: AssessmentReport): {
+  listed: NotifiableFinding[];
+  withheld: NotifiableFinding[];
+} {
   const outcomeRank: Readonly<Record<"breach" | "warning", number>> = {
     breach: 0,
     warning: 1,
   };
-  return report.lifecycleFindings
-    .filter(
-      (finding): finding is LifecycleFinding & { outcome: "breach" | "warning" } =>
-        (finding.outcome === "breach" || finding.outcome === "warning") &&
-        finding.delta !== "resolved" &&
-        finding.confidence !== "low" &&
-        !PROTECTED_SCOPES.has(finding.scope),
-    )
+  const notifiable = report.lifecycleFindings.filter(
+    (finding): finding is NotifiableFinding =>
+      (finding.outcome === "breach" || finding.outcome === "warning") &&
+      finding.delta !== "resolved",
+  );
+  const listed = notifiable
+    .filter((finding) => !PROTECTED_SCOPES.has(finding.scope))
     .sort((left, right) => {
       const outcomeDifference = outcomeRank[left.outcome] - outcomeRank[right.outcome];
       if (outcomeDifference !== 0) return outcomeDifference;
+      // Verified evidence outranks a bare text match so the bounded view never buries it.
+      const tierDifference = Number(isTextMatch(left)) - Number(isTextMatch(right));
+      if (tierDifference !== 0) return tierDifference;
       const leftDays = left.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
       const rightDays = right.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
       if (leftDays !== rightDays) return leftDays - rightDays;
@@ -105,6 +127,10 @@ function actionableFindings(report: AssessmentReport): LifecycleFinding[] {
         ? platformDifference
         : compareText(left.modelId, right.modelId);
     });
+  return {
+    listed,
+    withheld: notifiable.filter((finding) => PROTECTED_SCOPES.has(finding.scope)),
+  };
 }
 
 function deadlineText(finding: LifecycleFinding): string {
@@ -116,17 +142,77 @@ function deadlineText(finding: LifecycleFinding): string {
   return `shutdown ${finding.shutdownDate} (${days}d)`;
 }
 
-function findingLine(finding: LifecycleFinding): string {
-  const label = finding.outcome === "breach" ? "BLOCKING" : "ADVISORY";
+/** Report-owned URLs become links only when they cannot alter the surrounding mrkdwn. */
+function safeLink(candidate: string | undefined): string | null {
+  if (candidate === undefined) return null;
+  const trimmed = candidate.trim();
+  if (!SAFE_LINK_PATTERN.test(trimmed)) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  return parsed.username === "" && parsed.password === "" ? trimmed : null;
+}
+
+/** Slack resolves `&amp;` back to `&` inside a link, so query separators survive escaping. */
+function slackLink(url: string, label: string): string {
+  return `<${url.replace(/&/g, "&amp;")}|${label}>`;
+}
+
+function replacementText(finding: LifecycleFinding): string | null {
+  const replacement = finding.replacementModels[0];
+  if (replacement === undefined) return null;
+  const platform = replacement.servingPlatform;
+  return `→ ${
+    platform === undefined || platform === finding.servingPlatform
+      ? replacement.modelId
+      : `${platform}/${replacement.modelId}`
+  }`;
+}
+
+function findingLabel(finding: NotifiableFinding): string {
+  if (finding.outcome === "breach") return "BLOCKING";
+  return isTextMatch(finding) ? "ADVISORY (text match)" : "ADVISORY";
+}
+
+function findingLine(finding: NotifiableFinding): string {
   const qualifiers: string[] = [deadlineText(finding)];
   if (finding.delta !== undefined && finding.delta !== "unchanged") {
     qualifiers.push(finding.delta);
   }
   if (finding.feedConflict) qualifiers.push("feed conflict");
-  return `• *${label}* ${slackText(finding.servingPlatform, 80)} / ${slackText(
-    finding.modelId,
-    180,
-  )} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;
+  const replacement = replacementText(finding);
+  if (replacement !== null) qualifiers.push(replacement);
+  const line = `• *${findingLabel(finding)}* ${slackText(
+    finding.servingPlatform,
+    80,
+  )} / ${slackText(finding.modelId, 180)} — ${qualifiers
+    .map((value) => slackText(value, 100))
+    .join(" · ")}`;
+  const source = safeLink(finding.sourceUrls[0]);
+  return source === null ? line : `${line} · ${slackLink(source, "source")}`;
+}
+
+/** The run link is the only way an alert reader can reach the job summary and artifacts. */
+function workflowRunUrl(): string | null {
+  const repository = repositoryName();
+  const runId = process.env.GITHUB_RUN_ID?.trim();
+  const server = process.env.GITHUB_SERVER_URL?.trim();
+  if (repository === null || server === undefined) return null;
+  if (runId === undefined || !RUN_ID_PATTERN.test(runId)) return null;
+  let origin: string;
+  try {
+    const parsed = new URL(server);
+    if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "") {
+      return null;
+    }
+    origin = parsed.origin;
+  } catch {
+    return null;
+  }
+  return safeLink(`${origin}/${repository}/actions/runs/${runId}`);
 }
 
 function reportFileHint(path: string): string | null {
@@ -145,7 +231,7 @@ function resultIcon(report: AssessmentReport): string {
 
 function renderSlackSnapshot(report: AssessmentReport): string {
   const repository = repositoryName();
-  const findings = actionableFindings(report);
+  const { listed, withheld } = partitionFindings(report);
   const externalSources = report.evidenceSources.filter(
     (source) => source.kind !== "repository",
   );
@@ -174,23 +260,29 @@ function renderSlackSnapshot(report: AssessmentReport): string {
     }
   }
 
-  lines.push("", `*Actionable findings (${findings.length}):*`);
-  if (findings.length === 0) {
+  lines.push("", `*Actionable findings (${listed.length}):*`);
+  if (listed.length === 0 && withheld.length === 0) {
     lines.push("• None in the bounded notification view.");
   } else {
-    lines.push(...findings.slice(0, MAX_ACTIONABLE_FINDINGS).map(findingLine));
-    if (findings.length > MAX_ACTIONABLE_FINDINGS) {
-      lines.push(`• … ${findings.length - MAX_ACTIONABLE_FINDINGS} more finding(s) in the report`);
+    lines.push(...listed.slice(0, MAX_ACTIONABLE_FINDINGS).map(findingLine));
+    if (listed.length > MAX_ACTIONABLE_FINDINGS) {
+      lines.push(`• … ${listed.length - MAX_ACTIONABLE_FINDINGS} more finding(s) in the report`);
+    }
+    if (withheld.length > 0) {
+      lines.push(
+        `• ${withheld.length} counted finding(s) outside application and deployment scope stay in the job summary.`,
+      );
     }
   }
 
+  const runUrl = workflowRunUrl();
   const reportHint = reportFileHint(report.reportPath);
+  const trailer: string[] = [];
+  if (runUrl !== null) trailer.push(`*Run:* ${slackLink(runUrl, "workflow run")}`);
   if (reportHint !== null) {
-    lines.push(
-      "",
-      `*Report:* ${reportHint} (runner-local; upload it as an artifact to retain it)`,
-    );
+    trailer.push(`*Report:* ${reportHint} (runner-local; upload it as an artifact to retain it)`);
   }
+  if (trailer.length > 0) lines.push("", ...trailer);
   return boundedSlackText(lines.join("\n"));
 }
 
