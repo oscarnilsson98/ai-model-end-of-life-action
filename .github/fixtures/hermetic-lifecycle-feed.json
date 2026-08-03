@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 3,
+  "adapter": {
+    "id": "deprecations-info-v3",
+    "version": "1",
+    "sourceSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "generatedAt": "2026-08-02T00:00:00Z",
+  "records": [
+    {
+      "recordId": "hermetic-fixture-model",
+      "servingPlatform": "openai",
+      "primarySourceUrl": "https://example.com/hermetic-fixture-model",
+      "supersedesRecordIds": [],
+      "recordKind": "model",
+      "modelId": "model-used-only-by-hermetic-e2e",
+      "literalScanEligible": false,
+      "lifecycleStatus": "deprecated",
+      "deprecationDate": "2026-01-01",
+      "replacementModels": []
+    }
+  ]
+}

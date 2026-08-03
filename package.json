@@ -1,7 +1,7 @@
 {
   "name": "ai-model-end-of-life-action",
-  "version": "2.0.0",
-  "description": "GitHub Action that flags declared AI models that are deprecated or approaching shutdown.",
+  "version": "3.0.0",
+  "description": "GitHub Action that discovers model usage in committed repository code and warns before known AI model shutdowns.",
   "license": "MIT",
   "private": true,
   "packageManager": "bun@1.3.14",
@@ -14,17 +14,20 @@
   },
   "scripts": {
     "build": "bun run verify-toolchain && bun build src/main.ts --target=node --format=cjs --outfile=dist/index.js",
-    "test": "bun test ./src ./.github/scripts",
+    "test": "bun test ./test ./.github/scripts",
     "typecheck": "tsc --noEmit",
     "verify-toolchain": "bun .github/scripts/check-toolchain.ts",
     "check": "bun run verify-toolchain && bun run typecheck && bun run test"
   },
   "devDependencies": {
     "@types/bun": "1.3.14",
-    "@types/node": "26.1.2",
+    "@types/node": "24.13.3",
     "typescript": "7.0.2"
   },
   "overrides": {
     "@types/node": "24.13.3"
+  },
+  "dependencies": {
+    "yaml": "2.9.0"
   }
 }

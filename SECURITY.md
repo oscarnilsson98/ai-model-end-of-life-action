@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-Security fixes are released on the current `v2` line. Older major versions and individual historical releases do not receive backports.
+Security fixes are released on the current `v3` line. Older major versions and individual historical releases do not receive backports.
 
 | Version | Supported |
 | --- | --- |
-| `v2` | Yes |
-| `< v2` | No |
+| `v3` | Yes |
+| `< v3` | No |
 
 ## Reporting a vulnerability
 
@@ -19,4 +19,4 @@ The maintainer will acknowledge the report as soon as practical and coordinate v
 
 ## Secure use of the action
 
-For the strongest supply-chain guarantee, pin this action to a full release commit SHA and use Dependabot to keep that pin current. Moving major tags such as `v2` are convenient, but they are intentionally mutable. Grant the workflow only the permissions it needs, and store an optional Slack webhook as a GitHub Actions secret rather than directly in workflow YAML.
+For the strongest supply-chain guarantee, pin this action to a full release commit SHA and use Dependabot to keep that pin current. Moving major tags such as `v3` are convenient, but they are intentionally mutable. Grant the workflow only `contents: read`, use an unprivileged `pull_request` checkout with full history, and store an optional Slack webhook as a GitHub Actions secret rather than directly in workflow YAML. V3 does not execute repository code; it reads the selected commit through Git object APIs.

@@ -1,5 +1,0 @@
-[
-  { "id": "retired-fixture", "provider": "openai" },
-  { "id": "undated-fixture", "provider": "openai" },
-  { "id": "missing-fixture", "provider": "openai" }
-]

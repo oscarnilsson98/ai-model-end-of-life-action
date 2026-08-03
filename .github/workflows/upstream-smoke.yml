@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   validate-live-feeds:
-    name: Validate live raw and JSON Feed forms
+    name: Validate reviewed live feed adapter
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -28,5 +28,5 @@ jobs:
         with:
           bun-version-file: package.json
 
-      - name: Validate both live upstream feed contracts
+      - name: Validate the reviewed v3 upstream contract
         run: bun .github/scripts/assert-live-feed.ts

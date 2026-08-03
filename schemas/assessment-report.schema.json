@@ -1,0 +1,440 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/oscarnilsson98/ai-model-end-of-life-action/v3/schemas/assessment-report.schema.json",
+  "title": "AI model lifecycle assessment report",
+  "description": "Strict complete local report emitted by the v3 GitHub Action.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "evaluatedAt",
+    "result",
+    "scanStatus",
+    "comparisonStatus",
+    "exitReason",
+    "targetKind",
+    "event",
+    "evidenceHealth",
+    "evidenceSources",
+    "evidenceFacts",
+    "lifecycleFindings",
+    "unresolvedReferences",
+    "diagnostics",
+    "counts",
+    "policyDiff",
+    "feed",
+    "detectorManifestSha256",
+    "scanFingerprint",
+    "alertFingerprint",
+    "outputTruncated",
+    "notificationStatus",
+    "notificationReason",
+    "reportPath"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "evaluatedAt": { "$ref": "#/$defs/timestamp" },
+    "result": { "$ref": "#/$defs/result" },
+    "baselineResult": { "$ref": "#/$defs/result" },
+    "targetResult": { "$ref": "#/$defs/result" },
+    "scanStatus": { "$ref": "#/$defs/scanStatus" },
+    "baselineScanStatus": { "$ref": "#/$defs/scanStatus" },
+    "targetScanStatus": { "$ref": "#/$defs/scanStatus" },
+    "comparisonStatus": {
+      "enum": ["available", "partial", "unavailable", "not-applicable"]
+    },
+    "exitReason": {
+      "enum": [
+        "none",
+        "assessment-failed",
+        "trusted-base-unavailable",
+        "policy-breach",
+        "partial-disallowed",
+        "notification-failed"
+      ]
+    },
+    "targetKind": { "$ref": "#/$defs/targetKind" },
+    "event": { "$ref": "#/$defs/event" },
+    "evidenceHealth": { "$ref": "#/$defs/evidenceHealth" },
+    "evidenceSources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidenceSource" }
+    },
+    "evidenceFacts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidenceFact" }
+    },
+    "lifecycleFindings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/lifecycleFinding" }
+    },
+    "unresolvedReferences": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidenceFact" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/coverageDiagnostic" }
+    },
+    "counts": { "$ref": "#/$defs/counts" },
+    "policyDiff": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "feed": { "$ref": "#/$defs/feedIdentity" },
+    "detectorManifestSha256": { "$ref": "#/$defs/sha256" },
+    "scanFingerprint": { "$ref": "#/$defs/sha256" },
+    "alertFingerprint": { "$ref": "#/$defs/sha256" },
+    "outputTruncated": { "type": "boolean" },
+    "notificationStatus": { "enum": ["disabled", "skipped", "sent", "failed"] },
+    "notificationReason": { "type": "string" },
+    "reportPath": { "type": "string" }
+  },
+  "$defs": {
+    "result": {
+      "enum": ["no-actionable-risk", "advisory", "blocking", "unknown"]
+    },
+    "scanStatus": { "enum": ["complete", "partial", "failed"] },
+    "evidenceHealth": {
+      "enum": ["current", "review-overdue", "stale", "expired", "invalid"]
+    },
+    "scope": {
+      "enum": [
+        "application",
+        "deployment",
+        "test",
+        "example",
+        "documentation",
+        "unknown"
+      ]
+    },
+    "environment": {
+      "enum": ["production", "staging", "development", "test", "unknown"]
+    },
+    "confidence": { "enum": ["high", "medium", "low"] },
+    "modelResolution": { "enum": ["resolved", "dynamic", "unresolved"] },
+    "selectorKind": {
+      "enum": [
+        "model-id",
+        "deployment-name",
+        "resource-name",
+        "routing-selector",
+        "polymorphic",
+        "dynamic",
+        "unknown"
+      ]
+    },
+    "targetKind": {
+      "enum": [
+        "commit",
+        "synthetic-merge",
+        "synthetic-merge-uncompared",
+        "merge-group",
+        "raw-head-fallback"
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitOid": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?Z$"
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventName", "targetOid", "targetKind", "comparisonRequested"],
+      "properties": {
+        "eventName": { "type": "string" },
+        "targetOid": {
+          "oneOf": [
+            { "$ref": "#/$defs/gitOid" },
+            { "const": "unavailable" }
+          ]
+        },
+        "targetKind": { "$ref": "#/$defs/targetKind" },
+        "baseOid": { "$ref": "#/$defs/gitOid" },
+        "submittedHeadOid": { "$ref": "#/$defs/gitOid" },
+        "targetParentOids": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/gitOid" }
+        },
+        "comparisonRequested": { "type": "boolean" }
+      }
+    },
+    "evidenceSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "health"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["repository", "external-source", "manual-claim"] },
+        "health": { "$ref": "#/$defs/evidenceHealth" }
+      }
+    },
+    "evidenceLocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "line", "column"],
+      "properties": {
+        "path": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 },
+        "endColumn": { "type": "integer", "minimum": 1 },
+        "commitOid": { "$ref": "#/$defs/gitOid" },
+        "blobOid": { "$ref": "#/$defs/gitOid" }
+      }
+    },
+    "resolutionTrace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "detail"],
+      "properties": {
+        "kind": {
+          "enum": ["detector", "constant", "environment-fallback", "policy-resolution"]
+        },
+        "detail": { "type": "string" }
+      }
+    },
+    "evidenceFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceId",
+        "origin",
+        "kind",
+        "confidence",
+        "scope",
+        "environment",
+        "detectorRuleId",
+        "detectorManifestVersion",
+        "rawValue",
+        "modelResolution",
+        "selectorKind",
+        "platformResolution",
+        "policyEligible",
+        "locations",
+        "resolutionTrace"
+      ],
+      "properties": {
+        "evidenceId": { "type": "string" },
+        "origin": { "enum": ["repository", "external-source", "manual-claim"] },
+        "kind": {
+          "enum": [
+            "sdk-argument",
+            "structured-config",
+            "deployment-resource",
+            "env-binding",
+            "manual-claim",
+            "runtime-observation",
+            "deployment-snapshot",
+            "generated-declaration",
+            "lexical"
+          ]
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "detectorRuleId": { "type": "string" },
+        "detectorManifestVersion": { "type": "string" },
+        "rawValue": { "type": "string" },
+        "modelId": { "type": "string" },
+        "servingPlatform": { "type": "string" },
+        "modelResolution": { "$ref": "#/$defs/modelResolution" },
+        "selectorKind": { "$ref": "#/$defs/selectorKind" },
+        "platformResolution": { "enum": ["resolved", "ambiguous", "unknown"] },
+        "policyEligible": { "type": "boolean" },
+        "locations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidenceLocation" }
+        },
+        "resolutionTrace": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/resolutionTrace" }
+        },
+        "sourceId": { "type": "string" },
+        "evidenceHealth": { "$ref": "#/$defs/evidenceHealth" },
+        "reason": { "type": "string" },
+        "provenance": { "type": "string" }
+      }
+    },
+    "replacementModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelId"],
+      "properties": {
+        "modelId": { "type": "string" },
+        "servingPlatform": { "type": "string" }
+      }
+    },
+    "lifecycleFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "findingId",
+        "semanticKey",
+        "evidenceIds",
+        "modelId",
+        "servingPlatform",
+        "lifecycleMatch",
+        "lifecycleStatus",
+        "daysUntilShutdown",
+        "replacementModels",
+        "sourceUrls",
+        "feedConflict",
+        "outcome",
+        "reasons",
+        "scope",
+        "environment",
+        "confidence",
+        "selectorKind",
+        "locations"
+      ],
+      "properties": {
+        "findingId": { "$ref": "#/$defs/sha256" },
+        "semanticKey": { "type": "string" },
+        "evidenceIds": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "modelId": { "type": "string" },
+        "servingPlatform": { "type": "string" },
+        "lifecycleMatch": { "enum": ["exact", "provider-alias", "none"] },
+        "lifecycleStatus": { "enum": ["deprecated", "shutdown-scheduled", "retired"] },
+        "announcementDate": { "$ref": "#/$defs/date" },
+        "deprecationDate": { "$ref": "#/$defs/date" },
+        "shutdownDate": { "$ref": "#/$defs/date" },
+        "daysUntilShutdown": {
+          "oneOf": [
+            { "type": "integer" },
+            { "type": "null" }
+          ]
+        },
+        "replacementModels": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/replacementModel" }
+        },
+        "sourceUrls": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "feedConflict": { "type": "boolean" },
+        "outcome": { "enum": ["breach", "warning", "notice", "none"] },
+        "reasons": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "scope": { "$ref": "#/$defs/scope" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "selectorKind": { "$ref": "#/$defs/selectorKind" },
+        "locations": {
+          "type": "array",
+          "maxItems": 20,
+          "items": { "$ref": "#/$defs/evidenceLocation" }
+        },
+        "suppressedBy": { "type": "string" },
+        "delta": {
+          "enum": ["new", "worsened", "unchanged", "resolved", "comparison-unknown"]
+        }
+      }
+    },
+    "coverageDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "severity"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Stable diagnostic code, including feed-pair-set-change when reviewed legacy feed coverage drifts."
+        },
+        "message": { "type": "string" },
+        "path": { "type": "string" },
+        "severity": { "enum": ["notice", "partial", "failed"] }
+      }
+    },
+    "nonNegativeCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidence",
+        "findings",
+        "blocking",
+        "advisory",
+        "notices",
+        "unresolved",
+        "byScope",
+        "byResolution"
+      ],
+      "properties": {
+        "evidence": { "$ref": "#/$defs/nonNegativeCount" },
+        "findings": { "$ref": "#/$defs/nonNegativeCount" },
+        "blocking": { "$ref": "#/$defs/nonNegativeCount" },
+        "advisory": { "$ref": "#/$defs/nonNegativeCount" },
+        "notices": { "$ref": "#/$defs/nonNegativeCount" },
+        "unresolved": { "$ref": "#/$defs/nonNegativeCount" },
+        "byScope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["application", "deployment", "test", "example", "documentation", "unknown"],
+          "properties": {
+            "application": { "$ref": "#/$defs/nonNegativeCount" },
+            "deployment": { "$ref": "#/$defs/nonNegativeCount" },
+            "test": { "$ref": "#/$defs/nonNegativeCount" },
+            "example": { "$ref": "#/$defs/nonNegativeCount" },
+            "documentation": { "$ref": "#/$defs/nonNegativeCount" },
+            "unknown": { "$ref": "#/$defs/nonNegativeCount" }
+          }
+        },
+        "byResolution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resolved", "dynamic", "unresolved"],
+          "properties": {
+            "resolved": { "$ref": "#/$defs/nonNegativeCount" },
+            "dynamic": { "$ref": "#/$defs/nonNegativeCount" },
+            "unresolved": { "$ref": "#/$defs/nonNegativeCount" }
+          }
+        }
+      }
+    },
+    "feedIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceFeedSha256",
+        "normalizedFeedSha256",
+        "activeRecordsSha256",
+        "feedAdapterManifestSha256"
+      ],
+      "properties": {
+        "sourceFeedSha256": { "$ref": "#/$defs/sha256" },
+        "normalizedFeedSha256": { "$ref": "#/$defs/sha256" },
+        "activeRecordsSha256": { "$ref": "#/$defs/sha256" },
+        "feedAdapterManifestSha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "$comment": "The report is bounded to 26214400 UTF-8 bytes at write time. Cross-field invariants such as targetKind matching event.targetKind and comparison-only baseline fields are enforced by the producer rather than portable Draft 2020-12 JSON Schema."
+}

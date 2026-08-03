@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/oscarnilsson98/ai-model-end-of-life-action/v3/schemas/usage-evidence.schema.json",
+  "title": "Checked-in AI model usage evidence",
+  "description": "Strict shape for repository-supplied runtime observations, deployment snapshots, and generated declarations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "source", "records"],
+  "properties": {
+    "schemaVersion": true,
+    "source": true,
+    "records": true
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/runtimeDocument" },
+    { "$ref": "#/$defs/deploymentDocument" },
+    { "$ref": "#/$defs/generatedDocument" }
+  ],
+  "$defs": {
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._/-]{0,127}$"
+    },
+    "modelId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "canonicalPlatform": {
+      "type": "string",
+      "maxLength": 63,
+      "enum": [
+        "openai",
+        "azure",
+        "anthropic",
+        "aws-bedrock",
+        "google",
+        "google-vertex",
+        "cohere",
+        "groq",
+        "xai"
+      ]
+    },
+    "scope": {
+      "enum": [
+        "application",
+        "deployment",
+        "test",
+        "example",
+        "documentation",
+        "unknown"
+      ]
+    },
+    "environment": {
+      "enum": ["production", "staging", "development", "test", "unknown"]
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 64,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?Z$"
+    },
+    "text4096": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "runtimeSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "claimBasis",
+        "environment",
+        "provenance",
+        "generatedAt",
+        "observedFrom",
+        "observedThrough",
+        "freshUntil",
+        "expiresAt",
+        "snapshotSemantics"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "kind": { "const": "runtime-observation" },
+        "claimBasis": { "const": "repository-supplied" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "policyEligible": { "type": "boolean" },
+        "provenance": { "$ref": "#/$defs/text4096" },
+        "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "observedFrom": { "$ref": "#/$defs/timestamp" },
+        "observedThrough": { "$ref": "#/$defs/timestamp" },
+        "freshUntil": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "snapshotSemantics": { "const": "observations-only" }
+      }
+    },
+    "deploymentSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "claimBasis",
+        "environment",
+        "provenance",
+        "capturedAt",
+        "freshUntil",
+        "expiresAt",
+        "snapshotSemantics",
+        "sourceBoundary"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "kind": { "const": "deployment-snapshot" },
+        "claimBasis": { "const": "repository-supplied" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "policyEligible": { "type": "boolean" },
+        "provenance": { "$ref": "#/$defs/text4096" },
+        "capturedAt": { "$ref": "#/$defs/timestamp" },
+        "freshUntil": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "snapshotSemantics": { "enum": ["complete-for-source", "partial"] },
+        "sourceBoundary": { "$ref": "#/$defs/text4096" }
+      }
+    },
+    "generatedSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "claimBasis",
+        "environment",
+        "provenance",
+        "generatedAt",
+        "reviewAfter",
+        "expiresAt",
+        "generator",
+        "ruleset",
+        "reason"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/stableId" },
+        "kind": { "const": "generated-declaration" },
+        "claimBasis": { "const": "repository-supplied" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "policyEligible": { "type": "boolean" },
+        "provenance": { "$ref": "#/$defs/text4096" },
+        "generatedAt": { "$ref": "#/$defs/timestamp" },
+        "reviewAfter": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" },
+        "generator": { "$ref": "#/$defs/text4096" },
+        "ruleset": { "$ref": "#/$defs/text4096" },
+        "reason": { "$ref": "#/$defs/text4096" }
+      }
+    },
+    "recordCommonProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceId",
+        "modelId",
+        "servingPlatform",
+        "scope",
+        "environment",
+        "reason"
+      ],
+      "properties": {
+        "evidenceId": { "$ref": "#/$defs/stableId" },
+        "modelId": { "$ref": "#/$defs/modelId" },
+        "servingPlatform": { "$ref": "#/$defs/canonicalPlatform" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "reason": { "$ref": "#/$defs/text4096" }
+      }
+    },
+    "runtimeRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceId",
+        "modelId",
+        "servingPlatform",
+        "scope",
+        "environment",
+        "reason",
+        "firstObservedAt",
+        "lastObservedAt",
+        "observationCount"
+      ],
+      "properties": {
+        "evidenceId": { "$ref": "#/$defs/stableId" },
+        "modelId": { "$ref": "#/$defs/modelId" },
+        "servingPlatform": { "$ref": "#/$defs/canonicalPlatform" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "reason": { "$ref": "#/$defs/text4096" },
+        "firstObservedAt": { "$ref": "#/$defs/timestamp" },
+        "lastObservedAt": { "$ref": "#/$defs/timestamp" },
+        "observationCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "runtimeDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "source", "records"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "source": { "$ref": "#/$defs/runtimeSource" },
+        "records": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/runtimeRecord" }
+        }
+      }
+    },
+    "deploymentDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "source", "records"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "source": { "$ref": "#/$defs/deploymentSource" },
+        "records": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/recordCommonProperties" }
+        }
+      }
+    },
+    "generatedDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "source", "records"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "source": { "$ref": "#/$defs/generatedSource" },
+        "records": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/recordCommonProperties" }
+        }
+      }
+    }
+  },
+  "$comment": "The runtime additionally enforces timestamp ordering, source/record environment equality, and uniqueness of evidenceId across records. Those relational constraints are not expressible in portable Draft 2020-12 JSON Schema."
+}

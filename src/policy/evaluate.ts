@@ -1,0 +1,591 @@
+import {
+  getV3ModelPair,
+  type ActiveLifecycleSignature,
+  type IndexedModelPair,
+  type V3FeedIndex,
+} from "../lifecycle/feed.ts";
+import { matchRepositoryPattern } from "./policy.ts";
+import {
+  canonicalSha256,
+  combineEvidenceHealth,
+  resultFromFindings,
+  strongerOutcome,
+} from "../shared/status.ts";
+import type {
+  CoverageDiagnostic,
+  Evaluation,
+  EvidenceConfidence,
+  EvidenceEnvironment,
+  EvidenceFact,
+  EvidenceHealth,
+  EvidenceScope,
+  LifecycleFinding,
+  Policy,
+  PolicyOutcome,
+  ResolutionRule,
+  ScanStatus,
+  SuppressionRule,
+} from "../shared/types.ts";
+
+const TRUSTED_RESOLUTION_POLICY_RULES = new Set([
+  "source.ts.openai.request-model@1",
+  "source.py.openai.request-model@1",
+  "source.ts.anthropic.messages-model@1",
+  "source.py.anthropic.messages-model@1",
+  "source.ts.google-genai.generate-model@1",
+  "source.py.google-genai.generate-model@1",
+  "source.ts.aws-bedrock.invoke-model@1",
+  "source.ts.aws-bedrock.converse-model@1",
+  "source.py.aws-bedrock.invoke-model@1",
+  "source.py.aws-bedrock.converse-model@1",
+  "deploy.hcl.azure.cognitive-deployment-model@1",
+]);
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function calendarDaysUntil(date: string, now: number): number {
+  const evaluated = new Date(now);
+  const evaluatedDay = Date.UTC(
+    evaluated.getUTCFullYear(),
+    evaluated.getUTCMonth(),
+    evaluated.getUTCDate(),
+  );
+  const [year, month, day] = date.split("-").map(Number);
+  return Math.round((Date.UTC(year as number, (month as number) - 1, day as number) - evaluatedDay) / 86_400_000);
+}
+
+function currentResolution(rule: ResolutionRule, now: number): "current" | "review-overdue" | "expired" {
+  if (now >= Date.parse(rule.expiresAt)) return "expired";
+  if (now >= Date.parse(rule.reviewAfter)) return "review-overdue";
+  return "current";
+}
+
+function pathsForFact(fact: EvidenceFact): string[] {
+  return [...new Set(fact.locations.map((location) => location.path))];
+}
+
+function resolutionMatches(rule: ResolutionRule, fact: EvidenceFact): boolean {
+  return (
+    rule.match.detectorRuleId === fact.detectorRuleId &&
+    rule.match.rawValue === fact.rawValue &&
+    pathsForFact(fact).some((path) =>
+      rule.match.paths.some((pattern) => matchRepositoryPattern(pattern, path)),
+    )
+  );
+}
+
+function applyResolutions(
+  evidence: readonly EvidenceFact[],
+  policy: Policy,
+  now: number,
+): { evidence: EvidenceFact[]; diagnostics: CoverageDiagnostic[]; scanStatus: ScanStatus } {
+  const diagnostics: CoverageDiagnostic[] = [];
+  let scanStatus: ScanStatus = "complete";
+  for (const resolution of policy.resolutions) {
+    const health = currentResolution(resolution, now);
+    if (health !== "current") {
+      scanStatus = "partial";
+      diagnostics.push({
+        code: `resolution-${health}`,
+        message: `Resolution ${resolution.resolutionId} is ${health} and was not applied.`,
+        path: ".github/ai-model-lifecycle.yml",
+        severity: "partial",
+      });
+    }
+  }
+  const resolvedEvidence = evidence.map((original): EvidenceFact => {
+    let fact: EvidenceFact = {
+      ...original,
+      locations: [...original.locations],
+      resolutionTrace: [...original.resolutionTrace],
+    };
+    const matches = policy.resolutions.filter(
+      (rule) => currentResolution(rule, now) === "current" && resolutionMatches(rule, fact),
+    );
+    const pairs = new Map(
+      matches.map((rule) => [
+        JSON.stringify([rule.resolveTo.servingPlatform, rule.resolveTo.modelId]),
+        rule,
+      ]),
+    );
+    if (pairs.size === 1) {
+      const rule = pairs.values().next().value as ResolutionRule | undefined;
+      if (rule !== undefined) {
+        fact = {
+          ...fact,
+          modelId: rule.resolveTo.modelId,
+          servingPlatform: rule.resolveTo.servingPlatform,
+          modelResolution: "resolved",
+          selectorKind: "model-id",
+          platformResolution: "resolved",
+          policyEligible:
+            fact.origin === "repository" &&
+            TRUSTED_RESOLUTION_POLICY_RULES.has(fact.detectorRuleId) &&
+            fact.confidence === "high" &&
+            fact.scope !== "test" &&
+            fact.scope !== "example" &&
+            fact.scope !== "documentation",
+          resolutionTrace: [
+            ...fact.resolutionTrace,
+            { kind: "policy-resolution", detail: rule.resolutionId },
+          ],
+        };
+      }
+    } else if (pairs.size > 1) {
+      fact = {
+        ...fact,
+        modelResolution: "unresolved",
+        platformResolution: "ambiguous",
+        policyEligible: false,
+        resolutionTrace: [
+          ...fact.resolutionTrace,
+          { kind: "policy-resolution", detail: "conflicting trusted resolutions" },
+        ],
+      };
+      diagnostics.push({
+        code: "conflicting-resolutions",
+        message: `Conflicting current resolutions match evidence ${fact.evidenceId}.`,
+        ...(fact.locations[0]?.path === undefined ? {} : { path: fact.locations[0].path }),
+        severity: "partial",
+      });
+      scanStatus = "partial";
+    }
+    return fact;
+  });
+  for (const resolution of policy.resolutions) {
+    if (!evidence.some((fact) => resolutionMatches(resolution, fact))) {
+      diagnostics.push({
+        code: "unused-resolution",
+        message: `Resolution ${resolution.resolutionId} did not match evidence in this tree.`,
+        path: ".github/ai-model-lifecycle.yml",
+        severity: "notice",
+      });
+    }
+  }
+  return { evidence: resolvedEvidence, diagnostics, scanStatus };
+}
+
+const PROTECTED_SCOPES = new Set<EvidenceScope>(["documentation", "test", "example"]);
+const REPOSITORY_BLOCKING_KINDS = new Set<EvidenceFact["kind"]>([
+  "sdk-argument",
+  "structured-config",
+  "deployment-resource",
+]);
+
+function originAndKindCanBlock(fact: EvidenceFact): boolean {
+  if (fact.origin === "repository") return REPOSITORY_BLOCKING_KINDS.has(fact.kind);
+  if (fact.origin === "manual-claim") return fact.kind === "manual-claim";
+  return fact.kind === "runtime-observation" || fact.kind === "deployment-snapshot";
+}
+
+function scopeRuleStrength(scope: EvidenceScope, environment: EvidenceEnvironment): number {
+  const scopeRank: Record<EvidenceScope, number> = {
+    documentation: 0,
+    example: 1,
+    test: 2,
+    unknown: 3,
+    application: 4,
+    deployment: 5,
+  };
+  const environmentRank: Record<EvidenceEnvironment, number> = {
+    unknown: 0,
+    test: 1,
+    development: 2,
+    staging: 3,
+    production: 4,
+  };
+  return scopeRank[scope] * 10 + environmentRank[environment];
+}
+
+function applyScopeRules(
+  evidence: readonly EvidenceFact[],
+  policy: Policy,
+  diagnostics: CoverageDiagnostic[],
+): EvidenceFact[] {
+  return evidence.map((original): EvidenceFact => {
+    const applicable: Array<{ scope: EvidenceScope; environment: EvidenceEnvironment }> = [];
+    for (const rule of policy.scopeRules) {
+      if (!rule.detectorRuleIds.includes(original.detectorRuleId)) continue;
+      if (
+        !pathsForFact(original).some((path) =>
+          rule.paths.some((pattern) => matchRepositoryPattern(pattern, path)),
+        )
+      ) {
+        continue;
+      }
+      if (PROTECTED_SCOPES.has(original.scope) && !PROTECTED_SCOPES.has(rule.scope)) {
+        diagnostics.push({
+          code: "protected-scope-promotion-ignored",
+          message: `Scope rule ${rule.scopeRuleId} cannot promote ${original.scope} evidence.`,
+          ...(original.locations[0]?.path === undefined
+            ? {}
+            : { path: original.locations[0].path }),
+          severity: "notice",
+        });
+        continue;
+      }
+      applicable.push({ scope: rule.scope, environment: rule.environment });
+    }
+    if (applicable.length === 0) return original;
+    applicable.sort((left, right) => {
+      const strength = scopeRuleStrength(right.scope, right.environment) -
+        scopeRuleStrength(left.scope, left.environment);
+      return strength || compareText(left.scope, right.scope) ||
+        compareText(left.environment, right.environment);
+    });
+    const selected = applicable[0] as {
+      scope: EvidenceScope;
+      environment: EvidenceEnvironment;
+    };
+    return { ...original, ...selected };
+  });
+}
+
+function suppressionMatches(
+  suppression: SuppressionRule,
+  fact: EvidenceFact,
+  modelId: string,
+  servingPlatform: string,
+): boolean {
+  const target = suppression.target;
+  if ("evidenceId" in target) {
+    return target.evidenceId === fact.evidenceId;
+  }
+  return (
+    target.modelId === modelId &&
+    target.servingPlatform === servingPlatform &&
+    target.detectorRuleIds.includes(fact.detectorRuleId) &&
+    pathsForFact(fact).some((path) =>
+      target.paths.some((pattern) => matchRepositoryPattern(pattern, path)),
+    )
+  );
+}
+
+function policyOutcome(input: {
+  fact: EvidenceFact;
+  pair: IndexedModelPair;
+  lifecycle: ActiveLifecycleSignature;
+  policy: Policy;
+  now: number;
+  exactPlatform: boolean;
+}): { outcome: PolicyOutcome; daysUntilShutdown: number | null; reasons: string[] } {
+  const { fact, pair, lifecycle, policy, exactPlatform } = input;
+  const daysUntilShutdown =
+    lifecycle.shutdownDate === null ? null : calendarDaysUntil(lifecycle.shutdownDate, input.now);
+  const reasons: string[] = [];
+  const scopeEligible = fact.scope === "application" || fact.scope === "deployment";
+  const protectedOrUnknown =
+    fact.scope === "documentation" ||
+    fact.scope === "test" ||
+    fact.scope === "example" ||
+    fact.scope === "unknown";
+  const insideWarning =
+    daysUntilShutdown === null || daysUntilShutdown <= policy.warnWithinDays;
+  let outcome: PolicyOutcome = "none";
+  if (insideWarning) {
+    if (fact.kind === "lexical") {
+      outcome = scopeEligible ? "warning" : "notice";
+      reasons.push(
+        scopeEligible
+          ? "Exact typed-feed ID appears in application/deployment text; lexical evidence cannot block."
+          : "Exact typed-feed ID appears only in protected or unknown-scope text.",
+      );
+    } else if (scopeEligible || fact.origin !== "repository") {
+      outcome = "warning";
+      reasons.push(
+        lifecycle.shutdownDate === null
+          ? "The joined lifecycle record has no published shutdown date."
+          : `Shutdown is ${daysUntilShutdown} UTC calendar day(s) away.`,
+      );
+    } else if (protectedOrUnknown) {
+      outcome = "notice";
+      reasons.push("Evidence is outside an actionable application/deployment scope.");
+    }
+  } else {
+    outcome = "notice";
+    reasons.push("Lifecycle date is outside the warning horizon.");
+  }
+  if (pair.conflict) {
+    if (outcome === "notice" || outcome === "none") outcome = "warning";
+    reasons.push("The feed has conflicting active lifecycle signatures for this exact pair.");
+  }
+  const breachEligible =
+    policy.failWithinDays !== null &&
+    daysUntilShutdown !== null &&
+    daysUntilShutdown <= policy.failWithinDays &&
+    originAndKindCanBlock(fact) &&
+    fact.policyEligible &&
+    fact.confidence === "high" &&
+    (fact.scope === "deployment" ||
+      (fact.scope === "application" && fact.environment === "production")) &&
+    fact.modelResolution === "resolved" &&
+    fact.platformResolution === "resolved" &&
+    fact.selectorKind === "model-id" &&
+    exactPlatform &&
+    pair.blockingJoinEligible &&
+    !pair.conflict &&
+    (fact.evidenceHealth === undefined || fact.evidenceHealth === "current");
+  if (breachEligible) {
+    outcome = "breach";
+    reasons.push(`Definite evidence breaches failWithinDays=${policy.failWithinDays}.`);
+  }
+  return { outcome, daysUntilShutdown, reasons };
+}
+
+function strongestScope(left: EvidenceScope, right: EvidenceScope): EvidenceScope {
+  const rank: Record<EvidenceScope, number> = {
+    documentation: 0,
+    test: 0,
+    example: 0,
+    unknown: 1,
+    application: 2,
+    deployment: 3,
+  };
+  return rank[left] >= rank[right] ? left : right;
+}
+
+function strongestEnvironment(
+  left: EvidenceEnvironment,
+  right: EvidenceEnvironment,
+): EvidenceEnvironment {
+  const rank: Record<EvidenceEnvironment, number> = {
+    unknown: 0,
+    test: 1,
+    development: 2,
+    staging: 3,
+    production: 4,
+  };
+  return rank[left] >= rank[right] ? left : right;
+}
+
+function strongestConfidence(
+  left: EvidenceConfidence,
+  right: EvidenceConfidence,
+): EvidenceConfidence {
+  const rank: Record<EvidenceConfidence, number> = { low: 0, medium: 1, high: 2 };
+  return rank[left] >= rank[right] ? left : right;
+}
+
+function compareLocation(
+  left: LifecycleFinding["locations"][number],
+  right: LifecycleFinding["locations"][number],
+): number {
+  return (
+    compareText(left.path, right.path) ||
+    left.line - right.line ||
+    left.column - right.column ||
+    (left.endLine ?? 0) - (right.endLine ?? 0) ||
+    (left.endColumn ?? 0) - (right.endColumn ?? 0)
+  );
+}
+
+function lifecycleFinding(
+  fact: EvidenceFact,
+  pair: IndexedModelPair,
+  lifecycle: ActiveLifecycleSignature,
+  policy: Policy,
+  now: number,
+  exactPlatform: boolean,
+): LifecycleFinding {
+  const evaluated = policyOutcome({ fact, pair, lifecycle, policy, now, exactPlatform });
+  const semanticKey = JSON.stringify([
+    pair.servingPlatform,
+    pair.modelId,
+    lifecycle.signatureIdentity,
+  ]);
+  return {
+    findingId: canonicalSha256("ai-model-eol/lifecycle-finding/v3", semanticKey),
+    semanticKey,
+    evidenceIds: [fact.evidenceId],
+    modelId: pair.modelId,
+    servingPlatform: pair.servingPlatform,
+    lifecycleMatch: "exact",
+    lifecycleStatus: lifecycle.lifecycleStatus,
+    ...(lifecycle.announcementDate === null ? {} : { announcementDate: lifecycle.announcementDate }),
+    ...(lifecycle.deprecationDate === null ? {} : { deprecationDate: lifecycle.deprecationDate }),
+    ...(lifecycle.shutdownDate === null ? {} : { shutdownDate: lifecycle.shutdownDate }),
+    daysUntilShutdown: evaluated.daysUntilShutdown,
+    replacementModels: lifecycle.provenance.flatMap((entry) => [...entry.replacementModels]),
+    sourceUrls: [...lifecycle.primarySourceUrls],
+    feedConflict: pair.conflict,
+    outcome: evaluated.outcome,
+    reasons: evaluated.reasons,
+    scope: fact.scope,
+    environment: fact.environment,
+    confidence: fact.confidence,
+    selectorKind: fact.selectorKind,
+    locations: [...fact.locations],
+  };
+}
+
+function joinFact(fact: EvidenceFact, feed: V3FeedIndex, policy: Policy, now: number): LifecycleFinding[] {
+  if (fact.modelResolution !== "resolved" || fact.modelId === undefined) return [];
+  let pairs: IndexedModelPair[] = [];
+  let exactPlatform = false;
+  if (fact.platformResolution === "resolved" && fact.servingPlatform !== undefined) {
+    const pair = getV3ModelPair(feed, fact.servingPlatform, fact.modelId);
+    if (pair !== undefined) pairs = [pair];
+    exactPlatform = true;
+  } else if (fact.platformResolution === "ambiguous") {
+    pairs = feed.modelPairs.filter((pair) => pair.modelId === fact.modelId);
+  }
+  const findings: LifecycleFinding[] = [];
+  for (const pair of pairs) {
+    for (const lifecycle of pair.activeLifecycles) {
+      const finding = lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform);
+      if (!exactPlatform && finding.outcome === "breach") finding.outcome = "warning";
+      if (!exactPlatform) finding.reasons.push("Serving platform is ambiguous; this match cannot block.");
+      findings.push(finding);
+    }
+  }
+  return findings;
+}
+
+function aggregateFindings(findings: readonly LifecycleFinding[]): LifecycleFinding[] {
+  const byKey = new Map<string, LifecycleFinding>();
+  for (const finding of [...findings].sort((left, right) =>
+    compareText(left.evidenceIds[0] ?? "", right.evidenceIds[0] ?? "") ||
+    compareText(left.semanticKey, right.semanticKey)
+  )) {
+    const existing = byKey.get(finding.semanticKey);
+    if (existing === undefined) {
+      byKey.set(finding.semanticKey, {
+        ...finding,
+        evidenceIds: [...finding.evidenceIds],
+        replacementModels: [...finding.replacementModels],
+        sourceUrls: [...finding.sourceUrls],
+        reasons: [...finding.reasons],
+        locations: [...finding.locations],
+      });
+      continue;
+    }
+    existing.outcome = strongerOutcome(existing.outcome, finding.outcome);
+    existing.evidenceIds = [...new Set([...existing.evidenceIds, ...finding.evidenceIds])].sort(compareText);
+    existing.sourceUrls = [...new Set([...existing.sourceUrls, ...finding.sourceUrls])].sort(compareText);
+    existing.reasons = [...new Set([...existing.reasons, ...finding.reasons])].sort(compareText);
+    existing.locations = [...existing.locations, ...finding.locations]
+      .sort(compareLocation)
+      .slice(0, 20);
+    existing.replacementModels = [
+      ...new Map(
+        [...existing.replacementModels, ...finding.replacementModels].map((replacement) => [
+          JSON.stringify([replacement.servingPlatform ?? null, replacement.modelId]),
+          replacement,
+        ]),
+      ).values(),
+    ].sort((left, right) =>
+      compareText(left.servingPlatform ?? "", right.servingPlatform ?? "") ||
+      compareText(left.modelId, right.modelId)
+    );
+    existing.scope = strongestScope(existing.scope, finding.scope);
+    existing.environment = strongestEnvironment(existing.environment, finding.environment);
+    existing.confidence = strongestConfidence(existing.confidence, finding.confidence);
+    if (existing.suppressedBy !== finding.suppressedBy) delete existing.suppressedBy;
+  }
+  return [...byKey.values()].sort((left, right) => {
+    const daysLeft = left.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
+    const daysRight = right.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
+    return daysLeft - daysRight || compareText(left.semanticKey, right.semanticKey);
+  });
+}
+
+function applySuppressions(
+  findings: LifecycleFinding[],
+  evidenceById: ReadonlyMap<string, EvidenceFact>,
+  policy: Policy,
+  now: number,
+  diagnostics: CoverageDiagnostic[],
+): void {
+  const current = policy.suppressions.filter((suppression) => {
+    if (now < Date.parse(suppression.expiresAt)) return true;
+    diagnostics.push({
+      code: "suppression-expired",
+      message: `Suppression ${suppression.suppressionId} expired and was not applied.`,
+      path: ".github/ai-model-lifecycle.yml",
+      severity: "notice",
+    });
+    return false;
+  });
+  for (const finding of findings) {
+    for (const suppression of current) {
+      const matched = finding.evidenceIds.some((evidenceId) => {
+        const fact = evidenceById.get(evidenceId);
+        return (
+          fact !== undefined &&
+          suppressionMatches(suppression, fact, finding.modelId, finding.servingPlatform)
+        );
+      });
+      if (matched) {
+        finding.suppressedBy = suppression.suppressionId;
+        finding.outcome = "none";
+        finding.reasons.push(`Suppressed by ${suppression.suppressionId}.`);
+        break;
+      }
+    }
+  }
+}
+
+function evidenceHealth(evidence: readonly EvidenceFact[]): EvidenceHealth {
+  return combineEvidenceHealth(
+    ...evidence.map((fact) => fact.evidenceHealth ?? "current"),
+  );
+}
+
+function unresolvedIsAdvisory(fact: EvidenceFact): boolean {
+  return (
+    fact.kind !== "lexical" &&
+    fact.confidence !== "low" &&
+    (fact.scope === "application" || fact.scope === "deployment")
+  );
+}
+
+export function evaluateEvidence(input: {
+  evidence: readonly EvidenceFact[];
+  feed: V3FeedIndex;
+  policy: Policy;
+  now: number;
+  scanStatus: Exclude<ScanStatus, "failed">;
+  diagnostics?: readonly CoverageDiagnostic[];
+}): Evaluation {
+  const diagnostics = [...(input.diagnostics ?? [])];
+  const orderedEvidence = [...input.evidence].sort((left, right) =>
+    compareText(left.evidenceId, right.evidenceId)
+  );
+  const resolved = applyResolutions(orderedEvidence, input.policy, input.now);
+  diagnostics.push(...resolved.diagnostics);
+  const scoped = applyScopeRules(resolved.evidence, input.policy, diagnostics);
+  const unresolved = scoped.filter(
+    (fact) =>
+      fact.modelResolution !== "resolved" ||
+      fact.platformResolution !== "resolved" ||
+      fact.selectorKind !== "model-id" ||
+      fact.modelId === undefined ||
+      fact.servingPlatform === undefined,
+  );
+  const rawFindings = scoped.flatMap((fact) => joinFact(fact, input.feed, input.policy, input.now));
+  const evidenceById = new Map(scoped.map((fact) => [fact.evidenceId, fact]));
+  applySuppressions(rawFindings, evidenceById, input.policy, input.now, diagnostics);
+  const findings = aggregateFindings(rawFindings);
+  let result = resultFromFindings(findings);
+  const health = evidenceHealth(scoped);
+  if (
+    result === "no-actionable-risk" &&
+    (unresolved.some(unresolvedIsAdvisory) || health !== "current")
+  ) {
+    result = "advisory";
+  }
+  return {
+    result,
+    scanStatus:
+      input.scanStatus === "partial" || resolved.scanStatus === "partial" || health !== "current"
+        ? "partial"
+        : "complete",
+    evidence: scoped,
+    findings,
+    unresolved,
+    diagnostics,
+    evidenceHealth: health,
+  };
+}

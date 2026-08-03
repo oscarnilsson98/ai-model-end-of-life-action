@@ -1,0 +1,290 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/oscarnilsson98/ai-model-end-of-life-action/v3/schemas/policy.schema.json",
+  "title": "AI model lifecycle policy",
+  "description": "Strict JSON shape for .github/ai-model-lifecycle.yml. YAML is decoded with the Core schema before validation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "policy": { "$ref": "#/$defs/policy" },
+    "usageEvidenceFiles": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/repositoryPattern" }
+    },
+    "assertions": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/assertion" }
+    },
+    "resolutions": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/resolution" }
+    },
+    "scopeRules": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/scopeRule" }
+    },
+    "suppressions": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/suppression" }
+    }
+  },
+  "$defs": {
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "warnWithinDays": { "$ref": "#/$defs/policyDays" },
+        "failWithinDays": {
+          "oneOf": [
+            { "$ref": "#/$defs/policyDays" },
+            { "type": "null" }
+          ]
+        },
+        "allowPartial": { "type": "boolean" }
+      }
+    },
+    "policyDays": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 36500
+    },
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._/-]{0,127}$"
+    },
+    "modelId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "canonicalPlatform": {
+      "type": "string",
+      "maxLength": 63,
+      "enum": [
+        "openai",
+        "azure",
+        "anthropic",
+        "aws-bedrock",
+        "google",
+        "google-vertex",
+        "cohere",
+        "groq",
+        "xai"
+      ]
+    },
+    "scope": {
+      "enum": [
+        "application",
+        "deployment",
+        "test",
+        "example",
+        "documentation",
+        "unknown"
+      ]
+    },
+    "environment": {
+      "enum": ["production", "staging", "development", "test", "unknown"]
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 64,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?Z$"
+    },
+    "text4096": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "text1024": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "text256": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "repositoryPattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!/)(?!.*[\\u0000-\\u001f\\u007f])(?!.*\\\\)(?!.*[!{}\\[\\]])(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)(?:(?:\\*\\*|(?:(?!\\*\\*)[^/])+))(?:/(?:\\*\\*|(?:(?!\\*\\*)[^/])+))*$"
+    },
+    "suppressionPattern": {
+      "allOf": [
+        { "$ref": "#/$defs/repositoryPattern" },
+        {
+          "description": "A suppression path must contain a literal bounded component and cannot match the entire repository solely through wildcards.",
+          "pattern": "[^*?/]"
+        }
+      ]
+    },
+    "nonEmptyUniqueTextArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/text1024" }
+    },
+    "nonEmptyUniquePatternArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/repositoryPattern" }
+    },
+    "nonEmptyUniqueSuppressionPatternArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/suppressionPattern" }
+    },
+    "assertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceId",
+        "modelId",
+        "servingPlatform",
+        "scope",
+        "environment",
+        "reason",
+        "provenance",
+        "assertedAt",
+        "reviewedAt",
+        "reviewAfter",
+        "expiresAt"
+      ],
+      "properties": {
+        "evidenceId": { "$ref": "#/$defs/stableId" },
+        "modelId": { "$ref": "#/$defs/modelId" },
+        "servingPlatform": { "$ref": "#/$defs/canonicalPlatform" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "policyEligible": { "type": "boolean" },
+        "reason": { "$ref": "#/$defs/text4096" },
+        "provenance": { "$ref": "#/$defs/text4096" },
+        "assertedAt": { "$ref": "#/$defs/timestamp" },
+        "reviewedAt": { "$ref": "#/$defs/timestamp" },
+        "reviewAfter": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resolutionId",
+        "match",
+        "resolveTo",
+        "reason",
+        "reviewedAt",
+        "reviewAfter",
+        "expiresAt"
+      ],
+      "properties": {
+        "resolutionId": { "$ref": "#/$defs/stableId" },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["detectorRuleId", "rawValue", "paths"],
+          "properties": {
+            "detectorRuleId": { "$ref": "#/$defs/text256" },
+            "rawValue": { "$ref": "#/$defs/text1024" },
+            "paths": { "$ref": "#/$defs/nonEmptyUniquePatternArray" }
+          }
+        },
+        "resolveTo": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["modelId", "servingPlatform"],
+          "properties": {
+            "modelId": { "$ref": "#/$defs/modelId" },
+            "servingPlatform": { "$ref": "#/$defs/canonicalPlatform" }
+          }
+        },
+        "reason": { "$ref": "#/$defs/text4096" },
+        "reviewedAt": { "$ref": "#/$defs/timestamp" },
+        "reviewAfter": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "scopeRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scopeRuleId",
+        "detectorRuleIds",
+        "paths",
+        "scope",
+        "environment",
+        "reason"
+      ],
+      "properties": {
+        "scopeRuleId": { "$ref": "#/$defs/stableId" },
+        "detectorRuleIds": { "$ref": "#/$defs/nonEmptyUniqueTextArray" },
+        "paths": { "$ref": "#/$defs/nonEmptyUniquePatternArray" },
+        "scope": { "$ref": "#/$defs/scope" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "reason": { "$ref": "#/$defs/text4096" }
+      }
+    },
+    "suppression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suppressionId", "target", "reason", "createdAt", "expiresAt"],
+      "properties": {
+        "suppressionId": { "$ref": "#/$defs/stableId" },
+        "target": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["evidenceId"],
+              "properties": {
+                "evidenceId": { "$ref": "#/$defs/stableId" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["modelId", "servingPlatform", "detectorRuleIds", "paths"],
+              "properties": {
+                "modelId": { "$ref": "#/$defs/modelId" },
+                "servingPlatform": { "$ref": "#/$defs/canonicalPlatform" },
+                "detectorRuleIds": { "$ref": "#/$defs/nonEmptyUniqueTextArray" },
+                "paths": { "$ref": "#/$defs/nonEmptyUniqueSuppressionPatternArray" }
+              }
+            }
+          ]
+        },
+        "reason": { "$ref": "#/$defs/text4096" },
+        "createdAt": { "$ref": "#/$defs/timestamp" },
+        "expiresAt": { "$ref": "#/$defs/timestamp" }
+      }
+    }
+  },
+  "$comment": "The runtime additionally enforces unique stable IDs across each rule array and chronological ordering of freshness timestamps. Those relational constraints are not expressible in portable Draft 2020-12 JSON Schema."
+}

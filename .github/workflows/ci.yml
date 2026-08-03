@@ -41,7 +41,7 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Typecheck CI fixture helpers
+      - name: Typecheck CI helpers
         run: bunx --bun tsc --project .github/tsconfig.json
 
       - name: Run deterministic unit tests
@@ -63,7 +63,7 @@ jobs:
           fi
 
   packaged-action:
-    name: Packaged action (${{ matrix.os }})
+    name: Zero-input packaged action (${{ matrix.os }})
     needs: quality
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
@@ -72,170 +72,45 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - name: Check out the repository
+      - name: Check out complete repository history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          fetch-depth: 0
 
-      - name: Set up Bun
+      - name: Set up Bun for assertions
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version-file: package.json
 
-      - name: Start the local lifecycle-feed fixture
-        shell: bash
-        run: |
-          bun .github/scripts/fixture-server.ts 0 fixture-server.url > fixture-server.log 2>&1 &
-          echo "$!" > fixture-server.pid
-          for attempt in {1..30}; do
-            if [[ -s fixture-server.url ]]; then
-              fixture_url="$(cat fixture-server.url)"
-              fixture_url="${fixture_url%/}"
-              if FIXTURE_URL="$fixture_url" bun -e '
-                const response = await fetch(`${Bun.env.FIXTURE_URL}/health`);
-                if (!response.ok) process.exit(1);
-              ' 2>/dev/null; then
-                echo "FIXTURE_FEED_URL=$fixture_url/deprecations.json" >> "$GITHUB_ENV"
-                exit 0
-              fi
-            fi
-            sleep 1
-          done
-          cat fixture-server.log >&2
-          echo "Local lifecycle-feed fixture did not become ready." >&2
-          exit 1
-
-      - name: Run the checked-in bundle against the local fixture
-        id: fixture-check
+      - name: Run the checked-in zero-input bundle
+        id: lifecycle
         uses: ./
-        with:
-          models-file: .github/fixtures/models.json
-          days-before-shutdown: "0"
-          feed-url: ${{ env.FIXTURE_FEED_URL }}
-          retries: "0"
+        env:
+          NODE_OPTIONS: --require=${{ github.workspace }}/.github/scripts/hermetic-feed-preload.cjs
 
-      - name: Assert fixture findings, provenance, and feed-history outputs
+      - name: Assert the v3 result, provenance, and complete report
         shell: bash
         env:
-          HAS_FINDINGS: ${{ steps.fixture-check.outputs.has-findings }}
-          FINDING_COUNT: ${{ steps.fixture-check.outputs.finding-count }}
-          HAS_BREACHES: ${{ steps.fixture-check.outputs.has-breaches }}
-          BREACH_COUNT: ${{ steps.fixture-check.outputs.breach-count }}
-          MATCHED_MODEL_COUNT: ${{ steps.fixture-check.outputs.matched-model-count }}
-          CHECKED_MODEL_COUNT: ${{ steps.fixture-check.outputs.checked-model-count }}
-          UNMATCHED_MODEL_COUNT: ${{ steps.fixture-check.outputs.unmatched-model-count }}
-          FINDINGS: ${{ steps.fixture-check.outputs.findings }}
-          UNMATCHED_MODELS: ${{ steps.fixture-check.outputs.unmatched-models }}
-          FEED_RECORD_COUNT: ${{ steps.fixture-check.outputs.feed-record-count }}
-          FEED_SHA256: ${{ steps.fixture-check.outputs.feed-sha256 }}
-          LIFECYCLE_FEED_SHA256: ${{ steps.fixture-check.outputs.lifecycle-feed-sha256 }}
-          INVENTORY_SHA256: ${{ steps.fixture-check.outputs.inventory-sha256 }}
-          ALERT_FINGERPRINT: ${{ steps.fixture-check.outputs.alert-fingerprint }}
-          NEXT_ALERT_FINGERPRINT: ${{ steps.fixture-check.outputs.next-alert-fingerprint }}
-          AUDIT_RECORD: ${{ steps.fixture-check.outputs.audit-record }}
-          NOTIFICATION_SENT: ${{ steps.fixture-check.outputs.notification-sent }}
-          NOTIFICATION_REASON: ${{ steps.fixture-check.outputs.notification-reason }}
-        run: bun .github/scripts/assert-e2e.ts success
-
-      - name: Run the bundle with a pinned local snapshot and source discovery
-        id: snapshot-discovery
-        uses: ./
-        with:
-          models-file: .github/fixtures/models.json
-          days-before-shutdown: "0"
-          feed-file: .github/fixtures/deprecations.json
-          expected-feed-sha256: bb2ca01c6b30a384b3a495d34adba857cd528ba6348e4572ebd44afa1cc07e62
-          discover-models: "true"
-          discovery-paths: .github/fixtures/source-usage.txt
-
-      - name: Assert snapshot identity and report-only discovery outputs
-        shell: bash
-        env:
-          FEED_SHA256: ${{ steps.snapshot-discovery.outputs.feed-sha256 }}
-          DISCOVERED_MODELS: ${{ steps.snapshot-discovery.outputs.discovered-models }}
-          DISCOVERED_MODEL_COUNT: ${{ steps.snapshot-discovery.outputs.discovered-model-count }}
-          UNTRACKED_DISCOVERED_MODEL_COUNT: ${{ steps.snapshot-discovery.outputs.untracked-discovered-model-count }}
-          DISCOVERY_MATCH_COUNT: ${{ steps.snapshot-discovery.outputs.discovery-match-count }}
-          DISCOVERY_OUTPUT_TRUNCATED: ${{ steps.snapshot-discovery.outputs.discovery-output-truncated }}
-        run: bun .github/scripts/assert-e2e.ts snapshot-discovery
-
-      - name: Exercise the hyphenated window input
-        id: narrow-window
-        uses: ./
-        with:
-          models: '[{"id":"future-fixture","provider":"openai"}]'
-          days-before-shutdown: "0"
-          include-undated: "false"
-          feed-url: ${{ env.FIXTURE_FEED_URL }}
-          retries: "0"
-
-      - name: Assert the narrow window excluded a far-future shutdown
-        shell: bash
-        env:
-          HAS_FINDINGS: ${{ steps.narrow-window.outputs.has-findings }}
-          FINDING_COUNT: ${{ steps.narrow-window.outputs.finding-count }}
-        run: bun .github/scripts/assert-e2e.ts narrow-window
-
-      - name: Exercise the failure threshold
-        id: failure-gate
-        continue-on-error: true
-        uses: ./
-        with:
-          models: '[{"id":"retired-fixture","provider":"openai"}]'
-          days-before-shutdown: "0"
-          fail-within-days: "0"
-          feed-url: ${{ env.FIXTURE_FEED_URL }}
-          retries: "0"
-
-      - name: Assert the threshold failed after writing breach outputs
-        shell: bash
-        env:
-          STEP_OUTCOME: ${{ steps.failure-gate.outcome }}
-          HAS_BREACHES: ${{ steps.failure-gate.outputs.has-breaches }}
-          BREACH_COUNT: ${{ steps.failure-gate.outputs.breach-count }}
-        run: bun .github/scripts/assert-e2e.ts failure-gate
-
-      - name: Exercise the unmatched-inventory feed-history gate
-        id: coverage-gate
-        continue-on-error: true
-        uses: ./
-        with:
-          models: '[{"id":"missing-fixture","provider":"openai"}]'
-          fail-on-unmatched: "true"
-          feed-url: ${{ env.FIXTURE_FEED_URL }}
-          retries: "0"
-
-      - name: Assert the feed-history gate failed after writing outputs
-        shell: bash
-        env:
-          STEP_OUTCOME: ${{ steps.coverage-gate.outcome }}
-          HAS_FINDINGS: ${{ steps.coverage-gate.outputs.has-findings }}
-          HAS_BREACHES: ${{ steps.coverage-gate.outputs.has-breaches }}
-          BREACH_COUNT: ${{ steps.coverage-gate.outputs.breach-count }}
-          UNMATCHED_MODEL_COUNT: ${{ steps.coverage-gate.outputs.unmatched-model-count }}
-        run: bun .github/scripts/assert-e2e.ts coverage-gate
-
-      - name: Exercise explicit content-age enforcement
-        id: stale-feed
-        continue-on-error: true
-        uses: ./
-        with:
-          models: '[{"id":"retired-fixture","provider":"openai"}]'
-          feed-url: ${{ env.FIXTURE_FEED_URL }}
-          max-feed-age-days: "0"
-          retries: "0"
-
-      - name: Assert stale content failed closed
-        shell: bash
-        env:
-          STEP_OUTCOME: ${{ steps.stale-feed.outcome }}
-        run: bun .github/scripts/assert-e2e.ts stale-feed
-
-      - name: Stop the local fixture server
-        if: always()
-        shell: bash
-        run: |
-          if [[ -f fixture-server.pid ]]; then
-            kill "$(cat fixture-server.pid)" 2>/dev/null || true
-          fi
-          rm -f fixture-server.pid fixture-server.log fixture-server.url
+          RESULT: ${{ steps.lifecycle.outputs.result }}
+          BASELINE_RESULT: ${{ steps.lifecycle.outputs.baseline-result }}
+          TARGET_RESULT: ${{ steps.lifecycle.outputs.target-result }}
+          SCAN_STATUS: ${{ steps.lifecycle.outputs.scan-status }}
+          COMPARISON_STATUS: ${{ steps.lifecycle.outputs.comparison-status }}
+          EXIT_REASON: ${{ steps.lifecycle.outputs.exit-reason }}
+          TARGET_KIND: ${{ steps.lifecycle.outputs.target-kind }}
+          EVIDENCE_HEALTH: ${{ steps.lifecycle.outputs.evidence-health }}
+          COUNTS: ${{ steps.lifecycle.outputs.counts }}
+          SOURCE_FEED_SHA256: ${{ steps.lifecycle.outputs.source-feed-sha256 }}
+          NORMALIZED_FEED_SHA256: ${{ steps.lifecycle.outputs.normalized-feed-sha256 }}
+          ACTIVE_RECORDS_SHA256: ${{ steps.lifecycle.outputs.active-records-sha256 }}
+          ADAPTER_MANIFEST_SHA256: ${{ steps.lifecycle.outputs.feed-adapter-manifest-sha256 }}
+          DETECTOR_MANIFEST_SHA256: ${{ steps.lifecycle.outputs.detector-manifest-sha256 }}
+          SCAN_FINGERPRINT: ${{ steps.lifecycle.outputs.scan-fingerprint }}
+          ALERT_FINGERPRINT: ${{ steps.lifecycle.outputs.alert-fingerprint }}
+          OUTPUT_TRUNCATED: ${{ steps.lifecycle.outputs.output-truncated }}
+          REPORT_PATH: ${{ steps.lifecycle.outputs.report-path }}
+          NOTIFICATION_STATUS: ${{ steps.lifecycle.outputs.notification-status }}
+          NOTIFICATION_REASON: ${{ steps.lifecycle.outputs.notification-reason }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bun .github/scripts/assert-e2e.ts
