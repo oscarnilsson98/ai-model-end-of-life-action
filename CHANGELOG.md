@@ -2,7 +2,7 @@
 
 ## 3.0.0 — 2026-08-03
 
-V3 replaces inventory checking with zero-input discovery from immutable Git trees.
+V3 is the first production-ready release of the action. It discovers model usage directly from immutable Git trees with no inventory to create or maintain.
 
 ### Highlights
 
@@ -14,11 +14,9 @@ V3 replaces inventory checking with zero-input discovery from immutable Git tree
 - Uses a strict typed lifecycle contract and a reviewed adapter for the public legacy feed; unreviewed pair drift is quarantined as partial coverage instead of becoming lifecycle authority.
 - Runs the packaged action hermetically across Linux, macOS, and Windows in CI.
 
-### Breaking changes
+### Launch contract
 
-- Removes every v2 inventory, discovery-path, custom-feed, retry, and notification-deduplication input.
+- Requires no model inventory, provider credentials, custom feed, or generated setup step.
 - Requires a Git checkout; pull-request and merge-queue comparison workflows should use complete history.
-- Renames the warning horizon input to `warn-within-days` and makes `fail-within-days` the explicit enforcement switch.
-- Replaces v2 outputs and report shapes with the v3 evidence, lifecycle, coverage, comparison, and provenance contracts.
-
-See [Migrating from v2](README.md#migrating-from-v2) for the input-by-input migration table.
+- Uses `warn-within-days` for advisory timing and `fail-within-days` as the explicit enforcement switch.
+- Publishes versioned evidence, lifecycle, coverage, comparison, and provenance contracts.

@@ -178,27 +178,6 @@ All inputs are optional.
 
 There is intentionally no `models`, `models-file`, workspace path, custom feed URL, or runtime evidence input. The action discovers committed repository evidence and uses the release's reviewed lifecycle-feed contract.
 
-## Migrating from v2
-
-Every v2 input was removed or renamed. GitHub only warns about unexpected inputs, so a `@v2` → `@v3` bump keeps running with the old ones silently ignored — review this table before upgrading.
-
-| v2 input | v3 equivalent |
-| --- | --- |
-| `models`, `models-file`, `discover-models`, `discovery-paths` | None. v3 scans tracked blobs in the selected Git tree instead of taking a model list. |
-| `days-before-shutdown` | `warn-within-days`. |
-| `fail-within-days` | `fail-within-days`, or `failWithinDays` in the checked-in policy file. |
-| `include-undated`, `fail-on-undated`, `fail-on-unmatched` | None. Undated and unresolved evidence is reported through `exit-reason` and the unresolved-evidence section. |
-| `feed-url`, `feed-file`, `expected-feed-sha256`, `max-feed-age-days` | None. The release pins its own reviewed feed contract. |
-| `request-timeout-seconds`, `retries` | None. Feed fetching uses fixed timeout and retry limits. |
-| `notification-mode`, `previous-alert-fingerprint` | None. Delivery is unconditional for eligible events; dedupe downstream using `alert-fingerprint`. |
-| `job-summary` | None. The job summary is always written. |
-
-Three upgrade traps are worth calling out:
-
-- `notification-failure-mode: error` — v2's default value — is rejected in v3. Use `fail`.
-- Pull-request workflows need `fetch-depth: 0` on `actions/checkout`. A shallow checkout cannot resolve the trusted base and the run exits with `trusted-base-unavailable`.
-- Enforcement supplied as an action input is target-controlled on pull requests. Move `failWithinDays` into the checked-in policy file so base and head are held to the same thresholds.
-
 ## Outputs
 
 All outputs are strings; JSON values are serialized strings.
