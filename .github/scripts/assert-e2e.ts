@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 
 function required(name: string): string {
   const value = Bun.env[name];
@@ -81,10 +81,17 @@ for (const key of [
 }
 
 const reportPath = required("REPORT_PATH");
-if (!statSync(reportPath).isFile()) {
-  throw new Error(`REPORT_PATH is not a regular file: ${reportPath}.`);
+const reportDescriptor = openSync(reportPath, "r");
+let reportText: string;
+try {
+  if (!fstatSync(reportDescriptor).isFile()) {
+    throw new Error(`REPORT_PATH is not a regular file: ${reportPath}.`);
+  }
+  reportText = readFileSync(reportDescriptor, "utf8");
+} finally {
+  closeSync(reportDescriptor);
 }
-const report = JSON.parse(readFileSync(reportPath, "utf8")) as Record<string, unknown>;
+const report = JSON.parse(reportText) as Record<string, unknown>;
 if (
   report.schemaVersion !== 3 ||
   report.result !== result ||

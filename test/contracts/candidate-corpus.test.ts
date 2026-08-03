@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
@@ -84,9 +91,25 @@ function candidateSnapshot(repository: string): GitTreeSnapshot {
       throw new Error(`Candidate path is not a regular file or symlink: ${path}.`);
     }
 
-    const bytes = stat.isSymbolicLink()
-      ? Uint8Array.from(readlinkSync(absolutePath, { encoding: "buffer" }))
-      : Uint8Array.from(readFileSync(absolutePath));
+    let bytes: Uint8Array;
+    if (stat.isSymbolicLink()) {
+      bytes = Uint8Array.from(readlinkSync(absolutePath, { encoding: "buffer" }));
+    } else {
+      const descriptor = openSync(absolutePath, "r");
+      try {
+        const openedStat = fstatSync(descriptor);
+        if (
+          !openedStat.isFile() ||
+          openedStat.dev !== stat.dev ||
+          openedStat.ino !== stat.ino
+        ) {
+          throw new Error(`Candidate path changed while it was being opened: ${path}.`);
+        }
+        bytes = Uint8Array.from(readFileSync(descriptor));
+      } finally {
+        closeSync(descriptor);
+      }
+    }
     const objectId = gitBlobObjectId(bytes);
     const kind = stat.isSymbolicLink()
       ? "symlink" as const
