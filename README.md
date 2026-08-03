@@ -102,6 +102,8 @@ The action detects static model values in these supported integrations:
 
 Other tracked UTF-8 files are checked for exact eligible model IDs from the lifecycle feed. Those text-only matches, documentation, examples, tests, dynamic selectors, and ambiguous serving platforms can warn or appear as notices, but never block.
 
+Some popular integrations route model selection through their own abstraction and have no semantic rule yet — the Vercel AI SDK, LangChain, LlamaIndex, LiteLLM, and the legacy Google generative SDKs. Importing one is reported as an `unsupported-integration-import@1` notice naming the framework and the files that import it, so a run cannot look clean while your real call sites went unread. Coverage stays `complete` and enforcement is unaffected; the notice exists because model choices made through those frameworks reach the assessment only as low-confidence text matches, which never block and are excluded from notifications.
+
 Static evidence has limits. Remote databases, secrets, provider consoles, external deployment repositories, and runtime routers are outside it. A clean result means only that no actionable lifecycle risk was found in the evidence actually assessed. [Checked-in claims](#optional-runtime-only-claims) can represent known runtime-only facts; they do not prove complete coverage.
 
 The exact support matrix and stable rule IDs are published in [the detector contract](docs/v3-detector-contract.md).

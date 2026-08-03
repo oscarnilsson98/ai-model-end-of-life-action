@@ -954,7 +954,83 @@ type ImportProvenance = {
   pythonOsNamespaces: Set<string>;
   pythonGetenvFunctions: Set<string>;
   pythonEnvironObjects: Set<string>;
+  moduleSpecifiers: Set<string>;
 };
+
+type UnsupportedFramework = {
+  frameworkId: string;
+  displayName: string;
+  modulePrefixes: readonly string[];
+};
+
+/**
+ * Integrations that route model selection through their own abstraction and
+ * therefore publish no v3 semantic rule. Importing one is not a defect, but it
+ * does mean the file's model choices reach the assessment through bounded
+ * lexical fallback only, so the gap is reported instead of left silent.
+ */
+const UNSUPPORTED_INTEGRATION_FRAMEWORKS: readonly UnsupportedFramework[] = Object.freeze([
+  Object.freeze({
+    frameworkId: "vercel-ai-sdk",
+    displayName: "The Vercel AI SDK",
+    modulePrefixes: Object.freeze(["ai", "@ai-sdk"]),
+  }),
+  Object.freeze({
+    frameworkId: "langchain",
+    displayName: "LangChain",
+    modulePrefixes: Object.freeze(["langchain", "@langchain"]),
+  }),
+  Object.freeze({
+    frameworkId: "llamaindex",
+    displayName: "LlamaIndex",
+    modulePrefixes: Object.freeze(["llamaindex", "llama_index"]),
+  }),
+  Object.freeze({
+    frameworkId: "litellm",
+    displayName: "LiteLLM",
+    modulePrefixes: Object.freeze(["litellm"]),
+  }),
+  Object.freeze({
+    frameworkId: "google-generative-ai-legacy",
+    displayName: "The legacy Google Generative AI SDK",
+    modulePrefixes: Object.freeze(["@google/generative-ai", "google.generativeai"]),
+  }),
+  Object.freeze({
+    frameworkId: "vertex-ai-generative-legacy",
+    displayName: "The retired Vertex AI generative SDK module",
+    modulePrefixes: Object.freeze(["vertexai", "@google-cloud/vertexai"]),
+  }),
+]);
+
+/**
+ * Whether an import specifier names a framework module. A prefix matches the
+ * bare specifier, a subpath (`@ai-sdk/openai`), a dotted Python submodule
+ * (`llama_index.llms`), or an underscored Python sibling (`langchain_openai`).
+ */
+function unsupportedFrameworkForModule(specifier: string): UnsupportedFramework | undefined {
+  for (const framework of UNSUPPORTED_INTEGRATION_FRAMEWORKS) {
+    for (const prefix of framework.modulePrefixes) {
+      if (
+        specifier === prefix ||
+        specifier.startsWith(`${prefix}/`) ||
+        specifier.startsWith(`${prefix}.`) ||
+        specifier.startsWith(`${prefix}_`)
+      ) {
+        return framework;
+      }
+    }
+  }
+  return undefined;
+}
+
+function unsupportedFrameworkIds(specifiers: ReadonlySet<string>): string[] {
+  const ids = new Set<string>();
+  for (const specifier of specifiers) {
+    const framework = unsupportedFrameworkForModule(specifier);
+    if (framework !== undefined) ids.add(framework.frameworkId);
+  }
+  return [...ids];
+}
 
 const CONSTRUCTORS_BY_MODULE: Readonly<Record<string, Readonly<Record<string, ClientBinding["integration"]>>>> = {
   openai: {
@@ -992,6 +1068,7 @@ function importProvenance(
   const pythonOsNamespaces = new Set<string>();
   const pythonGetenvFunctions = new Set<string>();
   const pythonEnvironObjects = new Set<string>();
+  const moduleSpecifiers = new Set<string>();
   const conflicted = new Set<string>();
   const addConstructor = (moduleName: string, canonicalName: string, localName: string): void => {
     const integration = CONSTRUCTORS_BY_MODULE[moduleName]?.[canonicalName];
@@ -1036,6 +1113,9 @@ function importProvenance(
           index = moduleIndex;
           continue;
         }
+        // Recorded after the type-only check: a discarded type import does not
+        // select a model at runtime.
+        moduleSpecifiers.add(moduleName);
         const defaultName = DEFAULT_CONSTRUCTOR_BY_MODULE[moduleName];
         const first = tokens[index + 1];
         if (defaultName !== undefined && first?.kind === "identifier" && first.value !== "type") {
@@ -1076,6 +1156,7 @@ function importProvenance(
         continue;
       }
       const moduleName = tokens[index + 2]?.value as string;
+      moduleSpecifiers.add(moduleName);
       if (tokens[index - 1]?.value !== "=") continue;
       if (tokens[index - 2]?.kind === "identifier") {
         const defaultName = DEFAULT_CONSTRUCTOR_BY_MODULE[moduleName];
@@ -1112,6 +1193,7 @@ function importProvenance(
           .slice(index + 1, importIndex)
           .map((token) => token.value)
           .join("");
+        moduleSpecifiers.add(moduleName);
         let cursor = importIndex + 1;
         while (cursor < tokens.length && tokens[cursor]?.line === tokens[importIndex]?.line) {
           const imported = tokens[cursor];
@@ -1138,6 +1220,17 @@ function importProvenance(
         }
       } else if (isIdentifier(tokens[index], "import") && tokens[index + 1]?.kind === "identifier") {
         const importedModule = tokens[index + 1]?.value as string;
+        // `import a.b.c` names one dotted module; the existing namespace checks
+        // below only need its first segment, but framework matching needs all.
+        let dotted = importedModule;
+        for (
+          let cursor = index + 2;
+          tokens[cursor]?.value === "." && tokens[cursor + 1]?.kind === "identifier";
+          cursor += 2
+        ) {
+          dotted += `.${tokens[cursor + 1]?.value}`;
+        }
+        moduleSpecifiers.add(dotted);
         const local = tokens[index + 2]?.value === "as" &&
             tokens[index + 3]?.kind === "identifier"
           ? tokens[index + 3]?.value as string
@@ -1232,6 +1325,7 @@ function importProvenance(
     pythonOsNamespaces,
     pythonGetenvFunctions,
     pythonEnvironObjects,
+    moduleSpecifiers,
   };
 }
 
@@ -2123,14 +2217,18 @@ function detectSdkCalls(
   facts: EvidenceFact[];
   consumedEnvironmentSelectors: ConsumedEnvironmentSelector[];
   literalSpans: SemanticLiteralSpan[];
+  unsupportedFrameworkIds: string[];
   tokenizationIssue?: TokenizationIssue;
 } {
   const tokenization = tokenize(source, language);
   if (tokenization.issue !== undefined) {
+    // The import parse cannot be trusted after a tokenization failure, and that
+    // file already reports incomplete semantic coverage on its own.
     return {
       facts: [],
       consumedEnvironmentSelectors: [],
       literalSpans: [],
+      unsupportedFrameworkIds: [],
       tokenizationIssue: tokenization.issue,
     };
   }
@@ -2313,7 +2411,12 @@ function detectSdkCalls(
       assertEvidenceBudget(facts.length);
     }
   }
-  return { facts, consumedEnvironmentSelectors, literalSpans };
+  return {
+    facts,
+    consumedEnvironmentSelectors,
+    literalSpans,
+    unsupportedFrameworkIds: unsupportedFrameworkIds(analyzedClients.imports.moduleSpecifiers),
+  };
 }
 
 type TerraformStringAttribute =
@@ -2932,6 +3035,49 @@ function tokenizationCoverageDiagnostic(
   };
 }
 
+function recordUnsupportedFrameworks(
+  byFramework: Map<string, Set<string>>,
+  frameworkIds: readonly string[],
+  path: string,
+): void {
+  for (const frameworkId of frameworkIds) {
+    const paths = byFramework.get(frameworkId) ?? new Set<string>();
+    paths.add(path);
+    byFramework.set(frameworkId, paths);
+  }
+}
+
+const MAX_DIAGNOSTIC_SAMPLE_PATHS = 5;
+
+/**
+ * One notice per framework rather than one per file: this reports a property of
+ * the repository's integration choice, not a defect in each file. Notices keep
+ * declared coverage `complete`, so enforcement still cannot fail closed on it.
+ */
+function unsupportedFrameworkDiagnostics(
+  byFramework: ReadonlyMap<string, ReadonlySet<string>>,
+): CoverageDiagnostic[] {
+  const diagnostics: CoverageDiagnostic[] = [];
+  for (const framework of UNSUPPORTED_INTEGRATION_FRAMEWORKS) {
+    const paths = byFramework.get(framework.frameworkId);
+    if (paths === undefined || paths.size === 0) continue;
+    const sorted = [...paths].sort(compareText);
+    const sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
+    const remaining = sorted.length - sample.length;
+    diagnostics.push({
+      code: "unsupported-integration-import@1",
+      message:
+        `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` +
+        "and this detector manifest publishes no semantic rule for it. Model selections made through it were " +
+        "assessed by bounded lexical fallback only, so they cannot block and may be missed entirely when the " +
+        `selector is dynamic or the model ID is not literal-scan eligible. Files: ${sample.join(", ")}` +
+        `${remaining > 0 ? ` (+${remaining} more)` : ""}.`,
+      severity: "notice",
+    });
+  }
+  return diagnostics;
+}
+
 function isClaimDocument(path: string): boolean {
   return (
     path === ".github/ai-model-lifecycle.yml" ||
@@ -2953,6 +3099,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
       severity: "partial" as const,
     }));
   let partial = snapshot.scanStatus === "partial";
+  const unsupportedFrameworkPaths = new Map<string, Set<string>>();
   for (const entry of snapshot.entries) {
     if (entry.content.state !== "available" || entry.kind === "symlink") continue;
     if (isClaimDocument(entry.displayPath)) continue;
@@ -2990,6 +3137,11 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
+      recordUnsupportedFrameworks(
+        unsupportedFrameworkPaths,
+        detected.unsupportedFrameworkIds,
+        entry.displayPath,
+      );
     } else if (extension === ".py") {
       semanticLanguage = "python";
       const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
@@ -2997,6 +3149,11 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
+      recordUnsupportedFrameworks(
+        unsupportedFrameworkPaths,
+        detected.unsupportedFrameworkIds,
+        entry.displayPath,
+      );
     } else if (HCL_EXTENSIONS.has(extension)) {
       semanticLanguage = "hcl";
       const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
@@ -3078,6 +3235,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
     );
     assertEvidenceBudget(evidence.length);
   }
+  diagnostics.push(...unsupportedFrameworkDiagnostics(unsupportedFrameworkPaths));
   evidence.sort((left, right) => compareText(left.evidenceId, right.evidenceId));
   return {
     evidence,

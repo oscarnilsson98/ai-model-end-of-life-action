@@ -7952,7 +7952,7 @@ function alertFingerprint(findings) {
 }
 
 // src/detection/manifest.ts
-var DETECTOR_MANIFEST_VERSION = "3.0.0-2";
+var DETECTOR_MANIFEST_VERSION = "3.0.0-3";
 var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
@@ -10199,6 +10199,57 @@ function resolveTokenValue(tokens, valueIndex, constants, defaultSelectorKind, e
     trace: [{ kind: "detector", detail: "runtime-computed selector" }]
   };
 }
+var UNSUPPORTED_INTEGRATION_FRAMEWORKS = Object.freeze([
+  Object.freeze({
+    frameworkId: "vercel-ai-sdk",
+    displayName: "The Vercel AI SDK",
+    modulePrefixes: Object.freeze(["ai", "@ai-sdk"])
+  }),
+  Object.freeze({
+    frameworkId: "langchain",
+    displayName: "LangChain",
+    modulePrefixes: Object.freeze(["langchain", "@langchain"])
+  }),
+  Object.freeze({
+    frameworkId: "llamaindex",
+    displayName: "LlamaIndex",
+    modulePrefixes: Object.freeze(["llamaindex", "llama_index"])
+  }),
+  Object.freeze({
+    frameworkId: "litellm",
+    displayName: "LiteLLM",
+    modulePrefixes: Object.freeze(["litellm"])
+  }),
+  Object.freeze({
+    frameworkId: "google-generative-ai-legacy",
+    displayName: "The legacy Google Generative AI SDK",
+    modulePrefixes: Object.freeze(["@google/generative-ai", "google.generativeai"])
+  }),
+  Object.freeze({
+    frameworkId: "vertex-ai-generative-legacy",
+    displayName: "The retired Vertex AI generative SDK module",
+    modulePrefixes: Object.freeze(["vertexai", "@google-cloud/vertexai"])
+  })
+]);
+function unsupportedFrameworkForModule(specifier) {
+  for (const framework of UNSUPPORTED_INTEGRATION_FRAMEWORKS) {
+    for (const prefix of framework.modulePrefixes) {
+      if (specifier === prefix || specifier.startsWith(`${prefix}/`) || specifier.startsWith(`${prefix}.`) || specifier.startsWith(`${prefix}_`)) {
+        return framework;
+      }
+    }
+  }
+  return;
+}
+function unsupportedFrameworkIds(specifiers) {
+  const ids = new Set;
+  for (const specifier of specifiers) {
+    const framework = unsupportedFrameworkForModule(specifier);
+    if (framework !== undefined)
+      ids.add(framework.frameworkId);
+  }
+  return [...ids];
+}
 var CONSTRUCTORS_BY_MODULE = {
   openai: {
     OpenAI: "openai",
@@ -10229,6 +10280,7 @@ function importProvenance(tokens, language) {
   const pythonOsNamespaces = new Set;
   const pythonGetenvFunctions = new Set;
   const pythonEnvironObjects = new Set;
+  const moduleSpecifiers = new Set;
   const conflicted = new Set;
   const addConstructor = (moduleName, canonicalName, localName) => {
     const integration = CONSTRUCTORS_BY_MODULE[moduleName]?.[canonicalName];
@@ -10269,6 +10321,7 @@ function importProvenance(tokens, language) {
           index = moduleIndex;
           continue;
         }
+        moduleSpecifiers.add(moduleName2);
         const defaultName = DEFAULT_CONSTRUCTOR_BY_MODULE[moduleName2];
         const first = tokens[index + 1];
         if (defaultName !== undefined && first?.kind === "identifier" && first.value !== "type") {
@@ -10300,6 +10353,7 @@ function importProvenance(tokens, language) {
         continue;
       }
       const moduleName = tokens[index + 2]?.value;
+      moduleSpecifiers.add(moduleName);
       if (tokens[index - 1]?.value !== "=")
         continue;
       if (tokens[index - 2]?.kind === "identifier") {
@@ -10338,6 +10392,7 @@ function importProvenance(tokens, language) {
         if (!isIdentifier(tokens[importIndex], "import"))
           continue;
         const moduleName = tokens.slice(index + 1, importIndex).map((token) => token.value).join("");
+        moduleSpecifiers.add(moduleName);
         let cursor = importIndex + 1;
         while (cursor < tokens.length && tokens[cursor]?.line === tokens[importIndex]?.line) {
           const imported = tokens[cursor];
@@ -10361,6 +10416,11 @@ function importProvenance(tokens, language) {
         }
       } else if (isIdentifier(tokens[index], "import") && tokens[index + 1]?.kind === "identifier") {
         const importedModule = tokens[index + 1]?.value;
+        let dotted = importedModule;
+        for (let cursor = index + 2;tokens[cursor]?.value === "." && tokens[cursor + 1]?.kind === "identifier"; cursor += 2) {
+          dotted += `.${tokens[cursor + 1]?.value}`;
+        }
+        moduleSpecifiers.add(dotted);
         const local = tokens[index + 2]?.value === "as" && tokens[index + 3]?.kind === "identifier" ? tokens[index + 3]?.value : importedModule;
         if (importedModule === "boto3")
           boto3Namespaces.add(local);
@@ -10438,7 +10498,8 @@ function importProvenance(tokens, language) {
     boto3Namespaces,
     pythonOsNamespaces,
     pythonGetenvFunctions,
-    pythonEnvironObjects
+    pythonEnvironObjects,
+    moduleSpecifiers
   };
 }
 function chainBefore(tokens, openIndex) {
@@ -11054,6 +11115,7 @@ function detectSdkCalls(source, path, blobOid, language, scope) {
       facts: [],
       consumedEnvironmentSelectors: [],
       literalSpans: [],
+      unsupportedFrameworkIds: [],
       tokenizationIssue: tokenization.issue
     };
   }
@@ -11186,7 +11248,12 @@ function detectSdkCalls(source, path, blobOid, language, scope) {
       assertEvidenceBudget(facts.length);
     }
   }
-  return { facts, consumedEnvironmentSelectors, literalSpans };
+  return {
+    facts,
+    consumedEnvironmentSelectors,
+    literalSpans,
+    unsupportedFrameworkIds: unsupportedFrameworkIds(analyzedClients.imports.moduleSpecifiers)
+  };
 }
 function terraformStringAttribute(tokens, valueIndex, blockClose) {
   if (valueIndex === null)
@@ -11685,6 +11752,31 @@ function tokenizationCoverageDiagnostic(path, language, issue) {
     severity: "partial"
   };
 }
+function recordUnsupportedFrameworks(byFramework, frameworkIds, path) {
+  for (const frameworkId of frameworkIds) {
+    const paths = byFramework.get(frameworkId) ?? new Set;
+    paths.add(path);
+    byFramework.set(frameworkId, paths);
+  }
+}
+var MAX_DIAGNOSTIC_SAMPLE_PATHS = 5;
+function unsupportedFrameworkDiagnostics(byFramework) {
+  const diagnostics = [];
+  for (const framework of UNSUPPORTED_INTEGRATION_FRAMEWORKS) {
+    const paths = byFramework.get(framework.frameworkId);
+    if (paths === undefined || paths.size === 0)
+      continue;
+    const sorted = [...paths].sort(compareText5);
+    const sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
+    const remaining = sorted.length - sample.length;
+    diagnostics.push({
+      code: "unsupported-integration-import@1",
+      message: `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + "and this detector manifest publishes no semantic rule for it. Model selections made through it were " + "assessed by bounded lexical fallback only, so they cannot block and may be missed entirely when the " + `selector is dynamic or the model ID is not literal-scan eligible. Files: ${sample.join(", ")}` + `${remaining > 0 ? ` (+${remaining} more)` : ""}.`,
+      severity: "notice"
+    });
+  }
+  return diagnostics;
+}
 function isClaimDocument(path) {
   return path === ".github/ai-model-lifecycle.yml" || path.startsWith(".github/ai-model-evidence/");
 }
@@ -11700,6 +11792,7 @@ function detectSnapshot(snapshot, feed) {
     severity: "partial"
   }));
   let partial = snapshot.scanStatus === "partial";
+  const unsupportedFrameworkPaths = new Map;
   for (const entry of snapshot.entries) {
     if (entry.content.state !== "available" || entry.kind === "symlink")
       continue;
@@ -11733,6 +11826,7 @@ function detectSnapshot(snapshot, feed) {
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
+      recordUnsupportedFrameworks(unsupportedFrameworkPaths, detected.unsupportedFrameworkIds, entry.displayPath);
     } else if (extension === ".py") {
       semanticLanguage = "python";
       const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
@@ -11740,6 +11834,7 @@ function detectSnapshot(snapshot, feed) {
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
+      recordUnsupportedFrameworks(unsupportedFrameworkPaths, detected.unsupportedFrameworkIds, entry.displayPath);
     } else if (HCL_EXTENSIONS.has(extension)) {
       semanticLanguage = "hcl";
       const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
@@ -11791,6 +11886,7 @@ function detectSnapshot(snapshot, feed) {
     evidence.push(...environmentBindingFacts(assignments, consumedEnvironmentSelectors, feed));
     assertEvidenceBudget(evidence.length);
   }
+  diagnostics.push(...unsupportedFrameworkDiagnostics(unsupportedFrameworkPaths));
   evidence.sort((left, right) => compareText5(left.evidenceId, right.evidenceId));
   return {
     evidence,

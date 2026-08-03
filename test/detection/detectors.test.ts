@@ -460,6 +460,106 @@ const names = { __proto__: null, hasOwnProperty: true };
   });
 });
 
+describe("v3 unsupported integration notices", () => {
+  const unsupportedNotices = (files: Readonly<Record<string, string>>) =>
+    detectSnapshot(repositorySnapshot(files), feed).diagnostics.filter(
+      (diagnostic) => diagnostic.code === "unsupported-integration-import@1",
+    );
+
+  test("reports a framework whose model selection reaches no semantic rule", () => {
+    const cases = [
+      {
+        path: "src/factory.ts",
+        source:
+          `import { openai } from "@ai-sdk/openai";\nimport { generateText } from "ai";\nawait generateText({ model: openai("gpt-old"), prompt: "hi" });\n`,
+      },
+      {
+        // Nothing at all is detected here: the gateway prefix makes the feed ID
+        // fail the lexical identifier-boundary rule.
+        path: "src/gateway.ts",
+        source:
+          `import { generateText } from "ai";\nawait generateText({ model: "openai/gpt-old", prompt: "hi" });\n`,
+      },
+      {
+        path: "src/dynamic.ts",
+        source:
+          `import { openai } from "@ai-sdk/openai";\nimport { generateText } from "ai";\nawait generateText({ model: openai(process.env.MODEL_ID), prompt: "hi" });\n`,
+      },
+      { path: "app/chain.py", source: `from langchain_openai import ChatOpenAI\nllm = ChatOpenAI()\n` },
+      { path: "app/legacy.py", source: `import google.generativeai as genai\ngenai.configure()\n` },
+      { path: "app/router.py", source: `import litellm\nlitellm.completion(model="gpt-old")\n` },
+      { path: "src/index.cjs", source: `const { generateText } = require("ai");\n` },
+    ] as const;
+    for (const testCase of cases) {
+      const result = detectSnapshot(snapshot(testCase.path, testCase.source), feed);
+      expect(
+        result.diagnostics.map((diagnostic) => diagnostic.code),
+        testCase.path,
+      ).toContain("unsupported-integration-import@1");
+      // A notice must never make declared coverage partial, or enforcement
+      // would fail closed on an unsupported import alone.
+      expect(result.scanStatus, testCase.path).toBe("complete");
+      expect(
+        result.diagnostics.every((diagnostic) => diagnostic.severity === "notice"),
+        testCase.path,
+      ).toBe(true);
+    }
+  });
+
+  test("stays silent for supported integrations and discarded type imports", () => {
+    const cases = [
+      {
+        path: "src/openai.ts",
+        source:
+          `import OpenAI from "openai";\nconst client = new OpenAI();\nclient.responses.create({ model: "gpt-old" });\n`,
+      },
+      {
+        path: "src/google.ts",
+        source:
+          `import { GoogleGenAI } from "@google/genai";\nconst client = new GoogleGenAI({ apiKey: "k" });\nclient.models.generateContent({ model: "gpt-old" });\n`,
+      },
+      {
+        path: "app/bedrock.py",
+        source: `import boto3\nclient = boto3.client("bedrock-runtime")\nclient.converse(modelId="gpt-old")\n`,
+      },
+      { path: "src/types.ts", source: `import type { LanguageModel } from "ai";\nexport type M = LanguageModel;\n` },
+      { path: "app/storage.py", source: `import google.cloud.storage\n` },
+      { path: "src/local.ts", source: `import { helper } from "./ai";\nhelper();\n` },
+    ] as const;
+    for (const testCase of cases) {
+      expect(
+        unsupportedNotices({ [testCase.path]: testCase.source }),
+        testCase.path,
+      ).toEqual([]);
+    }
+  });
+
+  test("aggregates one deterministic notice per framework across files", () => {
+    const notices = unsupportedNotices({
+      "apps/b/src/y.ts": `import { anthropic } from "@ai-sdk/anthropic";\nimport { streamText } from "ai";\nawait streamText({ model: anthropic("x") });\n`,
+      "apps/a/src/x.ts": `import { generateText } from "ai";\nawait generateText({ model: "openai/gpt-old" });\n`,
+      "svc/chain.py": `from langchain.chat_models import init_chat_model\n`,
+    });
+    expect(notices).toHaveLength(2);
+    expect(notices[0]?.message).toContain("The Vercel AI SDK (vercel-ai-sdk)");
+    expect(notices[0]?.message).toContain("imported by 2 tracked file(s)");
+    // Sorted sample paths keep the message stable across snapshot entry order.
+    expect(notices[0]?.message).toContain("Files: apps/a/src/x.ts, apps/b/src/y.ts.");
+    expect(notices[1]?.message).toContain("LangChain (langchain)");
+  });
+
+  test("defers to the tokenization diagnostic when the import parse is untrustworthy", () => {
+    const result = detectSnapshot(
+      snapshot("src/broken.ts", `import { generateText } from "ai";\nconst invalid = "unterminated\n`),
+      feed,
+    );
+    expect(result.scanStatus).toBe("partial");
+    expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
+      "semantic-tokenization-incomplete@1",
+    ]);
+  });
+});
+
 function ruleEvidence(path: string, source: string, ruleId: string) {
   return detectSnapshot(snapshot(path, source), feed).evidence.find(
     (fact) => fact.detectorRuleId === ruleId,
