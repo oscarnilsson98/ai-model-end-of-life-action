@@ -22,6 +22,7 @@ import {
 
 const REPOSITORY = fileURLToPath(new URL("../../", import.meta.url));
 const MAX_GIT_PATH_OUTPUT_BYTES = 32 * 1024 * 1024;
+const NOT_A_SYMLINK_ERROR_CODES = new Set(["EINVAL", "UNKNOWN"]);
 
 function candidatePaths(repository: string): string[] {
   // In CI this is the exact checked-out candidate tree. Locally, overlay tracked
@@ -76,46 +77,46 @@ function candidateSnapshot(repository: string): GitTreeSnapshot {
       throw new Error(`Git returned an unsafe candidate path: ${JSON.stringify(path)}.`);
     }
     const absolutePath = resolve(repository, path);
-    let stat: ReturnType<typeof lstatSync>;
+    let linkBytes: Buffer | null = null;
     try {
-      stat = lstatSync(absolutePath);
+      linkBytes = readlinkSync(absolutePath, { encoding: "buffer" });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; // tracked deletion
-      throw error;
-    }
-
-    // A tracked submodule worktree is an intentional repository boundary. It is
-    // not source content and must never be traversed by this corpus gate.
-    if (stat.isDirectory()) continue;
-    if (!stat.isFile() && !stat.isSymbolicLink()) {
-      throw new Error(`Candidate path is not a regular file or symlink: ${path}.`);
+      if (!NOT_A_SYMLINK_ERROR_CODES.has((error as NodeJS.ErrnoException).code ?? "")) {
+        throw error;
+      }
     }
 
     let bytes: Uint8Array;
-    if (stat.isSymbolicLink()) {
-      bytes = Uint8Array.from(readlinkSync(absolutePath, { encoding: "buffer" }));
+    let kind: "regular" | "executable" | "symlink";
+    if (linkBytes !== null) {
+      bytes = Uint8Array.from(linkBytes);
+      kind = "symlink";
     } else {
       const descriptor = openSync(absolutePath, "r");
       try {
         const openedStat = fstatSync(descriptor);
+        // A tracked submodule worktree is an intentional repository boundary. It
+        // is not source content and must never be traversed by this corpus gate.
+        if (openedStat.isDirectory()) continue;
+        if (!openedStat.isFile()) {
+          throw new Error(`Candidate path is not a regular file or symlink: ${path}.`);
+        }
+        const pathStat = lstatSync(absolutePath);
         if (
-          !openedStat.isFile() ||
-          openedStat.dev !== stat.dev ||
-          openedStat.ino !== stat.ino
+          !pathStat.isFile() ||
+          openedStat.dev !== pathStat.dev ||
+          openedStat.ino !== pathStat.ino
         ) {
           throw new Error(`Candidate path changed while it was being opened: ${path}.`);
         }
         bytes = Uint8Array.from(readFileSync(descriptor));
+        kind = (openedStat.mode & 0o111) === 0 ? "regular" : "executable";
       } finally {
         closeSync(descriptor);
       }
     }
     const objectId = gitBlobObjectId(bytes);
-    const kind = stat.isSymbolicLink()
-      ? "symlink" as const
-      : (stat.mode & 0o111) === 0
-        ? "regular" as const
-        : "executable" as const;
     const mode = kind === "symlink" ? "120000" as const
       : kind === "executable" ? "100755" as const
       : "100644" as const;
