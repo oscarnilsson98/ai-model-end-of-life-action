@@ -102,6 +102,19 @@ The action detects static model values in these supported integrations:
 
 Other tracked UTF-8 files are checked for exact eligible model IDs from the lifecycle feed. Those text-only matches, documentation, examples, tests, dynamic selectors, and ambiguous serving platforms can warn or appear as notices, but never block.
 
+A text match does not say which provider serves the model, so one occurrence of a model ID that several providers publish is reported once — as a single finding naming every candidate platform and the earliest of their shutdown dates — not once per provider. If the repository only uses some platforms, declare them and the rest stop matching text at all:
+
+```yaml
+# .github/ai-model-lifecycle.yml
+schemaVersion: 1
+
+servingPlatforms:
+  - openai
+  - google
+```
+
+The declaration applies only where the evidence itself did not establish a platform, so it never hides a finding that could block. It is reported as an evidence source in the job summary and report.
+
 Static evidence has limits. Remote databases, secrets, provider consoles, external deployment repositories, and runtime routers are outside it. A clean result means only that no actionable lifecycle risk was found in the evidence actually assessed. [Checked-in claims](#optional-runtime-only-claims) can represent known runtime-only facts; they do not prove complete coverage.
 
 The exact support matrix and stable rule IDs are published in [the detector contract](docs/v3-detector-contract.md).

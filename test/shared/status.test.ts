@@ -32,6 +32,7 @@ function lifecycleFinding(overrides: Partial<LifecycleFinding> = {}): LifecycleF
     evidenceIds: ["repo-chat"],
     modelId: "gpt-old",
     servingPlatform: "openai",
+    servingPlatforms: ["openai"],
     lifecycleMatch: "exact",
     lifecycleStatus: "shutdown-scheduled",
     shutdownDate: "2026-08-20",

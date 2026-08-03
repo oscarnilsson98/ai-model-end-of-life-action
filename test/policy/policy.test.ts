@@ -129,6 +129,29 @@ suppressions:
     });
   });
 
+  test("accepts a declared serving-platform set and rejects unregistered slugs", () => {
+    const declared = inspectPolicy(
+      "schemaVersion: 1\nservingPlatforms:\n  - openai\n  - google\n",
+    );
+    expect(declared.valid).toBe(true);
+    expect(declared.policy.servingPlatforms).toEqual(["google", "openai"]);
+    expect(defaultPolicy().servingPlatforms).toEqual([]);
+    expect(
+      inspectPolicy("schemaVersion: 1\nservingPlatforms:\n  - openai\n  - openai\n").valid,
+    ).toBe(false);
+    expect(inspectPolicy("schemaVersion: 1\nservingPlatforms:\n  - Azure\n").valid).toBe(false);
+    expect(inspectPolicy("schemaVersion: 1\nservingPlatforms: []\n").valid).toBe(false);
+  });
+
+  test("keeps a head serving-platform declaration from narrowing base matching", () => {
+    const undeclared = defaultPolicy();
+    const openai = { ...defaultPolicy(), servingPlatforms: ["openai"] };
+    const azure = { ...defaultPolicy(), servingPlatforms: ["azure"] };
+    expect(monotonicPolicy(undeclared, openai).servingPlatforms).toEqual([]);
+    expect(monotonicPolicy(openai, undeclared).servingPlatforms).toEqual([]);
+    expect(monotonicPolicy(openai, azure).servingPlatforms).toEqual(["azure", "openai"]);
+  });
+
   test("matches only the documented path grammar", () => {
     expect(matchRepositoryPattern("services/**/src/*.ts", "services/api/src/main.ts")).toBe(
       true,

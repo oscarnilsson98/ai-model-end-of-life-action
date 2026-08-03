@@ -205,11 +205,21 @@ function applyFeedCoverage(
 function reportEvidenceSources(
   evaluation: Pick<Evaluation, "evidence" | "evidenceHealth">,
   inspections: readonly SnapshotClaimsInspection[],
+  policy: Policy,
   effectiveDocuments?: readonly EvidenceSourceInspection[],
 ): AssessmentReport["evidenceSources"] {
   const result: AssessmentReport["evidenceSources"] = [
     { id: "repository", kind: "repository", health: "current" },
   ];
+  // A declared platform set narrows which lifecycle records unproven-platform
+  // evidence can match, so the declaration itself belongs in the source list.
+  if (policy.servingPlatforms.length > 0) {
+    result.push({
+      id: `declared-serving-platforms: ${policy.servingPlatforms.join(", ")}`,
+      kind: "repository",
+      health: "current",
+    });
+  }
   const manual = evaluation.evidence.filter((fact) => fact.origin === "manual-claim");
   if (manual.length > 0) {
     result.push({
@@ -467,7 +477,7 @@ async function assess(
             ? []
             : ["Target policy/configuration is invalid and non-authoritative."],
           feed: feed.digests,
-          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims]),
+          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims], diagnostic.policy),
           reportPath: localReportPath,
         }),
         policy: diagnostic.policy,
@@ -506,7 +516,7 @@ async function assess(
               ...feedDiagnostics(feed),
             ],
             feed: feed.digests,
-            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims]),
+            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims], diagnostic.policy),
             reportPath: localReportPath,
           }),
           policy: diagnostic.policy,
@@ -529,7 +539,7 @@ async function assess(
           evaluation: diagnostic.evaluation,
           diagnostics: diagnostic.evaluation.diagnostics,
           feed: feed.digests,
-          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims]),
+          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims], diagnostic.policy),
           reportPath: localReportPath,
         }),
         policy: diagnostic.policy,
@@ -579,7 +589,7 @@ async function assess(
             evaluation: diagnostic.evaluation,
             diagnostics: diagnostic.evaluation.diagnostics,
             feed: feed.digests,
-            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims]),
+            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims], diagnostic.policy),
             reportPath: localReportPath,
           }),
           policy: diagnostic.policy,
@@ -651,6 +661,7 @@ async function assess(
         evidenceSources: reportEvidenceSources(
           comparison.evaluation,
           [targetClaims],
+          comparison.policy,
           monotonicEvidenceSourceDocuments(baseClaims, targetClaims),
         ),
         reportPath: localReportPath,

@@ -6,7 +6,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { publishCoreOutputs, renderSummary } from "../../src/action/publish.ts";
+import {
+  publishAnnotations,
+  publishCoreOutputs,
+  renderSummary,
+} from "../../src/action/publish.ts";
 import type { AssessmentReport } from "../../src/shared/types.ts";
 
 function cleanReport(): AssessmentReport {
@@ -94,6 +98,40 @@ test("unknown results never render a clean outcome", () => {
   expect(summary).not.toContain("No actionable lifecycle risk found");
 });
 
+test("one collapsed finding annotates once and names every candidate platform", () => {
+  const report = cleanReport();
+  report.lifecycleFindings = [
+    {
+      findingId: "finding",
+      semanticKey: "semantic",
+      evidenceIds: ["evidence"],
+      modelId: "o4-mini",
+      servingPlatform: "azure",
+      servingPlatforms: ["azure", "openai"],
+      lifecycleMatch: "exact",
+      lifecycleStatus: "shutdown-scheduled",
+      shutdownDate: "2026-10-16",
+      daysUntilShutdown: 74,
+      replacementModels: [],
+      sourceUrls: [],
+      feedConflict: false,
+      outcome: "warning",
+      reasons: ["Serving platform is ambiguous across azure, openai."],
+      scope: "application",
+      environment: "unknown",
+      confidence: "low",
+      selectorKind: "model-id",
+      locations: [{ path: "packages/ai-client/src/models.ts", line: 23, column: 10 }],
+    },
+  ];
+
+  const lines: string[] = [];
+  publishAnnotations(report, (line: string) => lines.push(line));
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("o4-mini on azure or openai: shutdown 2026-10-16 (74 day(s))");
+  expect(renderSummary(report)).toContain("azure or openai");
+});
+
 test("active suppressions stay visible in the summary", () => {
   const report = cleanReport();
   report.lifecycleFindings = [
@@ -103,6 +141,7 @@ test("active suppressions stay visible in the summary", () => {
       evidenceIds: ["evidence"],
       modelId: "gpt-old",
       servingPlatform: "openai",
+      servingPlatforms: ["openai"],
       lifecycleMatch: "exact",
       lifecycleStatus: "shutdown-scheduled",
       shutdownDate: "2026-08-20",
@@ -143,6 +182,7 @@ test("repository text cannot inject HTML, Markdown links, tables, mentions, or a
       evidenceIds: ["evidence"],
       modelId: attack,
       servingPlatform: "openai",
+      servingPlatforms: ["openai"],
       lifecycleMatch: "exact",
       lifecycleStatus: "shutdown-scheduled",
       shutdownDate: "2026-08-20",

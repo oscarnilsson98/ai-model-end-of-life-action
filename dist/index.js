@@ -30,7 +30,7 @@ var __toESM = (mod, isNodeMode, target) => {
 };
 var __commonJS = (cb, mod) => () => (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);
 
-// node_modules/yaml/dist/nodes/identity.js
+// ../../../node_modules/yaml/dist/nodes/identity.js
 var require_identity = __commonJS((exports2) => {
   var ALIAS = Symbol.for("yaml.alias");
   var DOC = Symbol.for("yaml.document");
@@ -84,7 +84,7 @@ var require_identity = __commonJS((exports2) => {
   exports2.isSeq = isSeq;
 });
 
-// node_modules/yaml/dist/visit.js
+// ../../../node_modules/yaml/dist/visit.js
 var require_visit = __commonJS((exports2) => {
   var identity = require_identity();
   var BREAK = Symbol("break visit");
@@ -239,7 +239,7 @@ var require_visit = __commonJS((exports2) => {
   exports2.visitAsync = visitAsync;
 });
 
-// node_modules/yaml/dist/doc/directives.js
+// ../../../node_modules/yaml/dist/doc/directives.js
 var require_directives = __commonJS((exports2) => {
   var identity = require_identity();
   var visit = require_visit();
@@ -391,7 +391,7 @@ var require_directives = __commonJS((exports2) => {
   exports2.Directives = Directives;
 });
 
-// node_modules/yaml/dist/doc/anchors.js
+// ../../../node_modules/yaml/dist/doc/anchors.js
 var require_anchors = __commonJS((exports2) => {
   var identity = require_identity();
   var visit = require_visit();
@@ -453,7 +453,7 @@ var require_anchors = __commonJS((exports2) => {
   exports2.findNewAnchor = findNewAnchor;
 });
 
-// node_modules/yaml/dist/doc/applyReviver.js
+// ../../../node_modules/yaml/dist/doc/applyReviver.js
 var require_applyReviver = __commonJS((exports2) => {
   function applyReviver(reviver, obj, key, val) {
     if (val && typeof val === "object") {
@@ -500,7 +500,7 @@ var require_applyReviver = __commonJS((exports2) => {
   exports2.applyReviver = applyReviver;
 });
 
-// node_modules/yaml/dist/nodes/toJS.js
+// ../../../node_modules/yaml/dist/nodes/toJS.js
 var require_toJS = __commonJS((exports2) => {
   var identity = require_identity();
   function toJS(value, arg, ctx) {
@@ -527,7 +527,7 @@ var require_toJS = __commonJS((exports2) => {
   exports2.toJS = toJS;
 });
 
-// node_modules/yaml/dist/nodes/Node.js
+// ../../../node_modules/yaml/dist/nodes/Node.js
 var require_Node = __commonJS((exports2) => {
   var applyReviver = require_applyReviver();
   var identity = require_identity();
@@ -564,7 +564,7 @@ var require_Node = __commonJS((exports2) => {
   exports2.NodeBase = NodeBase;
 });
 
-// node_modules/yaml/dist/nodes/Alias.js
+// ../../../node_modules/yaml/dist/nodes/Alias.js
 var require_Alias = __commonJS((exports2) => {
   var anchors = require_anchors();
   var visit = require_visit();
@@ -674,7 +674,7 @@ var require_Alias = __commonJS((exports2) => {
   exports2.Alias = Alias;
 });
 
-// node_modules/yaml/dist/nodes/Scalar.js
+// ../../../node_modules/yaml/dist/nodes/Scalar.js
 var require_Scalar = __commonJS((exports2) => {
   var identity = require_identity();
   var Node = require_Node();
@@ -702,7 +702,7 @@ var require_Scalar = __commonJS((exports2) => {
   exports2.isScalarValue = isScalarValue;
 });
 
-// node_modules/yaml/dist/doc/createNode.js
+// ../../../node_modules/yaml/dist/doc/createNode.js
 var require_createNode = __commonJS((exports2) => {
   var Alias = require_Alias();
   var identity = require_identity();
@@ -774,7 +774,7 @@ var require_createNode = __commonJS((exports2) => {
   exports2.createNode = createNode;
 });
 
-// node_modules/yaml/dist/nodes/Collection.js
+// ../../../node_modules/yaml/dist/nodes/Collection.js
 var require_Collection = __commonJS((exports2) => {
   var createNode = require_createNode();
   var identity = require_identity();
@@ -889,7 +889,7 @@ var require_Collection = __commonJS((exports2) => {
   exports2.isEmptyPath = isEmptyPath;
 });
 
-// node_modules/yaml/dist/stringify/stringifyComment.js
+// ../../../node_modules/yaml/dist/stringify/stringifyComment.js
 var require_stringifyComment = __commonJS((exports2) => {
   var stringifyComment = (str) => str.replace(/^(?!$)(?: $)?/gm, "#");
   function indentComment(comment, indent) {
@@ -906,7 +906,7 @@ var require_stringifyComment = __commonJS((exports2) => {
   exports2.stringifyComment = stringifyComment;
 });
 
-// node_modules/yaml/dist/stringify/foldFlowLines.js
+// ../../../node_modules/yaml/dist/stringify/foldFlowLines.js
 var require_foldFlowLines = __commonJS((exports2) => {
   var FOLD_FLOW = "flow";
   var FOLD_BLOCK = "block";
@@ -1043,7 +1043,7 @@ ${indent}${text.slice(fold + 1, end2)}`;
   exports2.foldFlowLines = foldFlowLines;
 });
 
-// node_modules/yaml/dist/stringify/stringifyString.js
+// ../../../node_modules/yaml/dist/stringify/stringifyString.js
 var require_stringifyString = __commonJS((exports2) => {
   var Scalar = require_Scalar();
   var foldFlowLines = require_foldFlowLines();
@@ -1341,7 +1341,7 @@ ${indent}`);
   exports2.stringifyString = stringifyString;
 });
 
-// node_modules/yaml/dist/stringify/stringify.js
+// ../../../node_modules/yaml/dist/stringify/stringify.js
 var require_stringify = __commonJS((exports2) => {
   var anchors = require_anchors();
   var identity = require_identity();
@@ -1462,7 +1462,7 @@ ${ctx.indent}${str}`;
   exports2.stringify = stringify;
 });
 
-// node_modules/yaml/dist/stringify/stringifyPair.js
+// ../../../node_modules/yaml/dist/stringify/stringifyPair.js
 var require_stringifyPair = __commonJS((exports2) => {
   var identity = require_identity();
   var Scalar = require_Scalar();
@@ -1598,7 +1598,7 @@ ${ctx.indent}`;
   exports2.stringifyPair = stringifyPair;
 });
 
-// node_modules/yaml/dist/log.js
+// ../../../node_modules/yaml/dist/log.js
 var require_log = __commonJS((exports2) => {
   var node_process = require("process");
   function debug(logLevel, ...messages) {
@@ -1617,7 +1617,7 @@ var require_log = __commonJS((exports2) => {
   exports2.warn = warn;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/merge.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/merge.js
 var require_merge = __commonJS((exports2) => {
   var identity = require_identity();
   var Scalar = require_Scalar();
@@ -1674,7 +1674,7 @@ var require_merge = __commonJS((exports2) => {
   exports2.merge = merge;
 });
 
-// node_modules/yaml/dist/nodes/addPairToJSMap.js
+// ../../../node_modules/yaml/dist/nodes/addPairToJSMap.js
 var require_addPairToJSMap = __commonJS((exports2) => {
   var log = require_log();
   var merge = require_merge();
@@ -1735,7 +1735,7 @@ var require_addPairToJSMap = __commonJS((exports2) => {
   exports2.addPairToJSMap = addPairToJSMap;
 });
 
-// node_modules/yaml/dist/nodes/Pair.js
+// ../../../node_modules/yaml/dist/nodes/Pair.js
 var require_Pair = __commonJS((exports2) => {
   var createNode = require_createNode();
   var stringifyPair = require_stringifyPair();
@@ -1773,7 +1773,7 @@ var require_Pair = __commonJS((exports2) => {
   exports2.createPair = createPair;
 });
 
-// node_modules/yaml/dist/stringify/stringifyCollection.js
+// ../../../node_modules/yaml/dist/stringify/stringifyCollection.js
 var require_stringifyCollection = __commonJS((exports2) => {
   var identity = require_identity();
   var stringify = require_stringify();
@@ -1925,7 +1925,7 @@ ${indent}${end}`;
   exports2.stringifyCollection = stringifyCollection;
 });
 
-// node_modules/yaml/dist/nodes/YAMLMap.js
+// ../../../node_modules/yaml/dist/nodes/YAMLMap.js
 var require_YAMLMap = __commonJS((exports2) => {
   var stringifyCollection = require_stringifyCollection();
   var addPairToJSMap = require_addPairToJSMap();
@@ -2052,7 +2052,7 @@ var require_YAMLMap = __commonJS((exports2) => {
   exports2.findPair = findPair;
 });
 
-// node_modules/yaml/dist/schema/common/map.js
+// ../../../node_modules/yaml/dist/schema/common/map.js
 var require_map = __commonJS((exports2) => {
   var identity = require_identity();
   var YAMLMap = require_YAMLMap();
@@ -2071,7 +2071,7 @@ var require_map = __commonJS((exports2) => {
   exports2.map = map;
 });
 
-// node_modules/yaml/dist/nodes/YAMLSeq.js
+// ../../../node_modules/yaml/dist/nodes/YAMLSeq.js
 var require_YAMLSeq = __commonJS((exports2) => {
   var createNode = require_createNode();
   var stringifyCollection = require_stringifyCollection();
@@ -2164,7 +2164,7 @@ var require_YAMLSeq = __commonJS((exports2) => {
   exports2.YAMLSeq = YAMLSeq;
 });
 
-// node_modules/yaml/dist/schema/common/seq.js
+// ../../../node_modules/yaml/dist/schema/common/seq.js
 var require_seq = __commonJS((exports2) => {
   var identity = require_identity();
   var YAMLSeq = require_YAMLSeq();
@@ -2183,7 +2183,7 @@ var require_seq = __commonJS((exports2) => {
   exports2.seq = seq;
 });
 
-// node_modules/yaml/dist/schema/common/string.js
+// ../../../node_modules/yaml/dist/schema/common/string.js
 var require_string = __commonJS((exports2) => {
   var stringifyString = require_stringifyString();
   var string = {
@@ -2199,7 +2199,7 @@ var require_string = __commonJS((exports2) => {
   exports2.string = string;
 });
 
-// node_modules/yaml/dist/schema/common/null.js
+// ../../../node_modules/yaml/dist/schema/common/null.js
 var require_null = __commonJS((exports2) => {
   var Scalar = require_Scalar();
   var nullTag = {
@@ -2214,7 +2214,7 @@ var require_null = __commonJS((exports2) => {
   exports2.nullTag = nullTag;
 });
 
-// node_modules/yaml/dist/schema/core/bool.js
+// ../../../node_modules/yaml/dist/schema/core/bool.js
 var require_bool = __commonJS((exports2) => {
   var Scalar = require_Scalar();
   var boolTag = {
@@ -2235,7 +2235,7 @@ var require_bool = __commonJS((exports2) => {
   exports2.boolTag = boolTag;
 });
 
-// node_modules/yaml/dist/stringify/stringifyNumber.js
+// ../../../node_modules/yaml/dist/stringify/stringifyNumber.js
 var require_stringifyNumber = __commonJS((exports2) => {
   function stringifyNumber({ format, minFractionDigits, tag, value }) {
     if (typeof value === "bigint")
@@ -2259,7 +2259,7 @@ var require_stringifyNumber = __commonJS((exports2) => {
   exports2.stringifyNumber = stringifyNumber;
 });
 
-// node_modules/yaml/dist/schema/core/float.js
+// ../../../node_modules/yaml/dist/schema/core/float.js
 var require_float = __commonJS((exports2) => {
   var Scalar = require_Scalar();
   var stringifyNumber = require_stringifyNumber();
@@ -2302,7 +2302,7 @@ var require_float = __commonJS((exports2) => {
   exports2.floatNaN = floatNaN;
 });
 
-// node_modules/yaml/dist/schema/core/int.js
+// ../../../node_modules/yaml/dist/schema/core/int.js
 var require_int = __commonJS((exports2) => {
   var stringifyNumber = require_stringifyNumber();
   var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
@@ -2344,7 +2344,7 @@ var require_int = __commonJS((exports2) => {
   exports2.intOct = intOct;
 });
 
-// node_modules/yaml/dist/schema/core/schema.js
+// ../../../node_modules/yaml/dist/schema/core/schema.js
 var require_schema = __commonJS((exports2) => {
   var map = require_map();
   var _null = require_null();
@@ -2369,7 +2369,7 @@ var require_schema = __commonJS((exports2) => {
   exports2.schema = schema;
 });
 
-// node_modules/yaml/dist/schema/json/schema.js
+// ../../../node_modules/yaml/dist/schema/json/schema.js
 var require_schema2 = __commonJS((exports2) => {
   var Scalar = require_Scalar();
   var map = require_map();
@@ -2433,7 +2433,7 @@ var require_schema2 = __commonJS((exports2) => {
   exports2.schema = schema;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/binary.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/binary.js
 var require_binary = __commonJS((exports2) => {
   var node_buffer = require("buffer");
   var Scalar = require_Scalar();
@@ -2488,7 +2488,7 @@ var require_binary = __commonJS((exports2) => {
   exports2.binary = binary;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/pairs.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/pairs.js
 var require_pairs = __commonJS((exports2) => {
   var identity = require_identity();
   var Pair = require_Pair();
@@ -2563,7 +2563,7 @@ ${cn.comment}` : item.comment;
   exports2.resolvePairs = resolvePairs;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/omap.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/omap.js
 var require_omap = __commonJS((exports2) => {
   var identity = require_identity();
   var toJS = require_toJS();
@@ -2635,7 +2635,7 @@ var require_omap = __commonJS((exports2) => {
   exports2.omap = omap;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/bool.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/bool.js
 var require_bool2 = __commonJS((exports2) => {
   var Scalar = require_Scalar();
   function boolStringify({ value, source }, ctx) {
@@ -2664,7 +2664,7 @@ var require_bool2 = __commonJS((exports2) => {
   exports2.trueTag = trueTag;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/float.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/float.js
 var require_float2 = __commonJS((exports2) => {
   var Scalar = require_Scalar();
   var stringifyNumber = require_stringifyNumber();
@@ -2710,7 +2710,7 @@ var require_float2 = __commonJS((exports2) => {
   exports2.floatNaN = floatNaN;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/int.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/int.js
 var require_int2 = __commonJS((exports2) => {
   var stringifyNumber = require_stringifyNumber();
   var intIdentify = (value) => typeof value === "bigint" || Number.isInteger(value);
@@ -2786,7 +2786,7 @@ var require_int2 = __commonJS((exports2) => {
   exports2.intOct = intOct;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/set.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/set.js
 var require_set = __commonJS((exports2) => {
   var identity = require_identity();
   var Pair = require_Pair();
@@ -2869,7 +2869,7 @@ var require_set = __commonJS((exports2) => {
   exports2.set = set;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/timestamp.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/timestamp.js
 var require_timestamp = __commonJS((exports2) => {
   var stringifyNumber = require_stringifyNumber();
   function parseSexagesimal(str, asBigInt) {
@@ -2951,7 +2951,7 @@ var require_timestamp = __commonJS((exports2) => {
   exports2.timestamp = timestamp;
 });
 
-// node_modules/yaml/dist/schema/yaml-1.1/schema.js
+// ../../../node_modules/yaml/dist/schema/yaml-1.1/schema.js
 var require_schema3 = __commonJS((exports2) => {
   var map = require_map();
   var _null = require_null();
@@ -2992,7 +2992,7 @@ var require_schema3 = __commonJS((exports2) => {
   exports2.schema = schema;
 });
 
-// node_modules/yaml/dist/schema/tags.js
+// ../../../node_modules/yaml/dist/schema/tags.js
 var require_tags = __commonJS((exports2) => {
   var map = require_map();
   var _null = require_null();
@@ -3083,7 +3083,7 @@ var require_tags = __commonJS((exports2) => {
   exports2.getTags = getTags;
 });
 
-// node_modules/yaml/dist/schema/Schema.js
+// ../../../node_modules/yaml/dist/schema/Schema.js
 var require_Schema = __commonJS((exports2) => {
   var identity = require_identity();
   var map = require_map();
@@ -3113,7 +3113,7 @@ var require_Schema = __commonJS((exports2) => {
   exports2.Schema = Schema;
 });
 
-// node_modules/yaml/dist/stringify/stringifyDocument.js
+// ../../../node_modules/yaml/dist/stringify/stringifyDocument.js
 var require_stringifyDocument = __commonJS((exports2) => {
   var identity = require_identity();
   var stringify = require_stringify();
@@ -3193,7 +3193,7 @@ var require_stringifyDocument = __commonJS((exports2) => {
   exports2.stringifyDocument = stringifyDocument;
 });
 
-// node_modules/yaml/dist/doc/Document.js
+// ../../../node_modules/yaml/dist/doc/Document.js
 var require_Document = __commonJS((exports2) => {
   var Alias = require_Alias();
   var Collection = require_Collection();
@@ -3428,7 +3428,7 @@ var require_Document = __commonJS((exports2) => {
   exports2.Document = Document;
 });
 
-// node_modules/yaml/dist/errors.js
+// ../../../node_modules/yaml/dist/errors.js
 var require_errors = __commonJS((exports2) => {
   class YAMLError extends Error {
     constructor(name, pos, code, message) {
@@ -3493,7 +3493,7 @@ ${pointer}
   exports2.prettifyError = prettifyError;
 });
 
-// node_modules/yaml/dist/compose/resolve-props.js
+// ../../../node_modules/yaml/dist/compose/resolve-props.js
 var require_resolve_props = __commonJS((exports2) => {
   function resolveProps(tokens, { flow, indicator, next, offset, onError, parentIndent, startOnNewline }) {
     let spaceBefore = false;
@@ -3623,7 +3623,7 @@ var require_resolve_props = __commonJS((exports2) => {
   exports2.resolveProps = resolveProps;
 });
 
-// node_modules/yaml/dist/compose/util-contains-newline.js
+// ../../../node_modules/yaml/dist/compose/util-contains-newline.js
 var require_util_contains_newline = __commonJS((exports2) => {
   function containsNewline(key) {
     if (!key)
@@ -3663,7 +3663,7 @@ var require_util_contains_newline = __commonJS((exports2) => {
   exports2.containsNewline = containsNewline;
 });
 
-// node_modules/yaml/dist/compose/util-flow-indent-check.js
+// ../../../node_modules/yaml/dist/compose/util-flow-indent-check.js
 var require_util_flow_indent_check = __commonJS((exports2) => {
   var utilContainsNewline = require_util_contains_newline();
   function flowIndentCheck(indent, fc, onError) {
@@ -3678,7 +3678,7 @@ var require_util_flow_indent_check = __commonJS((exports2) => {
   exports2.flowIndentCheck = flowIndentCheck;
 });
 
-// node_modules/yaml/dist/compose/util-map-includes.js
+// ../../../node_modules/yaml/dist/compose/util-map-includes.js
 var require_util_map_includes = __commonJS((exports2) => {
   var identity = require_identity();
   function mapIncludes(ctx, items, search) {
@@ -3691,7 +3691,7 @@ var require_util_map_includes = __commonJS((exports2) => {
   exports2.mapIncludes = mapIncludes;
 });
 
-// node_modules/yaml/dist/compose/resolve-block-map.js
+// ../../../node_modules/yaml/dist/compose/resolve-block-map.js
 var require_resolve_block_map = __commonJS((exports2) => {
   var Pair = require_Pair();
   var YAMLMap = require_YAMLMap();
@@ -3798,7 +3798,7 @@ var require_resolve_block_map = __commonJS((exports2) => {
   exports2.resolveBlockMap = resolveBlockMap;
 });
 
-// node_modules/yaml/dist/compose/resolve-block-seq.js
+// ../../../node_modules/yaml/dist/compose/resolve-block-seq.js
 var require_resolve_block_seq = __commonJS((exports2) => {
   var YAMLSeq = require_YAMLSeq();
   var resolveProps = require_resolve_props();
@@ -3846,7 +3846,7 @@ var require_resolve_block_seq = __commonJS((exports2) => {
   exports2.resolveBlockSeq = resolveBlockSeq;
 });
 
-// node_modules/yaml/dist/compose/resolve-end.js
+// ../../../node_modules/yaml/dist/compose/resolve-end.js
 var require_resolve_end = __commonJS((exports2) => {
   function resolveEnd(end, offset, reqSpace, onError) {
     let comment = "";
@@ -3886,7 +3886,7 @@ var require_resolve_end = __commonJS((exports2) => {
   exports2.resolveEnd = resolveEnd;
 });
 
-// node_modules/yaml/dist/compose/resolve-flow-collection.js
+// ../../../node_modules/yaml/dist/compose/resolve-flow-collection.js
 var require_resolve_flow_collection = __commonJS((exports2) => {
   var identity = require_identity();
   var Pair = require_Pair();
@@ -4077,7 +4077,7 @@ var require_resolve_flow_collection = __commonJS((exports2) => {
   exports2.resolveFlowCollection = resolveFlowCollection;
 });
 
-// node_modules/yaml/dist/compose/compose-collection.js
+// ../../../node_modules/yaml/dist/compose/compose-collection.js
 var require_compose_collection = __commonJS((exports2) => {
   var identity = require_identity();
   var Scalar = require_Scalar();
@@ -4139,7 +4139,7 @@ var require_compose_collection = __commonJS((exports2) => {
   exports2.composeCollection = composeCollection;
 });
 
-// node_modules/yaml/dist/compose/resolve-block-scalar.js
+// ../../../node_modules/yaml/dist/compose/resolve-block-scalar.js
 var require_resolve_block_scalar = __commonJS((exports2) => {
   var Scalar = require_Scalar();
   function resolveBlockScalar(ctx, scalar, onError) {
@@ -4332,7 +4332,7 @@ var require_resolve_block_scalar = __commonJS((exports2) => {
   exports2.resolveBlockScalar = resolveBlockScalar;
 });
 
-// node_modules/yaml/dist/compose/resolve-flow-scalar.js
+// ../../../node_modules/yaml/dist/compose/resolve-flow-scalar.js
 var require_resolve_flow_scalar = __commonJS((exports2) => {
   var Scalar = require_Scalar();
   var resolveEnd = require_resolve_end();
@@ -4549,7 +4549,7 @@ var require_resolve_flow_scalar = __commonJS((exports2) => {
   exports2.resolveFlowScalar = resolveFlowScalar;
 });
 
-// node_modules/yaml/dist/compose/compose-scalar.js
+// ../../../node_modules/yaml/dist/compose/compose-scalar.js
 var require_compose_scalar = __commonJS((exports2) => {
   var identity = require_identity();
   var Scalar = require_Scalar();
@@ -4627,7 +4627,7 @@ var require_compose_scalar = __commonJS((exports2) => {
   exports2.composeScalar = composeScalar;
 });
 
-// node_modules/yaml/dist/compose/util-empty-scalar-position.js
+// ../../../node_modules/yaml/dist/compose/util-empty-scalar-position.js
 var require_util_empty_scalar_position = __commonJS((exports2) => {
   function emptyScalarPosition(offset, before, pos) {
     if (before) {
@@ -4654,7 +4654,7 @@ var require_util_empty_scalar_position = __commonJS((exports2) => {
   exports2.emptyScalarPosition = emptyScalarPosition;
 });
 
-// node_modules/yaml/dist/compose/compose-node.js
+// ../../../node_modules/yaml/dist/compose/compose-node.js
 var require_compose_node = __commonJS((exports2) => {
   var Alias = require_Alias();
   var identity = require_identity();
@@ -4757,7 +4757,7 @@ var require_compose_node = __commonJS((exports2) => {
   exports2.composeNode = composeNode;
 });
 
-// node_modules/yaml/dist/compose/compose-doc.js
+// ../../../node_modules/yaml/dist/compose/compose-doc.js
 var require_compose_doc = __commonJS((exports2) => {
   var Document = require_Document();
   var composeNode = require_compose_node();
@@ -4797,7 +4797,7 @@ var require_compose_doc = __commonJS((exports2) => {
   exports2.composeDoc = composeDoc;
 });
 
-// node_modules/yaml/dist/compose/composer.js
+// ../../../node_modules/yaml/dist/compose/composer.js
 var require_composer = __commonJS((exports2) => {
   var node_process = require("process");
   var directives = require_directives();
@@ -4988,7 +4988,7 @@ ${end.comment}` : end.comment;
   exports2.Composer = Composer;
 });
 
-// node_modules/yaml/dist/parse/cst-scalar.js
+// ../../../node_modules/yaml/dist/parse/cst-scalar.js
 var require_cst_scalar = __commonJS((exports2) => {
   var resolveBlockScalar = require_resolve_block_scalar();
   var resolveFlowScalar = require_resolve_flow_scalar();
@@ -5178,7 +5178,7 @@ var require_cst_scalar = __commonJS((exports2) => {
   exports2.setScalarValue = setScalarValue;
 });
 
-// node_modules/yaml/dist/parse/cst-stringify.js
+// ../../../node_modules/yaml/dist/parse/cst-stringify.js
 var require_cst_stringify = __commonJS((exports2) => {
   var stringify = (cst) => ("type" in cst) ? stringifyToken(cst) : stringifyItem(cst);
   function stringifyToken(token) {
@@ -5236,7 +5236,7 @@ var require_cst_stringify = __commonJS((exports2) => {
   exports2.stringify = stringify;
 });
 
-// node_modules/yaml/dist/parse/cst-visit.js
+// ../../../node_modules/yaml/dist/parse/cst-visit.js
 var require_cst_visit = __commonJS((exports2) => {
   var BREAK = Symbol("break visit");
   var SKIP = Symbol("skip children");
@@ -5295,7 +5295,7 @@ var require_cst_visit = __commonJS((exports2) => {
   exports2.visit = visit;
 });
 
-// node_modules/yaml/dist/parse/cst.js
+// ../../../node_modules/yaml/dist/parse/cst.js
 var require_cst = __commonJS((exports2) => {
   var cstScalar = require_cst_scalar();
   var cstStringify = require_cst_stringify();
@@ -5396,7 +5396,7 @@ var require_cst = __commonJS((exports2) => {
   exports2.tokenType = tokenType;
 });
 
-// node_modules/yaml/dist/parse/lexer.js
+// ../../../node_modules/yaml/dist/parse/lexer.js
 var require_lexer = __commonJS((exports2) => {
   var cst = require_cst();
   function isEmpty(ch) {
@@ -5993,7 +5993,7 @@ var require_lexer = __commonJS((exports2) => {
   exports2.Lexer = Lexer;
 });
 
-// node_modules/yaml/dist/parse/line-counter.js
+// ../../../node_modules/yaml/dist/parse/line-counter.js
 var require_line_counter = __commonJS((exports2) => {
   class LineCounter {
     constructor() {
@@ -6021,7 +6021,7 @@ var require_line_counter = __commonJS((exports2) => {
   exports2.LineCounter = LineCounter;
 });
 
-// node_modules/yaml/dist/parse/parser.js
+// ../../../node_modules/yaml/dist/parse/parser.js
 var require_parser = __commonJS((exports2) => {
   var node_process = require("process");
   var cst = require_cst();
@@ -6877,7 +6877,7 @@ var require_parser = __commonJS((exports2) => {
   exports2.Parser = Parser;
 });
 
-// node_modules/yaml/dist/public-api.js
+// ../../../node_modules/yaml/dist/public-api.js
 var require_public_api = __commonJS((exports2) => {
   var composer = require_composer();
   var Document = require_Document();
@@ -6971,7 +6971,7 @@ var require_public_api = __commonJS((exports2) => {
   exports2.stringify = stringify;
 });
 
-// node_modules/yaml/dist/index.js
+// ../../../node_modules/yaml/dist/index.js
 var require_dist = __commonJS((exports2) => {
   var composer = require_composer();
   var Document = require_Document();
@@ -8243,6 +8243,9 @@ function validateRepositoryPattern(value, label) {
 function patterns(value, label) {
   return stringArray(value, label).map((entry, index) => validateRepositoryPattern(entry, `${label}[${index}]`));
 }
+function platformList(value, label) {
+  return stringArray(value, label).map((entry, index) => platform(entry, `${label}[${index}]`)).sort();
+}
 function suppressionPatterns(value, label) {
   const result = patterns(value, label);
   if (result.some((pattern) => !/[^*?/]/u.test(pattern))) {
@@ -8409,6 +8412,7 @@ function defaultPolicy() {
     warnWithinDays: DEFAULT_WARN_WITHIN_DAYS,
     failWithinDays: null,
     allowPartial: false,
+    servingPlatforms: [],
     usageEvidenceFiles: [],
     assertions: [],
     resolutions: [],
@@ -8421,6 +8425,7 @@ function parsePolicyPayload(payload) {
   exactKeys(root, [
     "schemaVersion",
     "policy",
+    "servingPlatforms",
     "usageEvidenceFiles",
     "assertions",
     "resolutions",
@@ -8440,6 +8445,9 @@ function parsePolicyPayload(payload) {
       policy.failWithinDays = integer(source.failWithinDays, "policy.failWithinDays");
     }
     policy.allowPartial = boolean(source.allowPartial, "policy.allowPartial", false);
+  }
+  if (root.servingPlatforms !== undefined) {
+    policy.servingPlatforms = platformList(root.servingPlatforms, "servingPlatforms");
   }
   if (root.usageEvidenceFiles !== undefined) {
     policy.usageEvidenceFiles = patterns(root.usageEvidenceFiles, "usageEvidenceFiles");
@@ -8538,10 +8546,12 @@ function appendUniqueById(base, proposed, identity) {
 }
 function monotonicPolicy(base, proposed) {
   const failWithinDays = base.failWithinDays === null ? proposed.failWithinDays : proposed.failWithinDays === null ? base.failWithinDays : Math.max(base.failWithinDays, proposed.failWithinDays);
+  const servingPlatforms = base.servingPlatforms.length === 0 || proposed.servingPlatforms.length === 0 ? [] : [...new Set([...base.servingPlatforms, ...proposed.servingPlatforms])].sort();
   return {
     warnWithinDays: Math.max(base.warnWithinDays, proposed.warnWithinDays),
     failWithinDays,
     allowPartial: base.allowPartial && proposed.allowPartial,
+    servingPlatforms,
     usageEvidenceFiles: [...new Set([...base.usageEvidenceFiles, ...proposed.usageEvidenceFiles])].sort(),
     assertions: appendUniqueById(base.assertions, proposed.assertions, (entry) => entry.evidenceId),
     resolutions: appendUniqueById(base.resolutions, proposed.resolutions, (entry) => entry.resolutionId),
@@ -8903,6 +8913,7 @@ function lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform) {
     evidenceIds: [fact.evidenceId],
     modelId: pair.modelId,
     servingPlatform: pair.servingPlatform,
+    servingPlatforms: [pair.servingPlatform],
     lifecycleMatch: "exact",
     lifecycleStatus: lifecycle.lifecycleStatus,
     ...lifecycle.announcementDate === null ? {} : { announcementDate: lifecycle.announcementDate },
@@ -8921,6 +8932,48 @@ function lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform) {
     locations: [...fact.locations]
   };
 }
+function mergeReplacementModels(replacements) {
+  return [
+    ...new Map(replacements.map((replacement) => [
+      JSON.stringify([replacement.servingPlatform ?? null, replacement.modelId]),
+      replacement
+    ])).values()
+  ].sort((left, right) => compareText3(left.servingPlatform ?? "", right.servingPlatform ?? "") || compareText3(left.modelId, right.modelId));
+}
+function platformIsProven(fact) {
+  return fact.platformResolution === "resolved" && fact.kind !== "lexical";
+}
+function compareAmbiguousCandidate(left, right) {
+  return compareOutcome(right.outcome, left.outcome) || (left.shutdownDate === undefined ? 1 : 0) - (right.shutdownDate === undefined ? 1 : 0) || compareText3(left.shutdownDate ?? "", right.shutdownDate ?? "") || compareText3(left.servingPlatform, right.servingPlatform) || compareText3(left.semanticKey, right.semanticKey);
+}
+function collapseAmbiguousCandidates(candidates, restrictedTo) {
+  const ordered2 = [...candidates].sort(compareAmbiguousCandidate);
+  const representative = ordered2[0];
+  const servingPlatforms = [
+    ...new Set(ordered2.map((candidate) => candidate.servingPlatform))
+  ].sort(compareText3);
+  const semanticKey = JSON.stringify([
+    "ambiguous-platform",
+    servingPlatforms,
+    representative.semanticKey
+  ]);
+  const reasons = [
+    ...representative.reasons,
+    servingPlatforms.length === 1 ? "Serving platform is ambiguous; this match cannot block." : `Serving platform is ambiguous across ${servingPlatforms.join(", ")}; the most urgent of their lifecycle records is reported and this match cannot block.`,
+    ...restrictedTo.length === 0 ? [] : [`Matching was restricted to the declared serving platform(s): ${restrictedTo.join(", ")}.`]
+  ];
+  return {
+    ...representative,
+    findingId: canonicalSha256("ai-model-eol/lifecycle-finding/v3", semanticKey),
+    semanticKey,
+    servingPlatforms,
+    outcome: ordered2.reduce((strongest, candidate) => strongerOutcome(strongest, candidate.outcome), "none"),
+    feedConflict: ordered2.some((candidate) => candidate.feedConflict),
+    sourceUrls: [...new Set(ordered2.flatMap((candidate) => candidate.sourceUrls))].sort(compareText3),
+    replacementModels: mergeReplacementModels(ordered2.flatMap((candidate) => candidate.replacementModels)),
+    reasons
+  };
+}
 function joinFact(fact, feed, policy, now) {
   if (fact.modelResolution !== "resolved" || fact.modelId === undefined)
     return [];
@@ -8934,18 +8987,23 @@ function joinFact(fact, feed, policy, now) {
   } else if (fact.platformResolution === "ambiguous") {
     pairs = feed.modelPairs.filter((pair) => pair.modelId === fact.modelId);
   }
+  const restrictedTo = policy.servingPlatforms.length > 0 && !platformIsProven(fact) ? policy.servingPlatforms : [];
+  if (restrictedTo.length > 0) {
+    const declared = new Set(restrictedTo);
+    pairs = pairs.filter((pair) => declared.has(pair.servingPlatform));
+  }
   const findings = [];
   for (const pair of pairs) {
     for (const lifecycle of pair.activeLifecycles) {
       const finding = lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform);
       if (!exactPlatform && finding.outcome === "breach")
         finding.outcome = "warning";
-      if (!exactPlatform)
-        finding.reasons.push("Serving platform is ambiguous; this match cannot block.");
       findings.push(finding);
     }
   }
-  return findings;
+  if (exactPlatform || findings.length === 0)
+    return findings;
+  return [collapseAmbiguousCandidates(findings, restrictedTo)];
 }
 function aggregateFindings(findings) {
   const byKey = new Map;
@@ -8955,6 +9013,7 @@ function aggregateFindings(findings) {
       byKey.set(finding.semanticKey, {
         ...finding,
         evidenceIds: [...finding.evidenceIds],
+        servingPlatforms: [...finding.servingPlatforms],
         replacementModels: [...finding.replacementModels],
         sourceUrls: [...finding.sourceUrls],
         reasons: [...finding.reasons],
@@ -8963,16 +9022,17 @@ function aggregateFindings(findings) {
       continue;
     }
     existing.outcome = strongerOutcome(existing.outcome, finding.outcome);
+    existing.servingPlatforms = [
+      ...new Set([...existing.servingPlatforms, ...finding.servingPlatforms])
+    ].sort(compareText3);
     existing.evidenceIds = [...new Set([...existing.evidenceIds, ...finding.evidenceIds])].sort(compareText3);
     existing.sourceUrls = [...new Set([...existing.sourceUrls, ...finding.sourceUrls])].sort(compareText3);
     existing.reasons = [...new Set([...existing.reasons, ...finding.reasons])].sort(compareText3);
     existing.locations = [...existing.locations, ...finding.locations].sort(compareLocation).slice(0, 20);
-    existing.replacementModels = [
-      ...new Map([...existing.replacementModels, ...finding.replacementModels].map((replacement) => [
-        JSON.stringify([replacement.servingPlatform ?? null, replacement.modelId]),
-        replacement
-      ])).values()
-    ].sort((left, right) => compareText3(left.servingPlatform ?? "", right.servingPlatform ?? "") || compareText3(left.modelId, right.modelId));
+    existing.replacementModels = mergeReplacementModels([
+      ...existing.replacementModels,
+      ...finding.replacementModels
+    ]);
     existing.scope = strongestScope(existing.scope, finding.scope);
     existing.environment = strongestEnvironment(existing.environment, finding.environment);
     existing.confidence = strongestConfidence(existing.confidence, finding.confidence);
@@ -9001,7 +9061,7 @@ function applySuppressions(findings, evidenceById, policy, now, diagnostics) {
     for (const suppression of current) {
       const matched = finding.evidenceIds.some((evidenceId) => {
         const fact = evidenceById.get(evidenceId);
-        return fact !== undefined && suppressionMatches(suppression, fact, finding.modelId, finding.servingPlatform);
+        return fact !== undefined && finding.servingPlatforms.some((servingPlatform) => suppressionMatches(suppression, fact, finding.modelId, servingPlatform));
       });
       if (matched) {
         finding.suppressedBy = suppression.suppressionId;
@@ -9020,6 +9080,14 @@ function unresolvedIsAdvisory(fact) {
 }
 function evaluateEvidence(input) {
   const diagnostics = [...input.diagnostics ?? []];
+  if (input.policy.servingPlatforms.length > 0) {
+    diagnostics.push({
+      code: "declared-serving-platforms",
+      message: `Lifecycle matching for lexical and platform-ambiguous evidence is restricted to the declared serving platform(s): ${input.policy.servingPlatforms.join(", ")}.`,
+      path: POLICY_PATH,
+      severity: "notice"
+    });
+  }
   const orderedEvidence = [...input.evidence].sort((left, right) => compareText3(left.evidenceId, right.evidenceId));
   const resolved = applyResolutions(orderedEvidence, input.policy, input.now);
   diagnostics.push(...resolved.diagnostics);
@@ -9400,7 +9468,8 @@ function evaluateComparison(input) {
   const policyChanges = policyDiff(input.baseClaims.policy, input.targetClaims.policy, input.inputs);
   const baseSuppressions = new Set(trustedBasePolicy.suppressions.map((suppression) => JSON.stringify(suppression)));
   const proposedSuppression = proposedTargetPolicy.suppressions.some((suppression) => !baseSuppressions.has(JSON.stringify(suppression)));
-  const attemptedWeakening = proposedTargetPolicy.warnWithinDays < trustedBasePolicy.warnWithinDays || trustedBasePolicy.failWithinDays !== null && (proposedTargetPolicy.failWithinDays === null || proposedTargetPolicy.failWithinDays < trustedBasePolicy.failWithinDays) || !trustedBasePolicy.allowPartial && proposedTargetPolicy.allowPartial || proposedSuppression;
+  const proposedPlatformNarrowing = proposedTargetPolicy.servingPlatforms.length > 0 && (trustedBasePolicy.servingPlatforms.length === 0 || !trustedBasePolicy.servingPlatforms.every((servingPlatform) => proposedTargetPolicy.servingPlatforms.includes(servingPlatform)));
+  const attemptedWeakening = proposedTargetPolicy.warnWithinDays < trustedBasePolicy.warnWithinDays || trustedBasePolicy.failWithinDays !== null && (proposedTargetPolicy.failWithinDays === null || proposedTargetPolicy.failWithinDays < trustedBasePolicy.failWithinDays) || !trustedBasePolicy.allowPartial && proposedTargetPolicy.allowPartial || proposedSuppression || proposedPlatformNarrowing;
   let result = delta.result;
   if (result === "no-actionable-risk" && (claimDiagnostics.length > 0 || attemptedWeakening)) {
     result = "advisory";
@@ -13799,6 +13868,31 @@ function parseActionInputs(environment) {
   return result;
 }
 
+// src/shared/text.ts
+var BIDI_CONTROL_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+var CONTROL_OR_WHITESPACE_PATTERN = /[\u0000-\u001f\u007f-\u009f\s]+/g;
+function compact(value, maximum) {
+  if (!Number.isSafeInteger(maximum) || maximum < 1) {
+    throw new Error("Text compaction maximum must be a positive safe integer.");
+  }
+  const singleLine = value.replace(BIDI_CONTROL_PATTERN, "").replace(CONTROL_OR_WHITESPACE_PATTERN, " ").trim();
+  const codePoints = [...singleLine];
+  if (codePoints.length <= maximum)
+    return singleLine;
+  return `${codePoints.slice(0, maximum - 1).join("")}…`;
+}
+function servingPlatformLabel(finding) {
+  const platforms = finding.servingPlatforms.length === 0 ? [finding.servingPlatform] : finding.servingPlatforms;
+  return platforms.join(" or ");
+}
+function resultIcon(result, scanStatus) {
+  if (result === "blocking" || result === "unknown")
+    return "❌";
+  if (result === "advisory" || scanStatus === "partial")
+    return "⚠️";
+  return "✅";
+}
+
 // src/action/notification.ts
 var MAX_SLACK_TEXT_BYTES = 12000;
 var MAX_ACTIONABLE_FINDINGS = 10;
@@ -13807,19 +13901,19 @@ var TRUSTED_NOTIFICATION_EVENTS = new Set(["schedule", "workflow_dispatch", "pus
 var PROTECTED_SCOPES2 = new Set(["documentation", "example", "test"]);
 var REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 var OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
-var BIDI_CONTROL_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+var BIDI_CONTROL_PATTERN2 = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 function compareText7(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-function compact(value, maximum) {
-  const singleLine = value.replace(BIDI_CONTROL_PATTERN, "").replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim();
+function compact2(value, maximum) {
+  const singleLine = value.replace(BIDI_CONTROL_PATTERN2, "").replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim();
   const codePoints = [...singleLine];
   if (codePoints.length <= maximum)
     return singleLine;
   return `${codePoints.slice(0, maximum - 1).join("")}…`;
 }
 function slackText(value, maximum) {
-  return compact(value, maximum).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/@/g, "@​").replace(/\*/g, "∗").replace(/_/g, "＿").replace(/~/g, "∼").replace(/`/g, "ˋ");
+  return compact2(value, maximum).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/@/g, "@​").replace(/\*/g, "∗").replace(/_/g, "＿").replace(/~/g, "∼").replace(/`/g, "ˋ");
 }
 function boundedSlackText(value) {
   if (Buffer.byteLength(value, "utf8") <= MAX_SLACK_TEXT_BYTES)
@@ -13882,17 +13976,17 @@ function findingLine(finding) {
   }
   if (finding.feedConflict)
     qualifiers.push("feed conflict");
-  return `• *${label}* ${slackText(finding.servingPlatform, 80)} / ${slackText(finding.modelId, 180)} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;
+  return `• *${label}* ${slackText(servingPlatformLabel(finding), 160)} / ${slackText(finding.modelId, 180)} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;
 }
 function reportFileHint(path) {
-  const normalized = compact(path, 1024);
+  const normalized = compact2(path, 1024);
   if (normalized === "")
     return null;
   const components = normalized.split(/[\\/]/);
   const basename = components.at(-1)?.trim();
   return basename ? slackText(basename, 180) : null;
 }
-function resultIcon(report) {
+function resultIcon2(report) {
   if (report.result === "blocking" || report.result === "unknown")
     return "❌";
   if (report.result === "advisory" || report.scanStatus === "partial")
@@ -13904,7 +13998,7 @@ function renderSlackSnapshot(report) {
   const findings = actionableFindings(report);
   const externalSources = report.evidenceSources.filter((source) => source.kind !== "repository");
   const lines = [
-    `${resultIcon(report)} *AI model lifecycle snapshot*`,
+    `${resultIcon2(report)} *AI model lifecycle snapshot*`,
     `*Result:* ${report.result} · *Scan:* ${report.scanStatus} · *Evidence:* ${report.evidenceHealth}`,
     `*Counts:* ${report.counts.blocking} blocking · ${report.counts.advisory} advisory · ${report.counts.unresolved} unresolved`
   ];
@@ -13969,29 +14063,6 @@ async function deliverSlackNotification(options) {
 // src/action/publish.ts
 var import_node_fs3 = require("node:fs");
 var import_node_path2 = require("node:path");
-
-// src/shared/text.ts
-var BIDI_CONTROL_PATTERN2 = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-var CONTROL_OR_WHITESPACE_PATTERN = /[\u0000-\u001f\u007f-\u009f\s]+/g;
-function compact2(value, maximum) {
-  if (!Number.isSafeInteger(maximum) || maximum < 1) {
-    throw new Error("Text compaction maximum must be a positive safe integer.");
-  }
-  const singleLine = value.replace(BIDI_CONTROL_PATTERN2, "").replace(CONTROL_OR_WHITESPACE_PATTERN, " ").trim();
-  const codePoints = [...singleLine];
-  if (codePoints.length <= maximum)
-    return singleLine;
-  return `${codePoints.slice(0, maximum - 1).join("")}…`;
-}
-function resultIcon2(result, scanStatus) {
-  if (result === "blocking" || result === "unknown")
-    return "❌";
-  if (result === "advisory" || scanStatus === "partial")
-    return "⚠️";
-  return "✅";
-}
-
-// src/action/publish.ts
 var MAX_DETAIL_OUTPUT_BYTES = 120 * 1024;
 var MAX_TOTAL_OUTPUT_BYTES = 700 * 1024;
 var MAX_REPORT_BYTES = 25 * 1024 * 1024;
@@ -14000,7 +14071,7 @@ function escapeHtml(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/#/g, "&#35;").replace(/\\/g, "&#92;").replace(/\|/g, "&#124;").replace(/`/g, "&#96;").replace(/\[/g, "&#91;").replace(/\]/g, "&#93;").replace(/!/g, "&#33;").replace(/\(/g, "&#40;").replace(/\)/g, "&#41;").replace(/\*/g, "&#42;").replace(/_/g, "&#95;").replace(/~/g, "&#126;").replace(/@/g, "&#64;").replace(/:/g, "&#58;").replace(/\./g, "&#46;").replace(/[\r\n]+/g, "<br>");
 }
 function resultIcon3(report) {
-  return resultIcon2(report.result, report.scanStatus);
+  return resultIcon(report.result, report.scanStatus);
 }
 function deliveryLine(report, options = {}) {
   if (options.notificationPending) {
@@ -14011,20 +14082,20 @@ function deliveryLine(report, options = {}) {
   if (report.notificationStatus === "sent")
     return "Delivery: GitHub Actions summary + Slack snapshot";
   if (report.notificationStatus === "failed") {
-    return `Delivery: GitHub Actions summary; Slack failed (${escapeHtml(compact2(report.notificationReason, 300))})`;
+    return `Delivery: GitHub Actions summary; Slack failed (${escapeHtml(compact(report.notificationReason, 300))})`;
   }
-  return `Delivery: GitHub Actions summary; Slack skipped (${escapeHtml(compact2(report.notificationReason, 300))})`;
+  return `Delivery: GitHub Actions summary; Slack skipped (${escapeHtml(compact(report.notificationReason, 300))})`;
 }
 function findingRow(finding) {
   const deadline = finding.shutdownDate === undefined ? "Not announced" : `${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
   const delta = finding.delta === undefined ? "—" : finding.delta;
-  return `| <code>${escapeHtml(compact2(finding.modelId, 160))}</code> | ${escapeHtml(finding.servingPlatform)} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadline} |`;
+  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadline} |`;
 }
 function renderSummary(report, options = {}) {
   const actionable = report.lifecycleFindings.filter((finding) => finding.outcome === "breach" || finding.outcome === "warning");
   const visibleSources = report.evidenceSources.slice(0, 20);
   const hiddenSourceCount = report.evidenceSources.length - visibleSources.length;
-  const sourceText = report.evidenceSources.length === 1 ? "repository only" : `${visibleSources.map((source) => `${compact2(source.id, 180)} (${source.kind}, ${source.health})`).join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
+  const sourceText = report.evidenceSources.length === 1 ? "repository only" : `${visibleSources.map((source) => `${compact(source.id, 180)} (${source.kind}, ${source.health})`).join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
   const lines = [
     "## AI model lifecycle",
     "",
@@ -14050,30 +14121,30 @@ function renderSummary(report, options = {}) {
   if (report.unresolvedReferences.length > 0) {
     lines.push("### Conditional and unresolved evidence", "", ...report.unresolvedReferences.slice(0, 50).map((fact) => {
       const location = fact.locations[0];
-      return `- <code>${escapeHtml(compact2(fact.rawValue, 180))}</code> — ${escapeHtml(compact2(fact.detectorRuleId, 240))} · ${fact.modelResolution}/${fact.platformResolution}${location === undefined ? "" : ` · <code>${escapeHtml(compact2(location.path, 300))}</code>`}`;
+      return `- <code>${escapeHtml(compact(fact.rawValue, 180))}</code> — ${escapeHtml(compact(fact.detectorRuleId, 240))} · ${fact.modelResolution}/${fact.platformResolution}${location === undefined ? "" : ` · <code>${escapeHtml(compact(location.path, 300))}</code>`}`;
     }), "");
   }
   const external = report.evidenceSources.filter((source) => source.kind !== "repository");
   if (external.length > 0) {
-    lines.push("### External evidence health", "", ...external.slice(0, 50).map((source) => `- ${escapeHtml(compact2(source.id, 180))}: **${source.health}**`), ...external.length > 50 ? [`- ${external.length - 50} additional source(s) are in the JSON report.`] : [], "");
+    lines.push("### External evidence health", "", ...external.slice(0, 50).map((source) => `- ${escapeHtml(compact(source.id, 180))}: **${source.health}**`), ...external.length > 50 ? [`- ${external.length - 50} additional source(s) are in the JSON report.`] : [], "");
   }
   if (report.policyDiff.length > 0) {
-    lines.push("### Policy and evidence changes", "", ...report.policyDiff.slice(0, 100).map((change) => `- ${escapeHtml(compact2(change, 500))}`), "");
+    lines.push("### Policy and evidence changes", "", ...report.policyDiff.slice(0, 100).map((change) => `- ${escapeHtml(compact(change, 500))}`), "");
   }
   const suppressed = report.lifecycleFindings.filter((finding) => finding.suppressedBy !== undefined);
   if (suppressed.length > 0) {
-    lines.push("### Active suppressions", "", ...suppressed.slice(0, 100).map((finding) => `- <code>${escapeHtml(compact2(finding.modelId, 160))}</code> on ${escapeHtml(compact2(finding.servingPlatform, 80))} — <code>${escapeHtml(compact2(finding.suppressedBy, 160))}</code>`), ...suppressed.length > 100 ? [`- ${suppressed.length - 100} additional suppressed finding(s) are in the JSON report.`] : [], "");
+    lines.push("### Active suppressions", "", ...suppressed.slice(0, 100).map((finding) => `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(compact(finding.servingPlatform, 80))} — <code>${escapeHtml(compact(finding.suppressedBy, 160))}</code>`), ...suppressed.length > 100 ? [`- ${suppressed.length - 100} additional suppressed finding(s) are in the JSON report.`] : [], "");
   }
   if (report.diagnostics.length > 0) {
-    lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...report.diagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact2(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact2(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact2(diagnostic.message, 800))}`), "", "</details>", "");
+    lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...report.diagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact(diagnostic.message, 800))}`), "", "</details>", "");
   }
-  lines.push(`Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code>`, `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact2(report.reportPath, 500))}</code>`, "");
+  lines.push(`Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code>`, `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact(report.reportPath, 500))}</code>`, "");
   return lines.join(`
 `);
 }
 function annotationText(finding) {
   const deadline = finding.shutdownDate === undefined ? "shutdown date not announced" : `shutdown ${finding.shutdownDate} (${finding.daysUntilShutdown ?? "?"} day(s))`;
-  return `${finding.modelId} on ${finding.servingPlatform}: ${deadline}. ${finding.reasons.join(" ")}`;
+  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${deadline}. ${finding.reasons.join(" ")}`;
 }
 function publishAnnotations(report, log = console.log) {
   const actionable = report.lifecycleFindings.filter((finding) => (finding.outcome === "breach" || finding.outcome === "warning") && finding.delta !== "unchanged" && finding.delta !== "resolved");
@@ -14083,9 +14154,9 @@ function publishAnnotations(report, log = console.log) {
       break;
     const location = finding.locations[0];
     if (location === undefined || Buffer.byteLength(location.path, "utf8") > 1024) {
-      emitCommand(finding.outcome === "breach" ? "error" : "warning", compact2(annotationText(finding), 2000), log);
+      emitCommand(finding.outcome === "breach" ? "error" : "warning", compact(annotationText(finding), 2000), log);
     } else {
-      emitAnnotation(finding.outcome === "breach" ? "error" : "warning", compact2(annotationText(finding), 2000), {
+      emitAnnotation(finding.outcome === "breach" ? "error" : "warning", compact(annotationText(finding), 2000), {
         title: "AI model lifecycle",
         file: location.path,
         line: location.line,
@@ -14195,7 +14266,7 @@ function publishNotificationSummary(report, environment) {
   appendSummary(environment.GITHUB_STEP_SUMMARY, [
     "## Notification delivery",
     "",
-    `Slack: **${report.notificationStatus}** · ${escapeHtml(compact2(report.notificationReason, 800))}`,
+    `Slack: **${report.notificationStatus}** · ${escapeHtml(compact(report.notificationReason, 800))}`,
     ""
   ].join(`
 `));
@@ -14714,7 +14785,7 @@ class ActionRunError extends Error {
 }
 function safeMessage(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return compact2(message, 2000);
+  return compact(message, 2000);
 }
 function reportPath(environment2, requested) {
   if (requested !== undefined)
@@ -14776,10 +14847,17 @@ function applyFeedCoverage(detection, feed) {
   }
   return detection.scanStatus === "partial" ? detection : { ...detection, scanStatus: "partial" };
 }
-function reportEvidenceSources(evaluation, inspections, effectiveDocuments) {
+function reportEvidenceSources(evaluation, inspections, policy, effectiveDocuments) {
   const result = [
     { id: "repository", kind: "repository", health: "current" }
   ];
+  if (policy.servingPlatforms.length > 0) {
+    result.push({
+      id: `declared-serving-platforms: ${policy.servingPlatforms.join(", ")}`,
+      kind: "repository",
+      health: "current"
+    });
+  }
   const manual = evaluation.evidence.filter((fact) => fact.origin === "manual-claim");
   if (manual.length > 0) {
     result.push({
@@ -14942,7 +15020,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           diagnostics: diagnostic.evaluation.diagnostics,
           policyDiff: targetClaims2.policy.valid ? [] : ["Target policy/configuration is invalid and non-authoritative."],
           feed: feed.digests,
-          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
           reportPath: localReportPath
         }),
         policy: diagnostic.policy,
@@ -14980,7 +15058,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
               ...feedDiagnostics(feed)
             ],
             feed: feed.digests,
-            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
             reportPath: localReportPath
           }),
           policy: diagnostic.policy,
@@ -14999,7 +15077,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           evaluation: diagnostic.evaluation,
           diagnostics: diagnostic.evaluation.diagnostics,
           feed: feed.digests,
-          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
           reportPath: localReportPath
         }),
         policy: diagnostic.policy,
@@ -15048,7 +15126,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
             evaluation: diagnostic.evaluation,
             diagnostics: diagnostic.evaluation.diagnostics,
             feed: feed.digests,
-            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
             reportPath: localReportPath
           }),
           policy: diagnostic.policy,
@@ -15108,7 +15186,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
         diagnostics,
         policyDiff: comparison.policyDiff,
         feed: feed.digests,
-        evidenceSources: reportEvidenceSources(comparison.evaluation, [targetClaims], monotonicEvidenceSourceDocuments(baseClaims, targetClaims)),
+        evidenceSources: reportEvidenceSources(comparison.evaluation, [targetClaims], comparison.policy, monotonicEvidenceSourceDocuments(baseClaims, targetClaims)),
         reportPath: localReportPath
       }),
       policy: comparison.policy,

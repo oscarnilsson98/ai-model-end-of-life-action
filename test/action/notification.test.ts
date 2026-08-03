@@ -15,6 +15,7 @@ function finding(overrides: Partial<LifecycleFinding> = {}): LifecycleFinding {
     evidenceIds: ["evidence"],
     modelId: "gpt-old",
     servingPlatform: "openai",
+    servingPlatforms: ["openai"],
     lifecycleMatch: "exact",
     lifecycleStatus: "shutdown-scheduled",
     shutdownDate: "2026-08-20",

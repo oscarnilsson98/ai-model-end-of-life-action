@@ -137,6 +137,8 @@ Lexical-only, model-dynamic, platform-ambiguous, documentation, example, and tes
 
 Lexical evidence scoped to application/deployment source may produce a clearly labelled `advisory` when its exact typed model ID is inside the warning horizon, but it is never policy eligible. Lexical evidence in unknown, documentation, example, fixture, test, or generated scope produces `notice` only. High/medium-confidence semantic application or deployment evidence with a dynamic model, ambiguous platform, or lifecycle-feed conflict may also produce `advisory`. Repetition changes counts and locations, never outcome severity.
 
+One occurrence whose serving platform the evidence did not establish MUST produce one finding, however many feed providers publish that model ID. Such matches are collapsed into a single finding that carries every candidate platform in `servingPlatforms`, the most severe of their lifecycle outcomes, and the dates of the most urgent candidate record — earliest announced shutdown first. `servingPlatform` remains the platform of that reported record, and the union of candidate source URLs and replacement models stays in the finding. Human-facing text names every candidate platform, so a collapsed finding never reads as an established platform. Alert volume therefore follows repository evidence, not feed breadth. Platform-resolved semantic evidence is unaffected and keeps one finding per exact pair and active lifecycle signature.
+
 Every run also emits one `exit-reason`: `none | assessment-failed | trusted-base-unavailable | policy-breach | partial-disallowed | notification-failed`. When several conditions apply, precedence is `assessment-failed` > `trusted-base-unavailable` > `policy-breach` > `partial-disallowed` > `notification-failed` > `none`. Required outputs and the job summary are written before optional notification delivery and before the final process exit.
 
 ## Evidence model
@@ -390,6 +392,10 @@ policy:
   failWithinDays: 30
   allowPartial: false
 
+servingPlatforms:
+  - openai
+  - google
+
 assertions:
   - evidenceId: remote-prod-chat
     modelId: gpt-5.2
@@ -437,6 +443,8 @@ suppressions:
     createdAt: 2026-08-02T08:00:00Z
     expiresAt: 2026-11-01T08:00:00Z
 ```
+
+`servingPlatforms` declares the canonical serving platforms this repository actually uses. It restricts lifecycle matching for evidence whose platform the evidence itself did not establish — every lexical match and every `platformResolution: ambiguous` fact — so records published only for undeclared platforms are excluded from matching rather than merely merged into one finding. It never filters platform-resolved semantic evidence, external evidence, or assertions, so a declaration can never hide a finding that could have blocked. An effective declaration is reported as an evidence source and as a `declared-serving-platforms` notice, and each restricted finding records the restriction in its reasons. Omitting the field means undeclared, which matches every platform; on pull requests and merge groups an undeclared base keeps the target undeclared, and two declarations combine as their union, so head configuration can never narrow what the base matched. A head declaration that would narrow base matching is reported as an ignored weakening, exactly like a head suppression.
 
 Assertions add repository-supplied claims about runtime-only facts. They MUST NOT be described as verified, observed, confirmed, or authoritative unless a separately validated external source provides that provenance. Assertions cannot assert absence.
 

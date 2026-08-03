@@ -107,7 +107,10 @@ export type LifecycleFinding = {
   semanticKey: string;
   evidenceIds: string[];
   modelId: string;
+  /** Representative platform: the one whose lifecycle record supplied the reported dates. */
   servingPlatform: string;
+  /** Every candidate platform this finding covers; more than one means the platform is unproven. */
+  servingPlatforms: string[];
   lifecycleMatch: LifecycleMatch;
   lifecycleStatus: "deprecated" | "shutdown-scheduled" | "retired";
   announcementDate?: string;
@@ -139,6 +142,8 @@ export type Policy = {
   warnWithinDays: number;
   failWithinDays: number | null;
   allowPartial: boolean;
+  /** Canonical platform slugs this repository declares it serves models from; empty means undeclared. */
+  servingPlatforms: string[];
   usageEvidenceFiles: string[];
   assertions: AssertionClaim[];
   resolutions: ResolutionRule[];

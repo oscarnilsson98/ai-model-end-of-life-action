@@ -4,6 +4,7 @@ import {
   type FetchLike,
 } from "../shared/http.ts";
 import { parseHttpsUrl } from "./input.ts";
+import { servingPlatformLabel } from "../shared/text.ts";
 import type {
   AssessmentReport,
   LifecycleFinding,
@@ -123,7 +124,7 @@ function findingLine(finding: LifecycleFinding): string {
     qualifiers.push(finding.delta);
   }
   if (finding.feedConflict) qualifiers.push("feed conflict");
-  return `• *${label}* ${slackText(finding.servingPlatform, 80)} / ${slackText(
+  return `• *${label}* ${slackText(servingPlatformLabel(finding), 160)} / ${slackText(
     finding.modelId,
     180,
   )} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;

@@ -56,6 +56,40 @@ const FEED: LoadedV3Feed = loadV3FeedJson(
   }),
 );
 
+const SHARED_MODEL_FEED: LoadedV3Feed = loadV3FeedJson(
+  JSON.stringify({
+    schemaVersion: 3,
+    adapter: { id: "fixture", version: "1", sourceSha256: "e".repeat(64) },
+    generatedAt: "2026-08-02T00:00:00Z",
+    records: [
+      {
+        recordId: "azure-shared-mini",
+        servingPlatform: "azure",
+        primarySourceUrl: "https://example.com/azure/shared-mini",
+        supersedesRecordIds: [],
+        recordKind: "model",
+        modelId: "shared-mini",
+        literalScanEligible: true,
+        lifecycleStatus: "shutdown-scheduled",
+        shutdownDate: "2026-10-16",
+        replacementModels: [],
+      },
+      {
+        recordId: "openai-shared-mini",
+        servingPlatform: "openai",
+        primarySourceUrl: "https://example.com/openai/shared-mini",
+        supersedesRecordIds: [],
+        recordKind: "model",
+        modelId: "shared-mini",
+        literalScanEligible: true,
+        lifecycleStatus: "shutdown-scheduled",
+        shutdownDate: "2026-10-23",
+        replacementModels: [],
+      },
+    ],
+  }),
+);
+
 const PARTIAL_FEED: LoadedV3Feed = {
   ...FEED,
   index: {
@@ -198,6 +232,27 @@ function evidence(evidenceId = "repository:model:gpt-old"): EvidenceFact {
     platformResolution: "resolved",
     policyEligible: true,
     locations: [{ path: "src/chat.ts", line: 1, column: 1 }],
+    resolutionTrace: [],
+  };
+}
+
+function lexicalEvidence(): EvidenceFact {
+  return {
+    evidenceId: "repository:lexical:shared-mini",
+    origin: "repository",
+    kind: "lexical",
+    confidence: "low",
+    scope: "application",
+    environment: "unknown",
+    detectorRuleId: "fallback.text.lifecycle-id@1",
+    detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
+    rawValue: "shared-mini",
+    modelId: "shared-mini",
+    modelResolution: "resolved",
+    selectorKind: "model-id",
+    platformResolution: "ambiguous",
+    policyEligible: false,
+    locations: [{ path: "packages/ai-client/src/models.ts", line: 23, column: 10 }],
     resolutionTrace: [],
   };
 }
@@ -363,6 +418,45 @@ describe("v3 production orchestration", () => {
       "report-path": fixture.reportPath,
     });
     expect(readFileSync(fixture.summaryPath, "utf8")).toContain("**blocking**");
+  });
+
+  test("annotates one model ID once and reports the declared serving platforms", async () => {
+    const fixture = fixtureEnvironment();
+    const annotations: string[] = [];
+    const report = await run(
+      dependencies(fixture, {
+        loadFeed: async () => SHARED_MODEL_FEED,
+        detect: () => detection([lexicalEvidence()]),
+        log: (line: string) => annotations.push(line),
+      }),
+    );
+
+    expect(report.lifecycleFindings).toHaveLength(1);
+    expect(report.lifecycleFindings[0]?.servingPlatforms).toEqual(["azure", "openai"]);
+    expect(report.lifecycleFindings[0]?.shutdownDate).toBe("2026-10-16");
+    expect(annotations.filter((line) => line.startsWith("::warning"))).toHaveLength(1);
+
+    const declaredFixture = fixtureEnvironment();
+    const declared = await run(
+      dependencies(declaredFixture, {
+        loadFeed: async () => SHARED_MODEL_FEED,
+        detect: () => detection([lexicalEvidence()]),
+        readSnapshot: (_repositoryPath, treeish) =>
+          snapshot(treeish, { policy: "schemaVersion: 1\nservingPlatforms:\n  - openai\n" }),
+      }),
+    );
+
+    expect(declared.evidenceSources).toContainEqual({
+      id: "declared-serving-platforms: openai",
+      kind: "repository",
+      health: "current",
+    });
+    expect(declared.lifecycleFindings).toHaveLength(1);
+    expect(declared.lifecycleFindings[0]?.servingPlatforms).toEqual(["openai"]);
+    expect(declared.lifecycleFindings[0]?.shutdownDate).toBe("2026-10-23");
+    expect(readFileSync(declaredFixture.summaryPath, "utf8")).toContain(
+      "declared-serving-platforms",
+    );
   });
 
   test("does not fail an unrelated PR for unchanged base debt", async () => {

@@ -9,7 +9,11 @@ import {
   type Log,
 } from "./github.ts";
 import { canonicalSha256 } from "../shared/status.ts";
-import { compact, resultIcon as sharedResultIcon } from "../shared/text.ts";
+import {
+  compact,
+  resultIcon as sharedResultIcon,
+  servingPlatformLabel,
+} from "../shared/text.ts";
 import type { AssessmentReport, LifecycleFinding } from "../shared/types.ts";
 
 const MAX_DETAIL_OUTPUT_BYTES = 120 * 1024;
@@ -72,7 +76,7 @@ function findingRow(finding: LifecycleFinding): string {
       ? "Not announced"
       : `${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
   const delta = finding.delta === undefined ? "—" : finding.delta;
-  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(finding.servingPlatform)} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadline} |`;
+  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadline} |`;
 }
 
 export function renderSummary(
@@ -215,7 +219,7 @@ function annotationText(finding: LifecycleFinding): string {
     finding.shutdownDate === undefined
       ? "shutdown date not announced"
       : `shutdown ${finding.shutdownDate} (${finding.daysUntilShutdown ?? "?"} day(s))`;
-  return `${finding.modelId} on ${finding.servingPlatform}: ${deadline}. ${finding.reasons.join(" ")}`;
+  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${deadline}. ${finding.reasons.join(" ")}`;
 }
 
 export function publishAnnotations(report: AssessmentReport, log: Log = console.log): void {
