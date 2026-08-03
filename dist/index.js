@@ -9876,6 +9876,9 @@ function tokenize(source, language) {
           });
           break;
         }
+        if (language === "hcl" && (current === "$" || current === "%") && source[offset + 1] === "{") {
+          dynamic = true;
+        }
         advance(current);
         if (escaped)
           escaped = false;
@@ -11187,6 +11190,21 @@ function detectSdkCalls(source, path, blobOid, language, scope) {
   }
   return { facts, consumedEnvironmentSelectors, literalSpans };
 }
+function terraformStringAttribute(tokens, valueIndex, blockClose) {
+  if (valueIndex === null)
+    return { state: "absent" };
+  const token = tokens[valueIndex];
+  if (token?.kind !== "string" || token.raw[0] !== '"' || !token.static) {
+    return { state: "non-static" };
+  }
+  const nextIndex = valueIndex + 1;
+  const next = tokens[nextIndex];
+  const followedByAttribute = next !== undefined && next.line > token.line && next.kind === "identifier" && structuralValue(tokens[nextIndex + 1]) === "=";
+  if (nextIndex !== blockClose && !followedByAttribute) {
+    return { state: "non-static" };
+  }
+  return { state: "static", token, value: token.value };
+}
 function detectTerraform(source, path, blobOid, scope) {
   const tokenization = tokenize(source, "hcl");
   if (tokenization.issue !== undefined) {
@@ -11219,17 +11237,16 @@ function detectTerraform(source, path, blobOid, scope) {
     const nameIndex = propertyValueIndex(tokens, modelOpen + 1, modelClose, "name", "=");
     const formatIndex = propertyValueIndex(tokens, modelOpen + 1, modelClose, "format", "=");
     const versionIndex = propertyValueIndex(tokens, modelOpen + 1, modelClose, "version", "=");
-    if (nameIndex === null || formatIndex === null)
+    const name = terraformStringAttribute(tokens, nameIndex, modelClose);
+    const format = terraformStringAttribute(tokens, formatIndex, modelClose);
+    const version = terraformStringAttribute(tokens, versionIndex, modelClose);
+    if (name.state !== "static" || format.state !== "static" || version.state === "non-static") {
       continue;
-    const name = tokens[nameIndex];
-    const format = tokens[formatIndex];
-    if (name?.kind !== "string" || format?.kind !== "string" || !name.static || !format.static)
-      continue;
-    const version = versionIndex === null ? undefined : tokens[versionIndex];
+    }
     const rawValue = JSON.stringify([
       format.value,
       name.value,
-      version?.kind === "string" && version.static ? version.value : null
+      version.state === "static" ? version.value : null
     ]);
     const ruleId = "deploy.hcl.azure.cognitive-deployment-model@1";
     facts.push({
@@ -11247,7 +11264,7 @@ function detectTerraform(source, path, blobOid, scope) {
       selectorKind: "deployment-name",
       platformResolution: "resolved",
       policyEligible: false,
-      locations: [{ path, line: name.line, column: name.column, blobOid }],
+      locations: [{ path, line: name.token.line, column: name.token.column, blobOid }],
       resolutionTrace: [
         {
           kind: "detector",
