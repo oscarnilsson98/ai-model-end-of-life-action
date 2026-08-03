@@ -11670,7 +11670,7 @@ function supportedSemanticPath(path) {
   const extension = import_node_path.extname(path.toLowerCase());
   return JS_EXTENSIONS.has(extension) || extension === ".py" || HCL_EXTENSIONS.has(extension) || DOTENV_PATH.test(path) || GITHUB_WORKFLOW_PATH.test(path);
 }
-function tokenizationCoverageDiagnostic(path, language, issue) {
+function tokenizationFidelityDiagnostic(path, language, issue) {
   const descriptions = {
     "invalid-unicode-escape": "an invalid Unicode escape",
     "mismatched-delimiter": "an unmatched or mismatched delimiter",
@@ -11680,9 +11680,9 @@ function tokenizationCoverageDiagnostic(path, language, issue) {
   };
   return {
     code: "semantic-tokenization-incomplete@1",
-    message: `The ${language} semantic detector found ${descriptions[issue.kind]} at line ${issue.line}, column ${issue.column}. Semantic evidence from this file was discarded; lexical fallback evidence remains available.`,
+    message: `The ${language} semantic detector found ${descriptions[issue.kind]} at line ${issue.line}, column ${issue.column}. Semantic evidence from this file was discarded; the blob remains assessed by lexical fallback, so declared coverage is unchanged.`,
     path,
-    severity: "partial"
+    severity: "notice"
   };
 }
 function isClaimDocument(path) {
@@ -11747,8 +11747,7 @@ function detectSnapshot(snapshot, feed) {
       tokenizationIssue = detected.tokenizationIssue;
     }
     if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
-      partial = true;
-      diagnostics.push(tokenizationCoverageDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue));
+      diagnostics.push(tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue));
     }
     const lexical = lexicalFacts(source, entry.displayPath, entry.objectId, candidates, automaton, literalSpans);
     evidence.push(...semantic, ...lexical);
