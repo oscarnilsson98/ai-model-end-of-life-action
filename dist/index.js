@@ -13807,6 +13807,8 @@ var TRUSTED_NOTIFICATION_EVENTS = new Set(["schedule", "workflow_dispatch", "pus
 var PROTECTED_SCOPES2 = new Set(["documentation", "example", "test"]);
 var REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 var OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+var RUN_ID_PATTERN = /^[0-9]{1,20}$/;
+var SAFE_LINK_PATTERN = /^https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]{1,2000}$/;
 var BIDI_CONTROL_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 function compareText7(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
@@ -13845,15 +13847,22 @@ function repositoryName() {
 function selectedTarget(report) {
   return OID_PATTERN.test(report.event.targetOid) ? report.event.targetOid : "unavailable";
 }
-function actionableFindings(report) {
+function isTextMatch(finding) {
+  return finding.confidence === "low";
+}
+function partitionFindings(report) {
   const outcomeRank = {
     breach: 0,
     warning: 1
   };
-  return report.lifecycleFindings.filter((finding) => (finding.outcome === "breach" || finding.outcome === "warning") && finding.delta !== "resolved" && finding.confidence !== "low" && !PROTECTED_SCOPES2.has(finding.scope)).sort((left, right) => {
+  const notifiable = report.lifecycleFindings.filter((finding) => (finding.outcome === "breach" || finding.outcome === "warning") && finding.delta !== "resolved");
+  const listed = notifiable.filter((finding) => !PROTECTED_SCOPES2.has(finding.scope)).sort((left, right) => {
     const outcomeDifference = outcomeRank[left.outcome] - outcomeRank[right.outcome];
     if (outcomeDifference !== 0)
       return outcomeDifference;
+    const tierDifference = Number(isTextMatch(left)) - Number(isTextMatch(right));
+    if (tierDifference !== 0)
+      return tierDifference;
     const leftDays = left.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
     const rightDays = right.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
     if (leftDays !== rightDays)
@@ -13861,6 +13870,10 @@ function actionableFindings(report) {
     const platformDifference = compareText7(left.servingPlatform, right.servingPlatform);
     return platformDifference !== 0 ? platformDifference : compareText7(left.modelId, right.modelId);
   });
+  return {
+    listed,
+    withheld: notifiable.filter((finding) => PROTECTED_SCOPES2.has(finding.scope))
+  };
 }
 function deadlineText(finding) {
   if (finding.shutdownDate === undefined)
@@ -13874,15 +13887,68 @@ function deadlineText(finding) {
     return `shutdown ${finding.shutdownDate} (today)`;
   return `shutdown ${finding.shutdownDate} (${days}d)`;
 }
+function safeLink(candidate) {
+  if (candidate === undefined)
+    return null;
+  const trimmed = candidate.trim();
+  if (!SAFE_LINK_PATTERN.test(trimmed))
+    return null;
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  return parsed.username === "" && parsed.password === "" ? trimmed : null;
+}
+function slackLink(url, label) {
+  return `<${url.replace(/&/g, "&amp;")}|${label}>`;
+}
+function replacementText(finding) {
+  const replacement = finding.replacementModels[0];
+  if (replacement === undefined)
+    return null;
+  const platform2 = replacement.servingPlatform;
+  return `→ ${platform2 === undefined || platform2 === finding.servingPlatform ? replacement.modelId : `${platform2}/${replacement.modelId}`}`;
+}
+function findingLabel(finding) {
+  if (finding.outcome === "breach")
+    return "BLOCKING";
+  return isTextMatch(finding) ? "ADVISORY (text match)" : "ADVISORY";
+}
 function findingLine(finding) {
-  const label = finding.outcome === "breach" ? "BLOCKING" : "ADVISORY";
   const qualifiers = [deadlineText(finding)];
   if (finding.delta !== undefined && finding.delta !== "unchanged") {
     qualifiers.push(finding.delta);
   }
   if (finding.feedConflict)
     qualifiers.push("feed conflict");
-  return `• *${label}* ${slackText(finding.servingPlatform, 80)} / ${slackText(finding.modelId, 180)} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;
+  const replacement = replacementText(finding);
+  if (replacement !== null)
+    qualifiers.push(replacement);
+  const line = `• *${findingLabel(finding)}* ${slackText(finding.servingPlatform, 80)} / ${slackText(finding.modelId, 180)} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;
+  const source = safeLink(finding.sourceUrls[0]);
+  return source === null ? line : `${line} · ${slackLink(source, "source")}`;
+}
+function workflowRunUrl() {
+  const repository = repositoryName();
+  const runId = process.env.GITHUB_RUN_ID?.trim();
+  const server = process.env.GITHUB_SERVER_URL?.trim();
+  if (repository === null || server === undefined)
+    return null;
+  if (runId === undefined || !RUN_ID_PATTERN.test(runId))
+    return null;
+  let origin;
+  try {
+    const parsed = new URL(server);
+    if (parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== "") {
+      return null;
+    }
+    origin = parsed.origin;
+  } catch {
+    return null;
+  }
+  return safeLink(`${origin}/${repository}/actions/runs/${runId}`);
 }
 function reportFileHint(path) {
   const normalized = compact(path, 1024);
@@ -13901,7 +13967,7 @@ function resultIcon(report) {
 }
 function renderSlackSnapshot(report) {
   const repository = repositoryName();
-  const findings = actionableFindings(report);
+  const { listed, withheld } = partitionFindings(report);
   const externalSources = report.evidenceSources.filter((source) => source.kind !== "repository");
   const lines = [
     `${resultIcon(report)} *AI model lifecycle snapshot*`,
@@ -13920,19 +13986,28 @@ function renderSlackSnapshot(report) {
       lines.push(`• … ${externalSources.length - MAX_EVIDENCE_SOURCES} more source(s)`);
     }
   }
-  lines.push("", `*Actionable findings (${findings.length}):*`);
-  if (findings.length === 0) {
+  lines.push("", `*Actionable findings (${listed.length}):*`);
+  if (listed.length === 0 && withheld.length === 0) {
     lines.push("• None in the bounded notification view.");
   } else {
-    lines.push(...findings.slice(0, MAX_ACTIONABLE_FINDINGS).map(findingLine));
-    if (findings.length > MAX_ACTIONABLE_FINDINGS) {
-      lines.push(`• … ${findings.length - MAX_ACTIONABLE_FINDINGS} more finding(s) in the report`);
+    lines.push(...listed.slice(0, MAX_ACTIONABLE_FINDINGS).map(findingLine));
+    if (listed.length > MAX_ACTIONABLE_FINDINGS) {
+      lines.push(`• … ${listed.length - MAX_ACTIONABLE_FINDINGS} more finding(s) in the report`);
+    }
+    if (withheld.length > 0) {
+      lines.push(`• ${withheld.length} counted finding(s) outside application and deployment scope stay in the job summary.`);
     }
   }
+  const runUrl = workflowRunUrl();
   const reportHint = reportFileHint(report.reportPath);
+  const trailer = [];
+  if (runUrl !== null)
+    trailer.push(`*Run:* ${slackLink(runUrl, "workflow run")}`);
   if (reportHint !== null) {
-    lines.push("", `*Report:* ${reportHint} (runner-local; upload it as an artifact to retain it)`);
+    trailer.push(`*Report:* ${reportHint} (runner-local; upload it as an artifact to retain it)`);
   }
+  if (trailer.length > 0)
+    lines.push("", ...trailer);
   return boundedSlackText(lines.join(`
 `));
 }
