@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Exact stable release tag to validate, for example v2.0.0"
+        description: "Exact stable release tag to validate, for example v3.0.0"
         required: true
         type: string
       promote:
@@ -99,13 +99,19 @@ jobs:
         with:
           bun-version-file: package.json
 
+      - name: Require immutable external action references
+        run: bun .github/scripts/check-action-pins.ts
+
+      - name: Verify the exact Bun toolchain
+        run: bun run verify-toolchain
+
       - name: Install locked dependencies without lifecycle scripts
         run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Typecheck CI fixture helpers
+      - name: Typecheck CI helpers
         run: bunx --bun tsc --project .github/tsconfig.json
 
       - name: Run deterministic unit tests
@@ -126,69 +132,45 @@ jobs:
             exit 1
           fi
 
-      - name: Start the local lifecycle-feed fixture
-        shell: bash
-        run: |
-          bun .github/scripts/fixture-server.ts 0 fixture-server.url > fixture-server.log 2>&1 &
-          echo "$!" > fixture-server.pid
-          for attempt in {1..30}; do
-            if [[ -s fixture-server.url ]]; then
-              fixture_url="$(cat fixture-server.url)"
-              fixture_url="${fixture_url%/}"
-              if FIXTURE_URL="$fixture_url" bun -e '
-                const response = await fetch(`${Bun.env.FIXTURE_URL}/health`);
-                if (!response.ok) process.exit(1);
-              ' 2>/dev/null; then
-                echo "FIXTURE_FEED_URL=$fixture_url/deprecations.json" >> "$GITHUB_ENV"
-                exit 0
-              fi
-            fi
-            sleep 1
-          done
-          cat fixture-server.log >&2
-          echo "Local lifecycle-feed fixture did not become ready." >&2
-          exit 1
+      - name: Validate the reviewed live feed adapter
+        run: bun .github/scripts/assert-live-feed.ts
 
-      - name: Run the release bundle against the local fixture
-        id: release-fixture-check
-        uses: ./
-        with:
-          models-file: .github/fixtures/models.json
-          days-before-shutdown: "0"
-          feed-url: ${{ env.FIXTURE_FEED_URL }}
-          retries: "0"
-
-      - name: Assert release-bundle findings, provenance, and feed-history outputs
+      - name: Run the checked-in zero-input release bundle hermetically against the exact release commit
+        id: lifecycle
         shell: bash
         env:
-          HAS_FINDINGS: ${{ steps.release-fixture-check.outputs.has-findings }}
-          FINDING_COUNT: ${{ steps.release-fixture-check.outputs.finding-count }}
-          HAS_BREACHES: ${{ steps.release-fixture-check.outputs.has-breaches }}
-          BREACH_COUNT: ${{ steps.release-fixture-check.outputs.breach-count }}
-          MATCHED_MODEL_COUNT: ${{ steps.release-fixture-check.outputs.matched-model-count }}
-          CHECKED_MODEL_COUNT: ${{ steps.release-fixture-check.outputs.checked-model-count }}
-          UNMATCHED_MODEL_COUNT: ${{ steps.release-fixture-check.outputs.unmatched-model-count }}
-          FINDINGS: ${{ steps.release-fixture-check.outputs.findings }}
-          UNMATCHED_MODELS: ${{ steps.release-fixture-check.outputs.unmatched-models }}
-          FEED_RECORD_COUNT: ${{ steps.release-fixture-check.outputs.feed-record-count }}
-          FEED_SHA256: ${{ steps.release-fixture-check.outputs.feed-sha256 }}
-          LIFECYCLE_FEED_SHA256: ${{ steps.release-fixture-check.outputs.lifecycle-feed-sha256 }}
-          INVENTORY_SHA256: ${{ steps.release-fixture-check.outputs.inventory-sha256 }}
-          ALERT_FINGERPRINT: ${{ steps.release-fixture-check.outputs.alert-fingerprint }}
-          NEXT_ALERT_FINGERPRINT: ${{ steps.release-fixture-check.outputs.next-alert-fingerprint }}
-          AUDIT_RECORD: ${{ steps.release-fixture-check.outputs.audit-record }}
-          NOTIFICATION_SENT: ${{ steps.release-fixture-check.outputs.notification-sent }}
-          NOTIFICATION_REASON: ${{ steps.release-fixture-check.outputs.notification-reason }}
-        run: bun .github/scripts/assert-e2e.ts success
-
-      - name: Stop the local fixture server
-        if: always()
-        shell: bash
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          NODE_OPTIONS: --require=${{ github.workspace }}/.github/scripts/hermetic-feed-preload.cjs
         run: |
-          if [[ -f fixture-server.pid ]]; then
-            kill "$(cat fixture-server.pid)" 2>/dev/null || true
-          fi
-          rm -f fixture-server.pid fixture-server.log fixture-server.url
+          set -Eeuo pipefail
+          export GITHUB_SHA="$RELEASE_SHA"
+          node dist/index.js
+
+      - name: Assert the v3 release result, provenance, and complete report
+        shell: bash
+        env:
+          RESULT: ${{ steps.lifecycle.outputs.result }}
+          BASELINE_RESULT: ${{ steps.lifecycle.outputs.baseline-result }}
+          TARGET_RESULT: ${{ steps.lifecycle.outputs.target-result }}
+          SCAN_STATUS: ${{ steps.lifecycle.outputs.scan-status }}
+          COMPARISON_STATUS: ${{ steps.lifecycle.outputs.comparison-status }}
+          EXIT_REASON: ${{ steps.lifecycle.outputs.exit-reason }}
+          TARGET_KIND: ${{ steps.lifecycle.outputs.target-kind }}
+          EVIDENCE_HEALTH: ${{ steps.lifecycle.outputs.evidence-health }}
+          COUNTS: ${{ steps.lifecycle.outputs.counts }}
+          SOURCE_FEED_SHA256: ${{ steps.lifecycle.outputs.source-feed-sha256 }}
+          NORMALIZED_FEED_SHA256: ${{ steps.lifecycle.outputs.normalized-feed-sha256 }}
+          ACTIVE_RECORDS_SHA256: ${{ steps.lifecycle.outputs.active-records-sha256 }}
+          ADAPTER_MANIFEST_SHA256: ${{ steps.lifecycle.outputs.feed-adapter-manifest-sha256 }}
+          DETECTOR_MANIFEST_SHA256: ${{ steps.lifecycle.outputs.detector-manifest-sha256 }}
+          SCAN_FINGERPRINT: ${{ steps.lifecycle.outputs.scan-fingerprint }}
+          ALERT_FINGERPRINT: ${{ steps.lifecycle.outputs.alert-fingerprint }}
+          OUTPUT_TRUNCATED: ${{ steps.lifecycle.outputs.output-truncated }}
+          REPORT_PATH: ${{ steps.lifecycle.outputs.report-path }}
+          NOTIFICATION_STATUS: ${{ steps.lifecycle.outputs.notification-status }}
+          NOTIFICATION_REASON: ${{ steps.lifecycle.outputs.notification-reason }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bun .github/scripts/assert-e2e.ts
 
   promote-major-tag:
     name: Promote immutable release to major tag

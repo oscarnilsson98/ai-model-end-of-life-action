@@ -1,118 +1,148 @@
 import {
-  normalizeProvider,
-} from "../../src/input.ts";
-import {
-  assertNoFutureObservations,
-  validateFeed,
-} from "../../src/feed.ts";
-import { canonicalLifecycleFeedSha256 } from "../../src/digest.ts";
+  CANONICAL_PLATFORM_SLUGS,
+  V3_FEED_LIMITS,
+  type FeedDiagnostic,
+  type FeedPairSetDiagnostic,
+} from "../../src/lifecycle/feed.ts";
+import { DEFAULT_V3_FEED_URL } from "../../src/lifecycle/feed-source.ts";
 import {
   defaultRequestPolicy,
-  fetchJsonDocument,
-} from "../../src/http.ts";
-import type { DeprecationRecord } from "../../src/types.ts";
+  fetchBoundedDocumentBytes,
+} from "../../src/shared/http.ts";
+import { loadTypedOrReviewedLegacyFeed } from "../../src/lifecycle/legacy-feed-adapter.ts";
 
-const RAW_FEED_URL = "https://deprecations.info/v1/deprecations.json";
-const JSON_FEED_URL = "https://deprecations.info/v1/feed.json";
-const REQUIRED_PROVIDER_KEYS = [
-  "anthropic",
-  "aws-bedrock",
-  "azure",
-  "cohere",
-  "google",
-  "google-vertex",
-  "groq",
-  "openai",
-  "xai",
-] as const;
+const MAX_PAIR_PREVIEW = 10;
 
-function identity(record: DeprecationRecord): string {
-  return `${normalizeProvider(record.provider)}\u0000${record.model_id}\u0000${record.shutdown_date ?? "date-unknown"}`;
+export type LiveFeedDiagnosticSummary = {
+  lifecycleConflicts: number;
+  pairSetChanges: number;
+};
+
+export class ReviewedPairSetDriftError extends Error {
+  override readonly name = "ReviewedPairSetDriftError";
 }
 
-// JSON Feed intentionally omits the raw feed's verbose deprecation_context.
-// Compare every lifecycle field shared by both public contracts.
-function lifecycleFields(record: DeprecationRecord): string {
-  return JSON.stringify({
-    provider: record.provider,
-    modelId: record.model_id,
-    shutdownDate: record.shutdown_date ?? null,
-    deprecationDate: record.deprecation_date ?? null,
-    announcementDate: record.announcement_date ?? null,
-    replacementModels: record.replacement_models ?? null,
-    url: record.url ?? null,
-    firstObserved: record.first_observed ?? null,
-    lastObserved: record.last_observed ?? null,
-    scrapedAt: record.scraped_at ?? null,
-  });
-}
-
-function index(records: DeprecationRecord[]): Map<string, string> {
-  return new Map(records.map((record) => [identity(record), lifecycleFields(record)]));
-}
-
-async function validateLiveFeeds(): Promise<{ records: number; providers: number }> {
-  const policy = defaultRequestPolicy();
-  policy.timeoutMs = 20_000;
-  policy.retries = 2;
-  const [rawPayload, jsonFeedPayload] = await Promise.all([
-    fetchJsonDocument(RAW_FEED_URL, policy),
-    fetchJsonDocument(JSON_FEED_URL, policy),
-  ]);
-  const raw = validateFeed(rawPayload);
-  const jsonFeed = validateFeed(jsonFeedPayload);
-  const now = Date.now();
-  assertNoFutureObservations(raw, now);
-  assertNoFutureObservations(jsonFeed, now);
-  const rawIndex = index(raw);
-  const jsonFeedIndex = index(jsonFeed);
-
-  if (raw.length !== jsonFeed.length || rawIndex.size !== jsonFeedIndex.size) {
-    throw new Error(
-      `Live feed forms diverged in size: raw=${raw.length}, JSON Feed=${jsonFeed.length}.`,
-    );
-  }
-  for (const [key, rawFields] of rawIndex) {
-    const jsonFeedFields = jsonFeedIndex.get(key);
-    if (jsonFeedFields === undefined) {
-      throw new Error(`JSON Feed is missing lifecycle record ${JSON.stringify(key)}.`);
-    }
-    if (jsonFeedFields !== rawFields) {
-      throw new Error(`Live feed forms disagree on lifecycle record ${JSON.stringify(key)}.`);
-    }
-  }
-  const rawLifecycleSha256 = canonicalLifecycleFeedSha256(raw);
-  const jsonFeedLifecycleSha256 = canonicalLifecycleFeedSha256(jsonFeed);
-  if (rawLifecycleSha256 !== jsonFeedLifecycleSha256) {
-    throw new Error(
-      `Live feed forms have different semantic lifecycle digests: raw=${rawLifecycleSha256}, JSON Feed=${jsonFeedLifecycleSha256}.`,
-    );
-  }
-  const providerKeys = new Set(raw.map((record) => normalizeProvider(record.provider)));
-  const missingProviders = REQUIRED_PROVIDER_KEYS.filter(
-    (provider) => !providerKeys.has(provider),
-  );
-  if (missingProviders.length > 0) {
-    throw new Error(
-      `Live feed no longer contains required serving platform(s): ${missingProviders.join(", ")}.`,
-    );
-  }
+export function summarizeLiveFeedDiagnostics(
+  diagnostics: readonly FeedDiagnostic[],
+): LiveFeedDiagnosticSummary {
   return {
-    records: raw.length,
-    providers: providerKeys.size,
+    lifecycleConflicts: diagnostics.filter((diagnostic) => diagnostic.kind === "feed-conflict")
+      .length,
+    pairSetChanges: diagnostics.filter((diagnostic) => diagnostic.kind === "feed-pair-set-change")
+      .length,
   };
 }
 
-let result: { records: number; providers: number };
-try {
-  result = await validateLiveFeeds();
-} catch (firstError) {
-  console.warn(
-    `First live-feed contract check failed; retrying both forms once: ${firstError instanceof Error ? firstError.message : String(firstError)}`,
-  );
-  await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
-  result = await validateLiveFeeds();
+function pairPreview(
+  pairs: FeedPairSetDiagnostic["addedPairs"],
+  exactCount: number,
+): string {
+  if (exactCount === 0) return "none";
+  const shown = pairs
+    .slice(0, MAX_PAIR_PREVIEW)
+    .map(([provider, identifier]) => `${provider}/${identifier}`);
+  const omitted = Math.max(0, exactCount - shown.length);
+  return `${shown.join(", ")}${omitted === 0 ? "" : `, ... (+${omitted} more)`}`;
 }
-console.log(
-  `Validated ${result.records} equivalent lifecycle records across the live raw and JSON Feed forms (${result.providers} serving platforms).`,
-);
+
+export function reviewedPairSetDriftMessage(
+  diagnostics: readonly FeedDiagnostic[],
+): string | null {
+  const changes = diagnostics.filter(
+    (diagnostic): diagnostic is FeedPairSetDiagnostic =>
+      diagnostic.kind === "feed-pair-set-change",
+  );
+  if (changes.length === 0) return null;
+
+  const details = changes.flatMap((diagnostic) => [
+    `- ${diagnostic.addedPairCount} unreviewed addition(s): ${pairPreview(
+      diagnostic.addedPairs,
+      diagnostic.addedPairCount,
+    )}`,
+    `- ${diagnostic.removedPairCount} reviewed removal(s): ${pairPreview(
+      diagnostic.removedPairs,
+      diagnostic.removedPairCount,
+    )}`,
+  ]);
+  return [
+    "Reviewed live-feed pair registry is stale:",
+    ...details,
+    "Review and classify the changed pairs, then update the pinned registry, count, and digest before releasing.",
+  ].join("\n");
+}
+
+export function assertNoReviewedPairSetDrift(
+  diagnostics: readonly FeedDiagnostic[],
+): void {
+  const message = reviewedPairSetDriftMessage(diagnostics);
+  if (message !== null) throw new ReviewedPairSetDriftError(message);
+}
+
+async function validateLiveFeed(): Promise<{
+  records: number;
+  modelPairs: number;
+  nonModels: number;
+  lifecycleConflicts: number;
+  pairSetChanges: number;
+  activeRecordsSha256: string;
+}> {
+  const policy = defaultRequestPolicy();
+  policy.timeoutMs = 20_000;
+  policy.retries = 2;
+  const bytes = await fetchBoundedDocumentBytes(
+    DEFAULT_V3_FEED_URL,
+    policy,
+    V3_FEED_LIMITS.maxDocumentBytes,
+  );
+  const loaded = loadTypedOrReviewedLegacyFeed(bytes);
+  const representedPlatforms = new Set(
+    loaded.index.modelPairs.map((pair) => pair.servingPlatform),
+  );
+  const missingPlatforms = CANONICAL_PLATFORM_SLUGS.filter(
+    (platform) => !representedPlatforms.has(platform),
+  );
+  if (missingPlatforms.length > 0) {
+    throw new Error(
+      `Reviewed live feed contains no model records for: ${missingPlatforms.join(", ")}.`,
+    );
+  }
+  if (loaded.index.modelPairs.length === 0 || loaded.index.activeRecords.length === 0) {
+    throw new Error("Reviewed live feed produced no active model lifecycle data.");
+  }
+  const diagnostics = summarizeLiveFeedDiagnostics(loaded.index.diagnostics);
+  assertNoReviewedPairSetDrift(loaded.index.diagnostics);
+  return {
+    records: loaded.index.envelope.records.length,
+    modelPairs: loaded.index.modelPairs.length,
+    nonModels: loaded.index.activeNonModelRecords.length,
+    ...diagnostics,
+    activeRecordsSha256: loaded.digests.activeRecordsSha256,
+  };
+}
+
+export async function runLiveFeedValidation(): Promise<void> {
+  let result: Awaited<ReturnType<typeof validateLiveFeed>>;
+  try {
+    result = await validateLiveFeed();
+  } catch (firstError) {
+    // Registry drift is deterministic maintenance work, not a transient upstream blip.
+    if (firstError instanceof ReviewedPairSetDriftError) throw firstError;
+    // One transient upstream blip should not fail the scheduled smoke run.
+    console.warn(
+      `First live-feed contract check failed; retrying once: ${
+        firstError instanceof Error ? firstError.message : String(firstError)
+      }`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    result = await validateLiveFeed();
+  }
+  console.log(
+    `Validated reviewed v3 feed adapter: ${result.records} records, ` +
+      `${result.modelPairs} model pairs, ${result.nonModels} explicit non-models, ` +
+      `${result.lifecycleConflicts} lifecycle conflicts, ` +
+      `${result.pairSetChanges} reviewed pair-set changes, ` +
+      `active digest ${result.activeRecordsSha256}.`,
+  );
+}
+
+if (import.meta.main) await runLiveFeedValidation();

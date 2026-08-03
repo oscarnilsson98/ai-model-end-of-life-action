@@ -1,132 +1,117 @@
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
+
+function required(name: string): string {
+  const value = Bun.env[name];
+  if (value === undefined || value === "") {
+    throw new Error(`${name}: expected a non-empty action output.`);
+  }
+  return value;
+}
+
 function assertEqual(name: string, actual: string | undefined, expected: string): void {
-  if (actual !== expected) {
-    throw new Error(`${name}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}.`);
-  }
-}
-
-function assertSha256(name: string, actual: string | undefined): asserts actual is string {
-  if (!actual || !/^[0-9a-f]{64}$/.test(actual)) {
-    throw new Error(`${name}: expected a lowercase SHA-256, got ${JSON.stringify(actual)}.`);
-  }
-}
-
-const scenario = Bun.argv[2];
-switch (scenario) {
-  case "success": {
-    assertEqual("has-findings", Bun.env.HAS_FINDINGS, "true");
-    assertEqual("finding-count", Bun.env.FINDING_COUNT, "2");
-    assertEqual("has-breaches", Bun.env.HAS_BREACHES, "false");
-    assertEqual("breach-count", Bun.env.BREACH_COUNT, "0");
-    assertEqual("matched-model-count", Bun.env.MATCHED_MODEL_COUNT, "2");
-    assertEqual("checked-model-count", Bun.env.CHECKED_MODEL_COUNT, "3");
-    assertEqual("unmatched-model-count", Bun.env.UNMATCHED_MODEL_COUNT, "1");
-    assertEqual("feed-record-count", Bun.env.FEED_RECORD_COUNT, "4");
-    assertEqual("notification-sent", Bun.env.NOTIFICATION_SENT, "false");
-    assertEqual("notification-reason", Bun.env.NOTIFICATION_REASON, "disabled");
-    assertEqual("next-alert-fingerprint", Bun.env.NEXT_ALERT_FINGERPRINT, "");
-    assertSha256("feed-sha256", Bun.env.FEED_SHA256);
-    assertSha256("lifecycle-feed-sha256", Bun.env.LIFECYCLE_FEED_SHA256);
-    assertSha256("inventory-sha256", Bun.env.INVENTORY_SHA256);
-    assertSha256("alert-fingerprint", Bun.env.ALERT_FINGERPRINT);
-
-    const findings = JSON.parse(Bun.env.FINDINGS ?? "null") as Array<{
-      findingId?: unknown;
-      id?: unknown;
-      status?: unknown;
-      shutdownDate?: unknown;
-      daysUntilShutdown?: unknown;
-    }>;
-    const ids = findings.map((finding) => finding.id).sort();
-    if (JSON.stringify(ids) !== JSON.stringify(["retired-fixture", "undated-fixture"])) {
-      throw new Error(`Unexpected fixture findings: ${JSON.stringify(findings)}.`);
-    }
-    if (findings.some((finding) => !/^[0-9a-f]{64}$/.test(String(finding.findingId)))) {
-      throw new Error(`Fixture findings lack stable IDs: ${JSON.stringify(findings)}.`);
-    }
-    const retired = findings.find((finding) => finding.id === "retired-fixture");
-    const undated = findings.find((finding) => finding.id === "undated-fixture");
-    if (
-      retired?.status !== "shutdown-passed" ||
-      typeof retired.daysUntilShutdown !== "number" ||
-      retired.daysUntilShutdown > 0 ||
-      undated?.status !== "date-unknown" ||
-      undated.shutdownDate !== null ||
-      undated.daysUntilShutdown !== null
-    ) {
-      throw new Error(`Unexpected lifecycle status output: ${JSON.stringify(findings)}.`);
-    }
-
-    const unmatched = JSON.parse(Bun.env.UNMATCHED_MODELS ?? "null") as Array<{
-      id?: unknown;
-      provider?: unknown;
-    }>;
-    if (
-      unmatched.length !== 1 ||
-      unmatched[0]?.id !== "missing-fixture" ||
-      unmatched[0]?.provider !== "openai"
-    ) {
-      throw new Error(`Unexpected unmatched inventory output: ${JSON.stringify(unmatched)}.`);
-    }
-
-    const audit = JSON.parse(Bun.env.AUDIT_RECORD ?? "null") as Record<string, unknown>;
-    if (
-      audit.rawFeedSha256 !== Bun.env.FEED_SHA256 ||
-      audit.lifecycleFeedSha256 !== Bun.env.LIFECYCLE_FEED_SHA256 ||
-      audit.inventorySha256 !== Bun.env.INVENTORY_SHA256 ||
-      audit.alertFingerprint !== Bun.env.ALERT_FINGERPRINT ||
-      audit.feedRecordCount !== 4 ||
-      audit.findingCount !== 2
-    ) {
-      throw new Error(`Unexpected audit record: ${JSON.stringify(audit)}.`);
-    }
-    break;
-  }
-  case "snapshot-discovery": {
-    assertEqual(
-      "feed-sha256",
-      Bun.env.FEED_SHA256,
-      "bb2ca01c6b30a384b3a495d34adba857cd528ba6348e4572ebd44afa1cc07e62",
+  if ((actual ?? "") !== expected) {
+    throw new Error(
+      `${name}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}.`,
     );
-    assertEqual("discovered-model-count", Bun.env.DISCOVERED_MODEL_COUNT, "2");
-    assertEqual("untracked-discovered-model-count", Bun.env.UNTRACKED_DISCOVERED_MODEL_COUNT, "1");
-    assertEqual("discovery-match-count", Bun.env.DISCOVERY_MATCH_COUNT, "2");
-    assertEqual("discovery-output-truncated", Bun.env.DISCOVERY_OUTPUT_TRUNCATED, "false");
-    const discovered = JSON.parse(Bun.env.DISCOVERED_MODELS ?? "null") as Array<{
-      id?: unknown;
-      tracked?: unknown;
-      locations?: Array<{ path?: unknown; line?: unknown; column?: unknown }>;
-    }>;
-    if (
-      discovered.length !== 2 ||
-      discovered.find((model) => model.id === "retired-fixture")?.tracked !== true ||
-      discovered.find((model) => model.id === "other-provider-fixture")?.tracked !== false ||
-      discovered.some(
-        (model) => model.locations?.[0]?.path !== ".github/fixtures/source-usage.txt",
-      )
-    ) {
-      throw new Error(`Unexpected discovery output: ${JSON.stringify(discovered)}.`);
-    }
-    break;
   }
-  case "narrow-window":
-    assertEqual("has-findings", Bun.env.HAS_FINDINGS, "false");
-    assertEqual("finding-count", Bun.env.FINDING_COUNT, "0");
-    break;
-  case "failure-gate":
-    assertEqual("failure-gate outcome", Bun.env.STEP_OUTCOME, "failure");
-    assertEqual("has-breaches", Bun.env.HAS_BREACHES, "true");
-    assertEqual("breach-count", Bun.env.BREACH_COUNT, "1");
-    break;
-  case "coverage-gate":
-    assertEqual("coverage-gate outcome", Bun.env.STEP_OUTCOME, "failure");
-    assertEqual("has-findings", Bun.env.HAS_FINDINGS, "false");
-    assertEqual("has-breaches", Bun.env.HAS_BREACHES, "true");
-    assertEqual("breach-count", Bun.env.BREACH_COUNT, "1");
-    assertEqual("unmatched-model-count", Bun.env.UNMATCHED_MODEL_COUNT, "1");
-    break;
-  case "stale-feed":
-    assertEqual("stale-feed outcome", Bun.env.STEP_OUTCOME, "failure");
-    break;
-  default:
-    throw new Error(`Unknown E2E assertion scenario: ${scenario ?? "<missing>"}.`);
+}
+
+function assertSha256(name: string): string {
+  const value = required(name);
+  if (!/^[0-9a-f]{64}$/.test(value)) {
+    throw new Error(`${name}: expected a lowercase SHA-256, got ${JSON.stringify(value)}.`);
+  }
+  return value;
+}
+
+const result = required("RESULT");
+const eventName = required("EVENT_NAME");
+assertEqual("RESULT", result, "no-actionable-risk");
+assertEqual("SCAN_STATUS", Bun.env.SCAN_STATUS, "complete");
+assertEqual("EXIT_REASON", Bun.env.EXIT_REASON, "none");
+assertEqual("EVIDENCE_HEALTH", Bun.env.EVIDENCE_HEALTH, "current");
+assertEqual("OUTPUT_TRUNCATED", Bun.env.OUTPUT_TRUNCATED, "false");
+assertEqual("NOTIFICATION_STATUS", Bun.env.NOTIFICATION_STATUS, "disabled");
+if (!required("NOTIFICATION_REASON").toLowerCase().includes("webhook")) {
+  throw new Error("NOTIFICATION_REASON should explain that no Slack webhook was configured.");
+}
+
+if (eventName === "pull_request") {
+  assertEqual("COMPARISON_STATUS", Bun.env.COMPARISON_STATUS, "available");
+  assertEqual("TARGET_KIND", Bun.env.TARGET_KIND, "synthetic-merge");
+  assertEqual("BASELINE_RESULT", required("BASELINE_RESULT"), "no-actionable-risk");
+  assertEqual("TARGET_RESULT", required("TARGET_RESULT"), "no-actionable-risk");
+} else {
+  assertEqual("COMPARISON_STATUS", Bun.env.COMPARISON_STATUS, "not-applicable");
+  assertEqual("TARGET_KIND", Bun.env.TARGET_KIND, "commit");
+  assertEqual("BASELINE_RESULT", Bun.env.BASELINE_RESULT, "");
+  assertEqual("TARGET_RESULT", Bun.env.TARGET_RESULT, "");
+}
+
+const digests = {
+  sourceFeedSha256: assertSha256("SOURCE_FEED_SHA256"),
+  normalizedFeedSha256: assertSha256("NORMALIZED_FEED_SHA256"),
+  activeRecordsSha256: assertSha256("ACTIVE_RECORDS_SHA256"),
+  feedAdapterManifestSha256: assertSha256("ADAPTER_MANIFEST_SHA256"),
+  detectorManifestSha256: assertSha256("DETECTOR_MANIFEST_SHA256"),
+  scanFingerprint: assertSha256("SCAN_FINGERPRINT"),
+  alertFingerprint: assertSha256("ALERT_FINGERPRINT"),
+};
+assertEqual(
+  "SOURCE_FEED_SHA256",
+  digests.sourceFeedSha256,
+  createHash("sha256")
+    .update(readFileSync(new URL("../fixtures/hermetic-lifecycle-feed.json", import.meta.url)))
+    .digest("hex"),
+);
+
+const counts = JSON.parse(required("COUNTS")) as Record<string, unknown>;
+for (const key of [
+  "evidence",
+  "findings",
+  "blocking",
+  "advisory",
+  "notices",
+  "unresolved",
+]) {
+  if (!Number.isSafeInteger(counts[key]) || (counts[key] as number) < 0) {
+    throw new Error(`COUNTS.${key}: expected a non-negative integer.`);
+  }
+}
+
+const reportPath = required("REPORT_PATH");
+if (!statSync(reportPath).isFile()) {
+  throw new Error(`REPORT_PATH is not a regular file: ${reportPath}.`);
+}
+const report = JSON.parse(readFileSync(reportPath, "utf8")) as Record<string, unknown>;
+if (
+  report.schemaVersion !== 3 ||
+  report.result !== result ||
+  report.scanStatus !== "complete" ||
+  report.comparisonStatus !== Bun.env.COMPARISON_STATUS ||
+  report.exitReason !== "none" ||
+  report.notificationStatus !== "disabled"
+) {
+  throw new Error(`Unexpected complete report state: ${JSON.stringify(report)}.`);
+}
+const event = report.event as Record<string, unknown> | undefined;
+if (
+  event?.eventName !== eventName ||
+  typeof event.targetOid !== "string" ||
+  !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(event.targetOid)
+) {
+  throw new Error(`Report contains an invalid selected Git event: ${JSON.stringify(event)}.`);
+}
+const feed = report.feed as Record<string, unknown> | undefined;
+if (
+  feed?.sourceFeedSha256 !== digests.sourceFeedSha256 ||
+  feed.normalizedFeedSha256 !== digests.normalizedFeedSha256 ||
+  feed.activeRecordsSha256 !== digests.activeRecordsSha256 ||
+  feed.feedAdapterManifestSha256 !== digests.feedAdapterManifestSha256 ||
+  report.detectorManifestSha256 !== digests.detectorManifestSha256 ||
+  report.scanFingerprint !== digests.scanFingerprint ||
+  report.alertFingerprint !== digests.alertFingerprint
+) {
+  throw new Error("Report provenance does not match the published action outputs.");
 }

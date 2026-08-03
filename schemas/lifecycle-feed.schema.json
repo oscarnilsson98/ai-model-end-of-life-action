@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/oscarnilsson98/ai-model-end-of-life-action/v3/schemas/lifecycle-feed.schema.json",
+  "title": "Typed AI model lifecycle feed",
+  "description": "Strict v3 producer and normalized adapter envelope. Only records explicitly typed as model are eligible for lifecycle matching; quarantined legacy source pairs are omitted and reported through assessment diagnostics.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "adapter", "generatedAt", "records"],
+  "properties": {
+    "schemaVersion": { "const": 3 },
+    "adapter": { "$ref": "#/$defs/adapter" },
+    "generatedAt": { "$ref": "#/$defs/timestamp" },
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100000,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/modelRecord" },
+          { "$ref": "#/$defs/nonModelRecord" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "boundedText128": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "boundedText64": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "recordId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!\\s)(?!.*\\s$)(?!.*[\\u0000-\\u001f\\u007f]).+$"
+    },
+    "platformSlug": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62})$"
+    },
+    "sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 64,
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?Z$"
+    },
+    "date": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 10,
+      "format": "date",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "httpUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "format": "uri",
+      "pattern": "^https?://[^/?#@]+(?:[/?#]|$)"
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "sourceSha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/boundedText128" },
+        "version": { "$ref": "#/$defs/boundedText64" },
+        "sourceSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "supersedesRecordIds": {
+      "type": "array",
+      "maxItems": 1000,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/recordId" }
+    },
+    "replacementModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelId"],
+      "properties": {
+        "modelId": { "$ref": "#/$defs/identifier" },
+        "servingPlatform": { "$ref": "#/$defs/platformSlug" }
+      }
+    },
+    "modelRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordId",
+        "servingPlatform",
+        "primarySourceUrl",
+        "supersedesRecordIds",
+        "recordKind",
+        "modelId",
+        "literalScanEligible",
+        "lifecycleStatus",
+        "replacementModels"
+      ],
+      "properties": {
+        "recordId": { "$ref": "#/$defs/recordId" },
+        "servingPlatform": { "$ref": "#/$defs/platformSlug" },
+        "primarySourceUrl": { "$ref": "#/$defs/httpUrl" },
+        "supersedesRecordIds": { "$ref": "#/$defs/supersedesRecordIds" },
+        "recordKind": { "const": "model" },
+        "modelId": { "$ref": "#/$defs/identifier" },
+        "literalScanEligible": { "type": "boolean" },
+        "lifecycleStatus": {
+          "enum": ["deprecated", "shutdown-scheduled", "retired"]
+        },
+        "announcementDate": { "$ref": "#/$defs/date" },
+        "deprecationDate": { "$ref": "#/$defs/date" },
+        "shutdownDate": { "$ref": "#/$defs/date" },
+        "replacementModels": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/replacementModel" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "lifecycleStatus": { "const": "deprecated" } },
+            "required": ["lifecycleStatus"]
+          },
+          "then": {
+            "required": ["deprecationDate"],
+            "not": { "required": ["shutdownDate"] }
+          }
+        },
+        {
+          "if": {
+            "properties": { "lifecycleStatus": { "const": "shutdown-scheduled" } },
+            "required": ["lifecycleStatus"]
+          },
+          "then": { "required": ["shutdownDate"] }
+        },
+        {
+          "if": {
+            "properties": { "lifecycleStatus": { "const": "retired" } },
+            "required": ["lifecycleStatus"]
+          },
+          "then": { "required": ["shutdownDate"] }
+        }
+      ]
+    },
+    "nonModelRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recordId",
+        "servingPlatform",
+        "primarySourceUrl",
+        "supersedesRecordIds",
+        "recordKind",
+        "resourceId",
+        "literalScanEligible"
+      ],
+      "properties": {
+        "recordId": { "$ref": "#/$defs/recordId" },
+        "servingPlatform": { "$ref": "#/$defs/platformSlug" },
+        "primarySourceUrl": { "$ref": "#/$defs/httpUrl" },
+        "supersedesRecordIds": { "$ref": "#/$defs/supersedesRecordIds" },
+        "recordKind": {
+          "enum": ["api", "sdk", "feature", "tool", "product", "prompt", "agent", "other"]
+        },
+        "resourceId": { "$ref": "#/$defs/identifier" },
+        "displayName": { "$ref": "#/$defs/displayName" },
+        "literalScanEligible": { "const": false }
+      }
+    }
+  },
+  "$comment": "The runtime additionally verifies real calendar values, lifecycle dates relative to generatedAt, date ordering, unique record IDs, same-pair supersession references, acyclicity, and absolute credential-free HTTP(S) URLs. Document byte size is bounded to 33554432 bytes before JSON parsing."
+}
