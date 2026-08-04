@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/oscarnilsson98/ai-model-end-of-life-action/v3/schemas/lifecycle-feed.schema.json",
   "title": "Typed AI model lifecycle feed",
-  "description": "Strict v3 producer and normalized adapter envelope. Only records explicitly typed as model are eligible for lifecycle matching; quarantined legacy source pairs are omitted and reported through assessment diagnostics.",
+  "description": "Strict v3 producer and normalized adapter envelope. Only records explicitly typed as model are eligible for lifecycle matching; a legacy source row whose provider label yields no valid platform slug is omitted and reported through assessment diagnostics.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "adapter", "generatedAt", "records"],

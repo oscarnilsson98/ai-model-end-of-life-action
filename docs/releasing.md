@@ -31,7 +31,7 @@ a version older than the current major tag.
    git diff --check
    ```
 
-The live-feed validation command is intentionally stricter than the shipped action's warning-only mode. It fails when the upstream provider/identifier pair set has changed and prints exact addition/removal counts with bounded previews. Review and classify those pairs, then update the pinned adapter registry, count, and digest before cutting a release. Lifecycle-record conflicts are reported separately.
+The live-feed validation command asserts that the upstream source still parses, still covers every registered platform, and still yields active lifecycle data. It does not gate on the source's pair set changing: upstream adds, renames and withdraws rows freely, and none of that is release work. Its report line is informational — record and pair counts, lifecycle conflicts, pairs on platforms not registered yet, and any rows skipped for an unusable provider label. A rising unregistered-platform count is the cue to consider registering that platform for blocking authority, not a release blocker.
 
 ## Publish
 
@@ -44,7 +44,7 @@ The live-feed validation command is intentionally stricter than the shipped acti
 
 The validation job checks the tag format and target, default-branch ancestry,
 immutable external action references, the exact toolchain, locked dependencies,
-tests, a reproducible bundle, the live reviewed feed adapter, and a hermetic
+tests, a reproducible bundle, the live feed adapter, and a hermetic
 packaged-action run. Promotion also requires GitHub to report the release as stable,
 published, and immutable.
 

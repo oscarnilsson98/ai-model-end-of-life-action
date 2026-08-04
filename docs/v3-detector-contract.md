@@ -61,7 +61,7 @@ V3.0 uses these stable serving-platform slugs:
 
 The slug describes the serving platform whose lifecycle applies, not the model publisher or SDK package author. Unknown and custom OpenAI-compatible gateways remain unresolved; they are not silently classified as `openai`.
 
-The reviewed adapter for the current public source uses this complete, case-sensitive provider mapping:
+The adapter for the current public source maps these case-sensitive provider labels to canonical slugs:
 
 | Source provider | Canonical slug |
 | --- | --- |
@@ -75,9 +75,9 @@ The reviewed adapter for the current public source uses this complete, case-sens
 | `Groq` | `groq` |
 | `xAI` | `xai` |
 
-Any other source-provider value is unregistered. The adapter retains a syntactically valid slug supplied by a typed source, but an untyped source-provider value outside this table is not guessed.
+The table is an override list for irregular labels, not an admission gate. Any other source-provider value derives its slug mechanically — case-folded, with each run of non-alphanumeric characters collapsed to a single hyphen — and every entry above is exactly what that derivation already produces. A derived slug is unregistered, so its records are retained as unsupported, nonblocking evidence. Only a label from which no syntactically valid slug survives derivation has its rows skipped.
 
-External evidence and trusted resolutions MUST use a registered slug to become platform-resolved or policy eligible. A syntactically valid typed-feed slug that is not yet registered is retained as unsupported platform evidence and cannot block. A new policy-eligible platform requires a reviewed registry addition, feed mapping, display name, detector implications, and ambiguity tests. Human-facing aliases may normalize to a slug, but canonical output never changes.
+External evidence and trusted resolutions MUST use a registered slug to become platform-resolved or policy eligible. A syntactically valid but unregistered slug, whether supplied by a typed source or derived from an untyped provider label, is retained as unsupported platform evidence and cannot block. A new policy-eligible platform requires a canonical registry addition, display name, detector implications, and ambiguity tests. Human-facing aliases may normalize to a slug, but canonical output never changes.
 
 ## Platform inference order
 
@@ -285,9 +285,9 @@ Record identity and conflict behavior are deterministic:
 - the same `modelId` on different platforms is always a distinct lifecycle pair and retains platform-specific dates;
 - unsupported but syntactically valid platform slugs remain visible and nonblocking.
 
-Every run validates the entire envelope before detector matching and publishes raw-source, normalized-feed, adapter-manifest, and active-record digests. The current public feed is untyped, so v3.0 includes a reviewed adapter manifest with an exact, count-and-digest-pinned registry of reviewed source pairs. Every raw row is strictly parsed. Pairs outside that registry are quarantined and omitted from normalized records rather than guessed from a token regex; absent reviewed pairs are also reported. An addition, removal, or rename makes scan coverage `partial`: warning-only runs succeed with a visible diagnostic, while enforcement fails closed unless `allowPartial: true` is configured. A later release must review an added pair before it can gain model or non-model authority.
+Every run validates the entire envelope before detector matching and publishes raw-source, normalized-feed, adapter-manifest, and active-record digests. The current public feed is untyped, so v3.0 includes a versioned adapter manifest that strictly parses every raw row and classifies the source's non-model rows by kind. The manifest carries no allowlist of reviewed source pairs: every well-formed row becomes a normalized record on the run that first sees it, so an upstream addition, rename or withdrawal is ordinary operation and does not by itself make scan coverage `partial`. Blocking authority still depends on the record's serving platform being registered.
 
-Duplicate source pairs, malformed rows, unknown fields or providers, invalid manifest metadata, and schema failures produce `unknown + failed`. If quarantine leaves no reviewed records, the non-empty feed contract also fails. A later release may replace the reviewed adapter with an approved typed endpoint.
+Duplicate source pairs, malformed rows, unknown fields, invalid manifest metadata, and schema failures produce `unknown + failed`. A provider label yielding no valid platform slug has its rows skipped with a bounded diagnostic and makes coverage `partial`; if no row resolves a platform, the non-empty feed contract also fails. A later release may replace the adapter with an approved typed endpoint.
 
 ## Detector qualification
 

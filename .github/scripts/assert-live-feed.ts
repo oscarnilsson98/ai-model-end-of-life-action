@@ -2,25 +2,18 @@ import {
   CANONICAL_PLATFORM_SLUGS,
   V3_FEED_LIMITS,
   type FeedDiagnostic,
-  type FeedPairSetDiagnostic,
 } from "../../src/lifecycle/feed.ts";
 import { DEFAULT_V3_FEED_URL } from "../../src/lifecycle/feed-source.ts";
 import {
   defaultRequestPolicy,
   fetchBoundedDocumentBytes,
 } from "../../src/shared/http.ts";
-import { loadTypedOrReviewedLegacyFeed } from "../../src/lifecycle/legacy-feed-adapter.ts";
-
-const MAX_PAIR_PREVIEW = 10;
+import { loadTypedOrAdaptedLegacyFeed } from "../../src/lifecycle/legacy-feed-adapter.ts";
 
 export type LiveFeedDiagnosticSummary = {
   lifecycleConflicts: number;
-  pairSetChanges: number;
+  skippedRecords: number;
 };
-
-export class ReviewedPairSetDriftError extends Error {
-  override readonly name = "ReviewedPairSetDriftError";
-}
 
 export function summarizeLiveFeedDiagnostics(
   diagnostics: readonly FeedDiagnostic[],
@@ -28,62 +21,19 @@ export function summarizeLiveFeedDiagnostics(
   return {
     lifecycleConflicts: diagnostics.filter((diagnostic) => diagnostic.kind === "feed-conflict")
       .length,
-    pairSetChanges: diagnostics.filter((diagnostic) => diagnostic.kind === "feed-pair-set-change")
-      .length,
+    skippedRecords: diagnostics
+      .filter((diagnostic) => diagnostic.kind === "feed-unresolved-provider")
+      .reduce((total, diagnostic) => total + diagnostic.skippedRecordCount, 0),
   };
-}
-
-function pairPreview(
-  pairs: FeedPairSetDiagnostic["addedPairs"],
-  exactCount: number,
-): string {
-  if (exactCount === 0) return "none";
-  const shown = pairs
-    .slice(0, MAX_PAIR_PREVIEW)
-    .map(([provider, identifier]) => `${provider}/${identifier}`);
-  const omitted = Math.max(0, exactCount - shown.length);
-  return `${shown.join(", ")}${omitted === 0 ? "" : `, ... (+${omitted} more)`}`;
-}
-
-export function reviewedPairSetDriftMessage(
-  diagnostics: readonly FeedDiagnostic[],
-): string | null {
-  const changes = diagnostics.filter(
-    (diagnostic): diagnostic is FeedPairSetDiagnostic =>
-      diagnostic.kind === "feed-pair-set-change",
-  );
-  if (changes.length === 0) return null;
-
-  const details = changes.flatMap((diagnostic) => [
-    `- ${diagnostic.addedPairCount} unreviewed addition(s): ${pairPreview(
-      diagnostic.addedPairs,
-      diagnostic.addedPairCount,
-    )}`,
-    `- ${diagnostic.removedPairCount} reviewed removal(s): ${pairPreview(
-      diagnostic.removedPairs,
-      diagnostic.removedPairCount,
-    )}`,
-  ]);
-  return [
-    "Reviewed live-feed pair registry is stale:",
-    ...details,
-    "Review and classify the changed pairs, then update the pinned registry, count, and digest before releasing.",
-  ].join("\n");
-}
-
-export function assertNoReviewedPairSetDrift(
-  diagnostics: readonly FeedDiagnostic[],
-): void {
-  const message = reviewedPairSetDriftMessage(diagnostics);
-  if (message !== null) throw new ReviewedPairSetDriftError(message);
 }
 
 async function validateLiveFeed(): Promise<{
   records: number;
   modelPairs: number;
   nonModels: number;
+  unregisteredPlatformPairs: number;
   lifecycleConflicts: number;
-  pairSetChanges: number;
+  skippedRecords: number;
   activeRecordsSha256: string;
 }> {
   const policy = defaultRequestPolicy();
@@ -94,7 +44,7 @@ async function validateLiveFeed(): Promise<{
     policy,
     V3_FEED_LIMITS.maxDocumentBytes,
   );
-  const loaded = loadTypedOrReviewedLegacyFeed(bytes);
+  const loaded = loadTypedOrAdaptedLegacyFeed(bytes);
   const representedPlatforms = new Set(
     loaded.index.modelPairs.map((pair) => pair.servingPlatform),
   );
@@ -103,18 +53,23 @@ async function validateLiveFeed(): Promise<{
   );
   if (missingPlatforms.length > 0) {
     throw new Error(
-      `Reviewed live feed contains no model records for: ${missingPlatforms.join(", ")}.`,
+      `Live feed contains no model records for: ${missingPlatforms.join(", ")}.`,
     );
   }
   if (loaded.index.modelPairs.length === 0 || loaded.index.activeRecords.length === 0) {
-    throw new Error("Reviewed live feed produced no active model lifecycle data.");
+    throw new Error("Live feed produced no active model lifecycle data.");
   }
   const diagnostics = summarizeLiveFeedDiagnostics(loaded.index.diagnostics);
-  assertNoReviewedPairSetDrift(loaded.index.diagnostics);
   return {
     records: loaded.index.envelope.records.length,
     modelPairs: loaded.index.modelPairs.length,
     nonModels: loaded.index.activeNonModelRecords.length,
+    // Pairs on a provider with no canonical slug yet. Reported, never fatal: they are real
+    // upstream coverage arriving as nonblocking evidence, and a rising count is the signal
+    // to consider registering that platform for blocking authority.
+    unregisteredPlatformPairs: loaded.index.modelPairs.filter(
+      (pair) => pair.platformSupport === "unsupported",
+    ).length,
     ...diagnostics,
     activeRecordsSha256: loaded.digests.activeRecordsSha256,
   };
@@ -125,9 +80,8 @@ export async function runLiveFeedValidation(): Promise<void> {
   try {
     result = await validateLiveFeed();
   } catch (firstError) {
-    // Registry drift is deterministic maintenance work, not a transient upstream blip.
-    if (firstError instanceof ReviewedPairSetDriftError) throw firstError;
-    // One transient upstream blip should not fail the scheduled smoke run.
+    // One transient upstream blip should not fail the scheduled smoke run. This check no
+    // longer asserts anything that maintenance must clear, so every failure is retryable.
     console.warn(
       `First live-feed contract check failed; retrying once: ${
         firstError instanceof Error ? firstError.message : String(firstError)
@@ -137,10 +91,11 @@ export async function runLiveFeedValidation(): Promise<void> {
     result = await validateLiveFeed();
   }
   console.log(
-    `Validated reviewed v3 feed adapter: ${result.records} records, ` +
+    `Validated live v3 feed adapter: ${result.records} records, ` +
       `${result.modelPairs} model pairs, ${result.nonModels} explicit non-models, ` +
+      `${result.unregisteredPlatformPairs} pair(s) on unregistered platforms, ` +
       `${result.lifecycleConflicts} lifecycle conflicts, ` +
-      `${result.pairSetChanges} reviewed pair-set changes, ` +
+      `${result.skippedRecords} record(s) skipped for an unusable provider label, ` +
       `active digest ${result.activeRecordsSha256}.`,
   );
 }

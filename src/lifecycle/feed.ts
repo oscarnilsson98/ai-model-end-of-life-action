@@ -203,16 +203,20 @@ export type FeedConflictDiagnostic = {
   readonly activeLifecycleSignatureIdentities: readonly string[];
 };
 
-export type FeedPairSetDiagnostic = {
-  readonly kind: "feed-pair-set-change";
-  readonly addedPairCount: number;
-  readonly removedPairCount: number;
-  /** Bounded, deterministically sorted previews; counts remain complete. */
-  readonly addedPairs: readonly (readonly [provider: string, identifier: string])[];
-  readonly removedPairs: readonly (readonly [provider: string, identifier: string])[];
+/**
+ * A source row whose provider yields no syntactically valid platform slug at all. An
+ * unregistered provider is not this: it derives a slug and stays as unsupported,
+ * nonblocking evidence. Only an unslugifiable provider costs coverage.
+ */
+export type FeedUnresolvedProviderDiagnostic = {
+  readonly kind: "feed-unresolved-provider";
+  readonly skippedRecordCount: number;
+  readonly providerCount: number;
+  /** Bounded, deterministically sorted preview; counts remain complete. */
+  readonly providers: readonly string[];
 };
 
-export type FeedDiagnostic = FeedConflictDiagnostic | FeedPairSetDiagnostic;
+export type FeedDiagnostic = FeedConflictDiagnostic | FeedUnresolvedProviderDiagnostic;
 
 export type V3FeedIndex = {
   readonly envelope: FeedEnvelope;
@@ -283,6 +287,31 @@ export function platformForSourceProvider(
   )
     ? (SOURCE_PROVIDER_PLATFORM_MAPPING[sourceProvider] ?? null)
     : null;
+}
+
+/**
+ * Resolve any source provider label to a serving-platform slug, so a provider the
+ * upstream source adds is carried instead of rejected. The canonical mapping wins where
+ * it applies; every other label derives its slug mechanically. A derived slug is not
+ * canonical, so `indexValidatedFeed` marks its pairs unsupported and
+ * `blockingJoinEligible` stays false: new providers arrive as nonblocking evidence,
+ * exactly as an unregistered typed-feed slug already does. Promotion to blocking
+ * authority remains a deliberate registry, display-name and detector change.
+ *
+ * Returns null only when no valid slug survives derivation, which is the sole case
+ * that still costs a row.
+ */
+export function resolveSourcePlatformSlug(sourceProvider: string): PlatformSlug | null {
+  const canonical = platformForSourceProvider(sourceProvider);
+  if (canonical !== null) return canonical;
+  const derived = sourceProvider
+    .normalize("NFKD")
+    // Strip combining marks so accented labels fold to their ASCII skeleton.
+    .replace(/\p{M}+/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return derived !== "" && isPlatformSlug(derived) ? derived : null;
 }
 
 /** Collision-free semantic identity for an exact serving-platform/model pair. */
@@ -1150,7 +1179,7 @@ export function loadAdaptedV3Feed(
   sourceBytes: Uint8Array,
   envelopePayload: unknown,
   adapterManifest: ReviewedFeedAdapterManifest,
-  additionalDiagnostics: readonly FeedPairSetDiagnostic[] = [],
+  additionalDiagnostics: readonly FeedUnresolvedProviderDiagnostic[] = [],
 ): LoadedV3Feed {
   const bytes = rawFeedBytes(sourceBytes);
   const envelope = validateV3Feed(envelopePayload);
