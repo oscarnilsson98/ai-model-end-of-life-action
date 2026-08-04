@@ -638,6 +638,79 @@ describe("v3 production orchestration", () => {
     }
   });
 
+  test("never lets a stale feed weaken a comparison", async () => {
+    // Staleness measures the one feed snapshot both sides share, so it must degrade the
+    // run's declared coverage without touching per-side extraction. Routing it through
+    // detection instead would make the comparison partial, reclassify this genuinely new
+    // breach as `comparison-unknown`, and downgrade it to a warning: a stale upstream
+    // would then turn an enforced failure into a green advisory.
+    const policy = "schemaVersion: 1\npolicy:\n  failWithinDays: 30\n  allowPartial: true\n";
+    const comparison = (feed: LoadedV3Feed): RunDependencies => ({
+      resolveEvent: () => comparisonEvent("available"),
+      loadFeed: async () => feed,
+      readSnapshot: (_repositoryPath, treeish) => snapshot(treeish, { policy }),
+      detect: (inspected) =>
+        detection(inspected.treeObjectId === BASE ? [] : [evidence()]),
+    });
+
+    const fresh = await rejectedReport(
+      run(
+        dependencies(
+          fixtureEnvironment({ GITHUB_EVENT_NAME: "pull_request" }),
+          comparison(FEED),
+        ),
+      ),
+    );
+    const stale = await rejectedReport(
+      run(
+        dependencies(
+          fixtureEnvironment({ GITHUB_EVENT_NAME: "pull_request" }),
+          comparison(STALE_FEED),
+        ),
+      ),
+    );
+
+    for (const report of [fresh, stale]) {
+      expect(report).toMatchObject({
+        result: "blocking",
+        comparisonStatus: "available",
+        baselineScanStatus: "complete",
+        targetScanStatus: "complete",
+        exitReason: "policy-breach",
+      });
+      expect(report.lifecycleFindings[0]).toMatchObject({
+        delta: "new",
+        outcome: "breach",
+      });
+    }
+    expect(fresh.scanStatus).toBe("complete");
+    expect(stale.scanStatus).toBe("partial");
+    expect(stale.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "feed-stale", severity: "partial" }),
+    );
+  });
+
+  test("fails an enforced comparison closed on a stale feed", async () => {
+    const fixture = fixtureEnvironment({
+      GITHUB_EVENT_NAME: "pull_request",
+      "INPUT_FAIL-WITHIN-DAYS": "30",
+    });
+    const report = await rejectedReport(
+      run(
+        dependencies(fixture, {
+          resolveEvent: () => comparisonEvent("available"),
+          loadFeed: async () => STALE_FEED,
+        }),
+      ),
+    );
+    expect(report).toMatchObject({
+      result: "no-actionable-risk",
+      scanStatus: "partial",
+      comparisonStatus: "available",
+      exitReason: "partial-disallowed",
+    });
+  });
+
   test("publishes feed freshness as an output consumers can alert on", async () => {
     const fresh = fixtureEnvironment();
     await run(dependencies(fresh));

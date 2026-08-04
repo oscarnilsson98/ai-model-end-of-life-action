@@ -14809,11 +14809,14 @@ function feedDiagnostics(feed, freshness) {
   });
   return [...upstream, ...staleness];
 }
-function applyFeedCoverage(detection, feed, freshness) {
-  const degraded = freshness.stale || feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change");
-  if (!degraded)
+function applyFeedCoverage(detection, feed) {
+  if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change")) {
     return detection;
+  }
   return detection.scanStatus === "partial" ? detection : { ...detection, scanStatus: "partial" };
+}
+function applyFeedFreshnessCoverage(scanStatus, freshness) {
+  return freshness.stale ? "partial" : scanStatus;
 }
 function reportEvidenceSources(evaluation, inspections, effectiveDocuments) {
   const result = [
@@ -14954,7 +14957,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
     stage = "target-snapshot";
     const targetSnapshot = readSnapshot(repositoryPath, resolvedEvent.selection.targetOid);
     stage = "target-detection";
-    const targetDetection = applyFeedCoverage(detector(targetSnapshot, feed.index), feed, freshness);
+    const targetDetection = applyFeedCoverage(detector(targetSnapshot, feed.index), feed);
     const targetPolicy = policyInspector(targetSnapshot);
     if (resolvedEvent.comparisonStatus === "unavailable") {
       stage = "target-claims";
@@ -15030,12 +15033,13 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           inputs
         };
       }
-      const exitReason2 = decisionFor(diagnostic.evaluation.result, diagnostic.evaluation.scanStatus, diagnostic.policy);
+      const scanStatus2 = applyFeedFreshnessCoverage(diagnostic.evaluation.scanStatus, freshness);
+      const exitReason2 = decisionFor(diagnostic.evaluation.result, scanStatus2, diagnostic.policy);
       return {
         report: finishReport({
           evaluatedAt,
           result: diagnostic.evaluation.result,
-          scanStatus: diagnostic.evaluation.scanStatus,
+          scanStatus: scanStatus2,
           comparisonStatus: "not-applicable",
           exitReason: exitReason2,
           event: reportEvent(resolvedEvent),
@@ -15118,7 +15122,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
       additionalEvidencePatterns: basePolicy.policy.usageEvidenceFiles
     });
     stage = "base-detection";
-    const baseDetection = applyFeedCoverage(detector(baseSnapshot, feed.index), feed, freshness);
+    const baseDetection = applyFeedCoverage(detector(baseSnapshot, feed.index), feed);
     stage = "comparison-evaluation";
     const comparison = evaluateComparison({
       baseDetection,
@@ -15135,14 +15139,15 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
       ...comparison.baseline.diagnostics,
       ...feedDiagnostics(feed, freshness)
     ];
-    const exitReason = decisionFor(comparison.result, comparison.scanStatus, comparison.policy);
+    const scanStatus = applyFeedFreshnessCoverage(comparison.scanStatus, freshness);
+    const exitReason = decisionFor(comparison.result, scanStatus, comparison.policy);
     return {
       report: finishReport({
         evaluatedAt,
         result: comparison.result,
         baselineResult: comparison.baselineResult,
         targetResult: comparison.targetResult,
-        scanStatus: comparison.scanStatus,
+        scanStatus,
         baselineScanStatus: comparison.baselineScanStatus,
         targetScanStatus: comparison.targetScanStatus,
         comparisonStatus: comparison.comparisonStatus,

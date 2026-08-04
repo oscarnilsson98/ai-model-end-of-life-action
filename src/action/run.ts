@@ -244,15 +244,28 @@ function feedDiagnostics(
 function applyFeedCoverage(
   detection: DetectionResult,
   feed: LoadedV3Feed,
-  freshness: FeedFreshness,
 ): DetectionResult {
-  const degraded =
-    freshness.stale ||
-    feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change");
-  if (!degraded) return detection;
+  if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change")) {
+    return detection;
+  }
   return detection.scanStatus === "partial"
     ? detection
     : { ...detection, scanStatus: "partial" };
+}
+
+/**
+ * Degrade the run's declared coverage for a stale feed, deliberately at run level rather
+ * than per snapshot side. Staleness is a property of the single feed snapshot both
+ * comparison sides share, so it must not reach the per-side detection status: that would
+ * make `comparison-status` partial and reclassify a genuinely new target breach as
+ * `comparison-unknown`, which downgrades it to a warning. Enforcement still fails closed
+ * here through `decisionFor`, without laundering a definite breach into an advisory.
+ */
+function applyFeedFreshnessCoverage(
+  scanStatus: Exclude<ScanStatus, "failed">,
+  freshness: FeedFreshness,
+): Exclude<ScanStatus, "failed"> {
+  return freshness.stale ? "partial" : scanStatus;
 }
 
 function reportEvidenceSources(
@@ -491,11 +504,7 @@ async function assess(
     stage = "target-snapshot";
     const targetSnapshot = readSnapshot(repositoryPath, resolvedEvent.selection.targetOid);
     stage = "target-detection";
-    const targetDetection = applyFeedCoverage(
-      detector(targetSnapshot, feed.index),
-      feed,
-      freshness,
-    );
+    const targetDetection = applyFeedCoverage(detector(targetSnapshot, feed.index), feed);
     const targetPolicy = policyInspector(targetSnapshot);
 
     if (resolvedEvent.comparisonStatus === "unavailable") {
@@ -575,16 +584,20 @@ async function assess(
           inputs,
         };
       }
+      const scanStatus = applyFeedFreshnessCoverage(
+        diagnostic.evaluation.scanStatus,
+        freshness,
+      );
       const exitReason = decisionFor(
         diagnostic.evaluation.result,
-        diagnostic.evaluation.scanStatus,
+        scanStatus,
         diagnostic.policy,
       );
       return {
         report: finishReport({
           evaluatedAt,
           result: diagnostic.evaluation.result,
-          scanStatus: diagnostic.evaluation.scanStatus,
+          scanStatus,
           comparisonStatus: "not-applicable",
           exitReason,
           event: reportEvent(resolvedEvent),
@@ -673,11 +686,7 @@ async function assess(
       additionalEvidencePatterns: basePolicy.policy.usageEvidenceFiles,
     });
     stage = "base-detection";
-    const baseDetection = applyFeedCoverage(
-      detector(baseSnapshot, feed.index),
-      feed,
-      freshness,
-    );
+    const baseDetection = applyFeedCoverage(detector(baseSnapshot, feed.index), feed);
     stage = "comparison-evaluation";
     const comparison = evaluateComparison({
       baseDetection,
@@ -694,18 +703,18 @@ async function assess(
       ...comparison.baseline.diagnostics,
       ...feedDiagnostics(feed, freshness),
     ];
-    const exitReason = decisionFor(
-      comparison.result,
-      comparison.scanStatus,
-      comparison.policy,
-    );
+    // Feed staleness degrades only the run's declared coverage. The per-side statuses and
+    // `comparison-status` describe extraction over each snapshot, which one shared feed
+    // snapshot cannot make asymmetric.
+    const scanStatus = applyFeedFreshnessCoverage(comparison.scanStatus, freshness);
+    const exitReason = decisionFor(comparison.result, scanStatus, comparison.policy);
     return {
       report: finishReport({
         evaluatedAt,
         result: comparison.result,
         baselineResult: comparison.baselineResult,
         targetResult: comparison.targetResult,
-        scanStatus: comparison.scanStatus,
+        scanStatus,
         baselineScanStatus: comparison.baselineScanStatus,
         targetScanStatus: comparison.targetScanStatus,
         comparisonStatus: comparison.comparisonStatus,
