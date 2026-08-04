@@ -31,11 +31,18 @@ describe("action metadata contract", () => {
     expect(inputBlock("notification-failure-mode")).toContain('default: "fail"');
   });
 
+  test("materializes the feed-staleness horizon so the guard is on by default", () => {
+    // This one is deliberately not a zero-input policy override. An omitted input must
+    // leave the guard armed, so the runner default is part of the contract.
+    expect(inputBlock("max-feed-age-days")).toContain('default: "30"');
+  });
+
   test("declares only the v3 plug-and-play surface", () => {
     expect(sectionKeys("inputs")).toEqual([
       "warn-within-days",
       "fail-within-days",
       "allow-partial",
+      "max-feed-age-days",
       "slack-webhook",
       "notification-failure-mode",
     ]);
@@ -59,6 +66,8 @@ describe("action metadata contract", () => {
       "normalized-feed-sha256",
       "active-records-sha256",
       "feed-adapter-manifest-sha256",
+      "feed-generated-at",
+      "feed-age-days",
       "detector-manifest-sha256",
       "evidence-fingerprint",
       "finding-fingerprint",

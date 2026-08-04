@@ -434,13 +434,22 @@
         "sourceFeedSha256",
         "normalizedFeedSha256",
         "activeRecordsSha256",
-        "feedAdapterManifestSha256"
+        "feedAdapterManifestSha256",
+        "generatedAt",
+        "ageDays"
       ],
       "properties": {
         "sourceFeedSha256": { "$ref": "#/$defs/sha256" },
         "normalizedFeedSha256": { "$ref": "#/$defs/sha256" },
         "activeRecordsSha256": { "$ref": "#/$defs/sha256" },
-        "feedAdapterManifestSha256": { "$ref": "#/$defs/sha256" }
+        "feedAdapterManifestSha256": { "$ref": "#/$defs/sha256" },
+        "generatedAt": {
+          "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "const": "" }]
+        },
+        "ageDays": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
       }
     }
   },

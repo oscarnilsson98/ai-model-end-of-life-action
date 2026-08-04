@@ -109,7 +109,8 @@ For an assessment with a trustworthy policy outcome, result precedence is:
 - a configured evidence source, assertion, or resolution is review-overdue, stale, or expired;
 - a configured evidence source explicitly declares partial coverage;
 - target evidence was assessed but required trusted PR base data or comparison history was unavailable;
-- a configured resolution source could not be applied safely.
+- a configured resolution source could not be applied safely;
+- the upstream lifecycle feed's `generatedAt` is older than the effective `max-feed-age-days` horizon.
 
 An unsupported file format is diagnostic only unless the file was classified as likely model-bearing input for a published detector. An intentionally dynamic selector is an unresolved evidence fact; it does not by itself make the scanner operationally partial.
 
@@ -387,10 +388,13 @@ V3.0 has no `models`, `models-file`, `usage-evidence`, repository-path, or langu
 | `warn-within-days` | `180` | Trusted | May only increase the warning horizon |
 | `fail-within-days` | Unset | Trusted | May enable enforcement or increase the failure horizon; cannot weaken base policy |
 | `allow-partial` | `false` | Trusted | `true` is ignored unless already allowed by base policy |
+| `max-feed-age-days` | `30` | Trusted | Not target-controlled: it measures the shared feed snapshot, not the target tree |
 | `slack-webhook` | Unset | Used only for commit targets when the event name is exactly `schedule`, `workflow_dispatch`, or `push` | Delivery is always skipped on PR/merge-group events |
 | `notification-failure-mode` | `fail` | Trusted | Ignored when delivery is skipped |
 
-Day inputs are bounded non-negative integers. A larger horizon is stricter. `I` in the PR equations contains only explicitly supplied, nonempty action inputs. Effective defaults live in `P0`; `action.yml` MUST NOT materialize policy defaults into otherwise omitted inputs. Therefore an omitted `warn-within-days` or `allow-partial` never overrides trusted file configuration. Configuration-file fields use camelCase (`warnWithinDays`, `failWithinDays`, `allowPartial`); action inputs use the kebab-case names above. There is no custom feed URL in v3.0: all runs use the release's reviewed default feed contract so a PR cannot redirect lifecycle authority.
+Day inputs are bounded non-negative integers. A larger horizon is stricter. `I` in the PR equations contains only explicitly supplied, nonempty action inputs. Effective defaults live in `P0`; `action.yml` MUST NOT materialize policy defaults into otherwise omitted inputs. Therefore an omitted `warn-within-days` or `allow-partial` never overrides trusted file configuration.
+
+`max-feed-age-days` is deliberately not one of those zero-input policy overrides, and is not a checked-in policy field. It is a run-level guard over the single feed snapshot that both comparison sides share, so it can never hide a target-specific regression, and `action.yml` MUST materialize its default so that an omitted input leaves the guard armed. Only an explicitly emptied input disables it. Configuration-file fields use camelCase (`warnWithinDays`, `failWithinDays`, `allowPartial`); action inputs use the kebab-case names above. There is no custom feed URL in v3.0: all runs use the release's reviewed default feed contract so a PR cannot redirect lifecycle authority.
 
 ## Optional checked-in policy and evidence
 
@@ -579,6 +583,14 @@ Invalid trusted base/default-branch evidence fails the assessment. Invalid targe
 The single normative feed schema, launch platform registry, source-provider mapping, duplicate/conflict behavior, and alias ownership rules are defined in [v3-detector-contract.md](v3-detector-contract.md). Only records explicitly typed `model` enter model detection or lifecycle joins. V3 MUST NOT use a token-shaped regular expression to distinguish models from features, APIs, prompts, tools, or products.
 
 An untyped default feed is a v3 release blocker unless a reviewed, versioned adapter carries an exact registry of reviewed source pairs and classifications. The adapter MUST verify the registry's pinned count and digest and MUST strictly parse every raw row before deciding whether the pair is reviewed. Received pairs outside the registry MUST NOT enter normalized feed records or lifecycle authority; their counts and a bounded preview MUST remain visible in diagnostics. Reviewed pairs absent from the source MUST likewise be reported. An addition, removal, or rename makes `scan-status: partial`: warning-only evaluation succeeds, while enforcement fails closed unless `allowPartial: true` explicitly permits partial coverage. A later action release is required before an added pair can gain model or non-model authority.
+
+### Upstream freshness
+
+A frozen upstream is indistinguishable from a healthy one at the row level: every document stays well formed, every lookup still resolves, and the run reports a permanent all-clear while newly announced shutdowns never arrive. The feed's own age is therefore normative coverage information, not a nicety.
+
+Every run MUST measure the feed envelope's `generatedAt` against the effective `max-feed-age-days` horizon. Beyond the horizon the run MUST emit a bounded `feed-stale` diagnostic and MUST make `scan-status: partial`, which carries the standard consequences: warning-only evaluation succeeds with a visible signal, enforcement fails closed unless `allowPartial: true`. Feed age MUST NOT by itself change `result`, since staleness is a coverage property rather than a lifecycle finding, and MUST NOT degrade `comparison-status`, since both comparison sides share one feed snapshot.
+
+`generatedAt` is the only freshness signal both feed paths carry: a typed producer states it directly, and the reviewed adapter derives it from the newest reviewed `scraped_at`. The stale diagnostic MUST state the production instant and the configured horizon rather than the elapsed day count, so that a persistent outage yields a stable `scan-fingerprint` instead of churning daily. The measured age and instant MUST be published as `feed-age-days` and `feed-generated-at`, and MUST be empty when the feed never loaded — a feed that fails to load is already `unknown + failed` and needs no separate freshness claim.
 
 Duplicate source pairs, malformed rows, unknown fields or providers, invalid adapter metadata, and typed-feed schema failures produce `unknown + failed`. A source from which quarantine leaves no reviewed records also fails the non-empty feed contract. A syntactically valid but detector-unsupported platform in an already typed feed remains visible as unsupported, nonblocking evidence; it does not invalidate an otherwise valid feed.
 

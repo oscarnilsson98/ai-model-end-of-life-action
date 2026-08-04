@@ -166,6 +166,7 @@ const noInputs = {
   warnWithinDays: null,
   failWithinDays: null,
   allowPartial: null,
+  maxFeedAgeDays: null,
   notificationFailureMode: "fail" as const,
 };
 

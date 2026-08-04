@@ -3,6 +3,7 @@ import {
   CANONICAL_PLATFORM_SLUGS,
   PROVIDER_LIFECYCLE_ALIAS_REGISTRY,
   buildV3FeedIndex,
+  feedAgeInDays,
   getV3ModelPair,
   isCanonicalPlatformSlug,
   isDateOnly,
@@ -617,5 +618,27 @@ describe("v3 feed identities and digests", () => {
         version: "1",
       }),
     ).toThrow(/does not match reviewed manifest/);
+  });
+});
+
+describe("v3 feed freshness measurement", () => {
+  const now = Date.parse("2026-08-02T00:00:00Z");
+
+  test("counts whole elapsed days since feed production", () => {
+    expect(feedAgeInDays("2026-08-02T00:00:00Z", now)).toBe(0);
+    expect(feedAgeInDays("2026-08-01T00:00:01Z", now)).toBe(0);
+    expect(feedAgeInDays("2026-08-01T00:00:00Z", now)).toBe(1);
+    expect(feedAgeInDays("2026-06-01T00:00:00Z", now)).toBe(62);
+  });
+
+  test("clamps a feed marginally ahead of the runner clock to zero", () => {
+    // The reviewed adapter already rejects anything more than a day ahead; ordinary skew
+    // must not surface as a negative age or wrap into a spurious freshness pass.
+    expect(feedAgeInDays("2026-08-02T06:00:00Z", now)).toBe(0);
+    expect(feedAgeInDays("2026-08-03T00:00:00Z", now)).toBe(0);
+  });
+
+  test("refuses to measure an unparseable production instant", () => {
+    expect(() => feedAgeInDays("not-a-timestamp", now)).toThrow(/Cannot measure feed age/);
   });
 });

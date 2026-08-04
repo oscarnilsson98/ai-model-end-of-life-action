@@ -114,6 +114,7 @@ suppressions:
         warnWithinDays: null,
         failWithinDays: null,
         allowPartial: null,
+        maxFeedAgeDays: null,
         notificationFailureMode: "fail",
       }),
     ).toMatchObject({ warnWithinDays: 365, allowPartial: true });

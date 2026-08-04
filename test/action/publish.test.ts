@@ -57,6 +57,8 @@ function cleanReport(): AssessmentReport {
       normalizedFeedSha256: "b".repeat(64),
       activeRecordsSha256: "c".repeat(64),
       feedAdapterManifestSha256: "d".repeat(64),
+      generatedAt: "2026-08-02T00:00:00Z",
+      ageDays: 0,
     },
     detectorManifestSha256: "e".repeat(64),
     scanFingerprint: "f".repeat(64),
@@ -90,6 +92,8 @@ test("unknown results never render a clean outcome", () => {
       normalizedFeedSha256: "0".repeat(64),
       activeRecordsSha256: "0".repeat(64),
       feedAdapterManifestSha256: "0".repeat(64),
+      generatedAt: "",
+      ageDays: null,
     },
     notificationReason: "assessment failed",
   };
