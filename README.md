@@ -298,11 +298,11 @@ Publication is bounded separately:
 
 ## Feed integrity
 
-The current public upstream feed is not typed. The action wraps it with a release-reviewed adapter manifest that explicitly classifies every reviewed source pair as a model or a specific non-model kind, so entries such as reusable prompts and agent builders never enter model matching.
+The current public upstream feed is not typed. The action wraps it with an adapter manifest that classifies the source's few non-model rows by kind, so entries such as reusable prompts and agent builders never enter model matching, and that marks a small set of short ambiguous identifiers ineligible for literal scanning.
 
-The adapter carries the exact reviewed source-pair registry. It strictly validates every upstream row, but only reviewed pairs enter the normalized lifecycle feed. New source rows are quarantined as unclassified diagnostics rather than guessed from identifier shape; missing reviewed pairs are also reported. An addition, removal, or rename therefore makes `scan-status: partial`: warning-only runs stay green with a visible diagnostic, while enforcement fails closed unless `allowPartial: true` is set. A later action release must review a new pair before it can gain model or non-model authority.
+Every well-formed upstream row enters the normalized lifecycle feed as soon as the source publishes it. The adapter holds no allowlist: a newly published deprecation is visible on the next run, with no action release required. Authority is bounded by platform rather than by review — a row on a registered serving platform can block an enforced run, while a row on a platform the detector does not know yet is carried as unsupported, nonblocking evidence that can warn but never fail a build. Providers the upstream source adds are supported out of the box: their platform slug is derived from the provider label, and promoting one to blocking authority remains a deliberate registry, display-name and detector change.
 
-Malformed rows, duplicate pairs, unknown fields or providers, invalid adapter metadata, and schema failures still produce `unknown + failed`. If no reviewed records remain after quarantine, the non-empty feed contract also fails.
+Malformed rows, duplicate pairs, unknown fields, invalid adapter metadata, and schema failures still produce `unknown + failed`. A provider label that yields no valid platform slug at all has its rows skipped with a diagnostic and makes `scan-status: partial`; if no row resolves a platform, the non-empty feed contract fails.
 
 ### Upstream freshness
 

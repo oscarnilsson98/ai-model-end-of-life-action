@@ -124,11 +124,10 @@ const PARTIAL_FEED: LoadedV3Feed = {
     diagnostics: [
       ...FEED.index.diagnostics,
       {
-        kind: "feed-pair-set-change",
-        addedPairCount: 1,
-        removedPairCount: 1,
-        addedPairs: [["OpenAI", "unreviewed-model"]],
-        removedPairs: [["OpenAI", "reviewed-model"]],
+        kind: "feed-unresolved-provider",
+        skippedRecordCount: 1,
+        providerCount: 1,
+        providers: ["***"],
       },
     ],
   },
@@ -688,7 +687,7 @@ describe("v3 production orchestration", () => {
     });
   });
 
-  test("propagates quarantined legacy pair-set drift as enforceable partial coverage", async () => {
+  test("propagates an unresolvable legacy provider as enforceable partial coverage", async () => {
     const cases = [
       {
         inputs: {},
@@ -724,10 +723,10 @@ describe("v3 production orchestration", () => {
         exitReason: testCase.exitReason,
       });
       expect(report.diagnostics).toEqual([
-        expect.objectContaining({ code: "feed-pair-set-change", severity: "partial" }),
+        expect.objectContaining({ code: "feed-unresolved-provider", severity: "partial" }),
       ]);
       expect(readFileSync(fixture.summaryPath, "utf8")).toContain(
-        "No unreviewed row was normalized into lifecycle authority",
+        "only an unusable label costs coverage",
       );
     }
   });

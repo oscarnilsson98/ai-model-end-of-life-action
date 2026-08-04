@@ -5,7 +5,7 @@ import {
   type RequestPolicy,
 } from "../shared/http.ts";
 import { V3_FEED_LIMITS, type LoadedV3Feed } from "./feed.ts";
-import { loadTypedOrReviewedLegacyFeed } from "./legacy-feed-adapter.ts";
+import { loadTypedOrAdaptedLegacyFeed } from "./legacy-feed-adapter.ts";
 
 export const DEFAULT_V3_FEED_URL = "https://deprecations.info/v1/deprecations.json";
 
@@ -25,5 +25,5 @@ export async function loadLifecycleFeed(
       dependencies.requestPolicy ?? defaultRequestPolicy(dependencies.fetch ?? fetch),
       V3_FEED_LIMITS.maxDocumentBytes,
     ));
-  return loadTypedOrReviewedLegacyFeed(bytes);
+  return loadTypedOrAdaptedLegacyFeed(bytes);
 }

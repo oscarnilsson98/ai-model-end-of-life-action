@@ -370,7 +370,7 @@
       "properties": {
         "code": {
           "type": "string",
-          "description": "Stable diagnostic code, including feed-pair-set-change when reviewed legacy feed coverage drifts."
+          "description": "Stable diagnostic code, including feed-unresolved-provider when a legacy source provider label yields no valid platform slug."
         },
         "message": { "type": "string" },
         "path": { "type": "string" },

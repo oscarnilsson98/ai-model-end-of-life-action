@@ -1,24 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
-  DEFAULT_LEGACY_ADAPTER_MANIFEST,
   adaptLegacyFeed,
-  legacyPairSetSha256,
   type LegacyFeedAdapterManifest,
 } from "../../src/lifecycle/legacy-feed-adapter.ts";
 import { loadAdaptedV3Feed } from "../../src/lifecycle/feed.ts";
 
-describe("reviewed legacy feed adapter", () => {
-  const pairs = [
-    ["OpenAI", "gpt-old"],
-    ["OpenAI", "Agent Builder"],
-  ] as const;
+describe("legacy feed adapter", () => {
   const manifest: LegacyFeedAdapterManifest = {
     id: "fixture",
     version: "1",
-    reviewedPairs: pairs,
-    reviewedPairCount: pairs.length,
-    reviewedPairsSha256: legacyPairSetSha256(pairs),
     nonModels: [
       { provider: "OpenAI", resourceId: "Agent Builder", recordKind: "agent" },
     ],
@@ -58,7 +49,7 @@ describe("reviewed legacy feed adapter", () => {
     return adaptLegacyFeed(sourceBytes(value), selectedManifest, now);
   }
 
-  test("classifies every reviewed record explicitly", () => {
+  test("classifies every record explicitly", () => {
     const bytes = sourceBytes(payload);
     const envelope = adaptLegacyFeed(bytes, manifest, Date.parse("2026-08-02T00:00:00Z"));
     expect(envelope.envelope.records.map((record) => record.recordKind)).toEqual(["model", "agent"]);
@@ -68,55 +59,111 @@ describe("reviewed legacy feed adapter", () => {
     );
   });
 
-  test("ships a self-consistent exact registry for the reviewed upstream snapshot", () => {
-    expect(DEFAULT_LEGACY_ADAPTER_MANIFEST.reviewedPairs).toHaveLength(
-      DEFAULT_LEGACY_ADAPTER_MANIFEST.reviewedPairCount,
-    );
-    expect(
-      legacyPairSetSha256(DEFAULT_LEGACY_ADAPTER_MANIFEST.reviewedPairs),
-    ).toBe(DEFAULT_LEGACY_ADAPTER_MANIFEST.reviewedPairsSha256);
-  });
-
-  test("quarantines additions and removals without normalizing unreviewed records", () => {
+  test("admits added and renamed rows immediately, with no diagnostic", () => {
     const added = adapt([...payload, { ...payload[0], model_id: "new-model" }]);
-    expect(added.envelope.records).toHaveLength(2);
+    expect(added.envelope.records).toHaveLength(3);
     expect(added.envelope.records.some((record) =>
       record.recordKind === "model" && record.modelId === "new-model"
-    )).toBe(false);
-    expect(added.diagnostics).toEqual([
-      expect.objectContaining({ addedPairCount: 1, removedPairCount: 0 }),
-    ]);
-
-    const removed = adapt([payload[0]]);
-    expect(removed.envelope.records).toHaveLength(1);
-    expect(removed.diagnostics).toEqual([
-      expect.objectContaining({ addedPairCount: 0, removedPairCount: 1 }),
-    ]);
+    )).toBe(true);
+    expect(added.diagnostics).toEqual([]);
 
     const renamed = adapt([{ ...payload[0], model_id: "renamed-model" }, payload[1]]);
-    expect(renamed.envelope.records).toHaveLength(1);
-    expect(renamed.diagnostics).toEqual([
-      expect.objectContaining({ addedPairCount: 1, removedPairCount: 1 }),
+    expect(renamed.envelope.records).toHaveLength(2);
+    expect(renamed.diagnostics).toEqual([]);
+  });
+
+  test("treats a withdrawn upstream row as ordinary absence", () => {
+    const removed = adapt([payload[0]]);
+    expect(removed.envelope.records).toHaveLength(1);
+    expect(removed.diagnostics).toEqual([]);
+  });
+
+  test("derives a slug for an unregistered provider and never blocks on it", () => {
+    const result = adapt([
+      ...payload,
+      { ...payload[0], provider: "Mistral", model_id: "mistral-large-2" },
+      { ...payload[0], provider: "Together AI", model_id: "some-model" },
     ]);
+    expect(result.diagnostics).toEqual([]);
+    expect(
+      result.envelope.records
+        .filter((record) => record.recordKind === "model")
+        .map((record) => record.servingPlatform),
+    ).toEqual(["openai", "mistral", "together-ai"]);
+
+    const loaded = loadAdaptedV3Feed(
+      sourceBytes([
+        ...payload,
+        { ...payload[0], provider: "Mistral", model_id: "mistral-large-2" },
+      ]),
+      adapt([
+        ...payload,
+        { ...payload[0], provider: "Mistral", model_id: "mistral-large-2" },
+      ]).envelope,
+      manifest,
+    );
+    const derived = loaded.index.modelPairs.find((pair) => pair.servingPlatform === "mistral");
+    expect(derived).toMatchObject({ platformSupport: "unsupported", blockingJoinEligible: false });
+    // Nonblocking, but still real coverage: lexical matching stays available.
+    expect(derived?.lexicalScanEligible).toBe(true);
+    const canonical = loaded.index.modelPairs.find((pair) => pair.servingPlatform === "openai");
+    expect(canonical).toMatchObject({ platformSupport: "canonical", blockingJoinEligible: true });
+  });
+
+  test("maps every canonical provider label to its registered slug", () => {
+    const providers = [
+      ["OpenAI", "openai"],
+      ["Azure", "azure"],
+      ["Anthropic", "anthropic"],
+      ["AWS Bedrock", "aws-bedrock"],
+      ["Google", "google"],
+      ["Google Vertex", "google-vertex"],
+      ["Cohere", "cohere"],
+      ["Groq", "groq"],
+      ["xAI", "xai"],
+    ] as const;
+    const result = adapt(
+      providers.map(([provider], index) => ({
+        ...payload[0],
+        provider,
+        model_id: `model-${index.toString()}`,
+      })),
+    );
+    expect(result.envelope.records.map((record) => record.servingPlatform)).toEqual(
+      providers.map(([, slug]) => slug),
+    );
+  });
+
+  test("skips only rows whose provider label yields no valid slug", () => {
+    const result = adapt([...payload, { ...payload[0], provider: "***", model_id: "unusable" }]);
+    expect(result.envelope.records).toHaveLength(2);
+    expect(result.diagnostics).toEqual([
+      expect.objectContaining({
+        kind: "feed-unresolved-provider",
+        skippedRecordCount: 1,
+        providerCount: 1,
+        providers: ["***"],
+      }),
+    ]);
+  });
+
+  test("fails the non-empty feed contract when no provider resolves at all", () => {
+    expect(() => adapt([{ ...payload[0], provider: "///", model_id: "unusable" }])).toThrow(
+      /no records with a resolvable serving platform/,
+    );
   });
 
   test("still rejects duplicate source pairs", () => {
     expect(() => adapt([payload[0], payload[0]])).toThrow(/duplicate source provider/);
   });
 
-  test("strictly validates quarantined rows before withholding lifecycle authority", () => {
+  test("strictly validates every row it admits", () => {
     expect(() =>
       adapt([
         ...payload,
         { ...payload[0], model_id: "new-model", unexpected_field: true },
       ]),
     ).toThrow(/unreviewed field/);
-    expect(() =>
-      adapt([
-        ...payload,
-        { ...payload[0], provider: "Unreviewed Provider", model_id: "new-model" },
-      ]),
-    ).toThrow(/reviewed platform mapping/);
     expect(() =>
       adapt([
         ...payload,
@@ -130,21 +177,16 @@ describe("reviewed legacy feed adapter", () => {
     ).toThrow(/deprecation_date after shutdown_date/);
   });
 
-  test("derives generatedAt and normalized lifecycle digests only from reviewed rows", () => {
+  test("derives generatedAt and lifecycle digests from every admitted row", () => {
     const now = Date.parse("2027-01-02T00:00:00Z");
-    const reviewedBytes = sourceBytes(payload);
-    const reviewed = adaptLegacyFeed(reviewedBytes, manifest, now);
-    const reviewedLoaded = loadAdaptedV3Feed(
-      reviewedBytes,
-      reviewed.envelope,
-      manifest,
-      reviewed.diagnostics,
-    );
+    const baseBytes = sourceBytes(payload);
+    const base = adaptLegacyFeed(baseBytes, manifest, now);
+    const baseLoaded = loadAdaptedV3Feed(baseBytes, base.envelope, manifest, base.diagnostics);
     const changedBytes = sourceBytes([
       ...payload,
       {
         ...payload[0],
-        model_id: "quarantined-model",
+        model_id: "added-model",
         scraped_at: "2027-01-02T00:00:00Z",
       },
     ]);
@@ -156,20 +198,26 @@ describe("reviewed legacy feed adapter", () => {
       changed.diagnostics,
     );
 
-    expect(changed.envelope.generatedAt).toBe(reviewed.envelope.generatedAt);
-    expect(changed.envelope.records).toEqual(reviewed.envelope.records);
+    // An added row is authoritative now, so it moves generatedAt and every digest.
+    expect(changed.envelope.generatedAt).toBe("2027-01-02T00:00:00.000Z");
+    expect(base.envelope.generatedAt).toBe("2026-08-01T00:00:00.000Z");
+    expect(changed.envelope.records).toHaveLength(3);
+    // Lifecycle status is relative to generatedAt, so an advancing feed date can retire a
+    // record that a pinned older date still reported as merely scheduled.
     expect(changed.envelope.records[0]).toMatchObject({
+      recordKind: "model",
+      lifecycleStatus: "retired",
+    });
+    expect(base.envelope.records[0]).toMatchObject({
       recordKind: "model",
       lifecycleStatus: "shutdown-scheduled",
     });
-    expect(changedLoaded.digests.sourceFeedSha256).not.toBe(
-      reviewedLoaded.digests.sourceFeedSha256,
+    expect(changedLoaded.digests.sourceFeedSha256).not.toBe(baseLoaded.digests.sourceFeedSha256);
+    expect(changedLoaded.digests.normalizedFeedSha256).not.toBe(
+      baseLoaded.digests.normalizedFeedSha256,
     );
-    expect(changedLoaded.digests.normalizedFeedSha256).toBe(
-      reviewedLoaded.digests.normalizedFeedSha256,
-    );
-    expect(changedLoaded.digests.activeRecordsSha256).toBe(
-      reviewedLoaded.digests.activeRecordsSha256,
+    expect(changedLoaded.digests.activeRecordsSha256).not.toBe(
+      baseLoaded.digests.activeRecordsSha256,
     );
   });
 
@@ -182,12 +230,10 @@ describe("reviewed legacy feed adapter", () => {
     };
     const result = adapt([
       ...payload.map((record) => ({ ...record, ...metadata })),
-      { ...payload[0], ...metadata, model_id: "quarantined-with-valid-metadata" },
+      { ...payload[0], ...metadata, model_id: "added-with-valid-metadata" },
     ]);
-    expect(result.envelope.records).toHaveLength(2);
-    expect(result.diagnostics).toEqual([
-      expect.objectContaining({ addedPairCount: 1, removedPairCount: 0 }),
-    ]);
+    expect(result.envelope.records).toHaveLength(3);
+    expect(result.diagnostics).toEqual([]);
 
     const invalidValues: readonly [field: string, value: unknown, message: RegExp][] = [
       ["deprecation_context", { text: "not a string" }, /deprecation_context must be a string/],
@@ -205,7 +251,7 @@ describe("reviewed legacy feed adapter", () => {
       expect(() =>
         adapt([
           ...payload,
-          { ...payload[0], model_id: `quarantined-${field}`, [field]: value },
+          { ...payload[0], model_id: `added-${field}`, [field]: value },
         ]),
       ).toThrow(message);
     }
@@ -214,7 +260,7 @@ describe("reviewed legacy feed adapter", () => {
         ...payload,
         {
           ...payload[0],
-          model_id: "quarantined-observation-order",
+          model_id: "added-observation-order",
           first_observed: "2026-08-02",
           last_observed: "2026-08-01",
         },
@@ -222,26 +268,21 @@ describe("reviewed legacy feed adapter", () => {
     ).toThrow(/first_observed must be on or before .*last_observed/);
   });
 
-  test("bounds pair-set diagnostic previews while retaining exact counts", () => {
-    const additions = Array.from({ length: 60 }, (_, index) => ({
+  test("bounds unresolved-provider previews while retaining exact counts", () => {
+    const unusable = Array.from({ length: 60 }, (_, index) => ({
       ...payload[0],
-      model_id: `new-model-${index.toString().padStart(2, "0")}`,
+      provider: `${"*".repeat(index + 1)}`,
+      model_id: `unusable-${index.toString().padStart(2, "0")}`,
     }));
-    const result = adapt([...payload, ...additions]);
+    const result = adapt([...payload, ...unusable]);
+    expect(result.envelope.records).toHaveLength(2);
     expect(result.diagnostics).toEqual([
-      expect.objectContaining({ addedPairCount: 60, removedPairCount: 0 }),
+      expect.objectContaining({ skippedRecordCount: 60, providerCount: 60 }),
     ]);
-    expect(result.diagnostics[0]?.addedPairs).toHaveLength(50);
-    expect(result.diagnostics[0]?.removedPairs).toHaveLength(0);
+    expect(result.diagnostics[0]?.providers).toHaveLength(50);
   });
 
-  test("fails the non-empty feed contract when quarantine leaves no reviewed records", () => {
-    expect(() => adapt([{ ...payload[0], model_id: "only-unreviewed-model" }])).toThrow(
-      /no reviewed records after pair-set quarantine/,
-    );
-  });
-
-  test("keeps exact pair review order-independent without normalizing source identifiers", () => {
+  test("keeps classification order-independent without normalizing source identifiers", () => {
     expect(adapt([...payload].reverse()).envelope.records.map((record) => record.recordKind)).toEqual([
       "agent",
       "model",
@@ -290,16 +331,22 @@ describe("reviewed legacy feed adapter", () => {
     ).toThrow(/further ahead.*one day/);
   });
 
-  test("rejects manifest classifications that are absent, duplicated, or contradictory", () => {
+  test("treats a classification the source no longer publishes as inert", () => {
     const absent: LegacyFeedAdapterManifest = {
       ...manifest,
       nonModels: [
         ...manifest.nonModels,
         { provider: "OpenAI", resourceId: "missing", recordKind: "product" },
       ],
+      lexicalIneligiblePairs: [["OpenAI", "also-missing"]],
     };
-    expect(() => adapt(payload, absent)).toThrow(/classifies absent source pair/);
+    // A stale classification must never stall the feed: upstream drops rows freely.
+    const result = adapt(payload, absent);
+    expect(result.envelope.records.map((record) => record.recordKind)).toEqual(["model", "agent"]);
+    expect(result.diagnostics).toEqual([]);
+  });
 
+  test("rejects manifest classifications that are duplicated or contradictory", () => {
     const duplicate: LegacyFeedAdapterManifest = {
       ...manifest,
       nonModels: [...manifest.nonModels, ...manifest.nonModels],
