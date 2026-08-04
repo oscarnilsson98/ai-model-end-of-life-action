@@ -111,9 +111,22 @@ type EnvironmentReference = {
   fallbackIndex?: number;
 };
 
+/**
+ * API families reached through an official vendor SDK. Each spans more than one
+ * serving platform — OpenAI covers Azure, Google covers Vertex — so
+ * `compatiblePlatforms` states their candidates explicitly. Declared separately
+ * from the AI SDK registry so removing a provider package cannot silently stop
+ * the official path from typechecking.
+ */
+type OfficialApiFamily = "openai" | "anthropic" | "google" | "aws-bedrock";
+
 type ClientBinding = {
   variable: string;
-  integration: "openai" | "anthropic" | "google" | "aws-bedrock";
+  /**
+   * The API family whose selector semantics apply. Extends automatically with the
+   * AI SDK provider registry, so a new provider package needs no edit here.
+   */
+  integration: OfficialApiFamily | AiSdkProvider["integration"];
   servingPlatform?: string;
   platformResolution: PlatformResolution;
   selectorKind: ModelSelectorKind;
@@ -1672,11 +1685,22 @@ const AWS_COMMANDS = new Set([
   "ConverseStreamCommand",
 ]);
 
-type AiSdkProvider = {
+/**
+ * Shape only. `AiSdkProvider` is derived from the registry below so that adding a
+ * provider package is a single edit: the integration union on `ClientBinding`
+ * widens with it, and `compatiblePlatforms` already handles a single-platform
+ * integration generically. Nothing enumerates these platforms a second time.
+ */
+type AiSdkProviderShape = {
   /** Rule-ID segment, and the qualified provider package identity. */
   providerId: string;
+  /**
+   * The API family whose selector semantics apply. Where a package serves one
+   * platform this is that platform's slug; `@ai-sdk/azure` is OpenAI-shaped and
+   * `@ai-sdk/google-vertex` is Google-shaped, so those name the family instead.
+   */
+  integration: string;
   module: string;
-  integration: ClientBinding["integration"];
   platform: string;
   /** Exported provider instances, including the package's own aliases. */
   instanceNames: readonly string[];
@@ -1684,13 +1708,17 @@ type AiSdkProvider = {
   factoryNames: readonly string[];
 };
 
+function includesName(names: readonly string[], name: string): boolean {
+  return names.includes(name);
+}
+
 /**
  * Vercel AI SDK provider packages. The package pins the serving platform, and a
  * provider call's first positional argument is the model selector, so these are
  * exact rules rather than generic framework matching. Instance and factory
  * names are taken from each package's published type surface.
  */
-const AI_SDK_PROVIDERS: readonly AiSdkProvider[] = [
+const AI_SDK_PROVIDERS = [
   {
     providerId: "openai",
     module: "@ai-sdk/openai",
@@ -1739,7 +1767,33 @@ const AI_SDK_PROVIDERS: readonly AiSdkProvider[] = [
     instanceNames: ["amazonBedrock", "bedrock"],
     factoryNames: ["createAmazonBedrock"],
   },
-];
+  {
+    providerId: "cohere",
+    module: "@ai-sdk/cohere",
+    integration: "cohere",
+    platform: "cohere",
+    instanceNames: ["cohere"],
+    factoryNames: ["createCohere"],
+  },
+  {
+    providerId: "groq",
+    module: "@ai-sdk/groq",
+    integration: "groq",
+    platform: "groq",
+    instanceNames: ["groq"],
+    factoryNames: ["createGroq"],
+  },
+  {
+    providerId: "xai",
+    module: "@ai-sdk/xai",
+    integration: "xai",
+    platform: "xai",
+    instanceNames: ["xai"],
+    factoryNames: ["createXai"],
+  },
+] as const satisfies readonly AiSdkProviderShape[];
+
+type AiSdkProvider = (typeof AI_SDK_PROVIDERS)[number];
 
 /**
  * Non-language model families a provider exposes. Each is published under both a
@@ -1773,8 +1827,9 @@ const AI_SDK_MODEL_METHODS: ReadonlySet<string> = new Set([
   ...AI_SDK_MODEL_FAMILIES.flatMap((family) => [family, `${family}Model`]),
 ]);
 
-const AI_SDK_PROVIDER_BY_MODULE = new Map(
-  AI_SDK_PROVIDERS.map((provider) => [provider.module, provider] as const),
+/** Keyed by plain string: lookups come from arbitrary import specifiers. */
+const AI_SDK_PROVIDER_BY_MODULE = new Map<string, AiSdkProvider>(
+  AI_SDK_PROVIDERS.map((provider) => [provider.module, provider]),
 );
 
 function aiSdkRuleId(provider: AiSdkProvider): string {
@@ -1954,9 +2009,9 @@ function importProvenance(
   const addAiSdkImport = (moduleName: string, canonicalName: string, localName: string): void => {
     const provider = AI_SDK_PROVIDER_BY_MODULE.get(moduleName);
     if (provider === undefined || conflicted.has(localName)) return;
-    const kind = provider.instanceNames.includes(canonicalName)
+    const kind = includesName(provider.instanceNames, canonicalName)
       ? "instance"
-      : provider.factoryNames.includes(canonicalName)
+      : includesName(provider.factoryNames, canonicalName)
       ? "factory"
       : undefined;
     if (kind === undefined) return;
@@ -4008,7 +4063,10 @@ function compatiblePlatforms(binding: ClientBinding): ReadonlySet<string> {
   if (binding.integration === "openai") return new Set(["openai", "azure"]);
   if (binding.integration === "anthropic") return new Set(["anthropic"]);
   if (binding.integration === "google") return new Set(["google", "google-vertex"]);
-  return new Set(["aws-bedrock"]);
+  if (binding.integration === "aws-bedrock") return new Set(["aws-bedrock"]);
+  // A single-platform integration names its own platform, so an unresolved
+  // endpoint still cannot widen it to another provider's lifecycle.
+  return new Set([binding.integration]);
 }
 
 function protectedAssignmentScope(path: string): EvidenceScope | undefined {

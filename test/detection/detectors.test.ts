@@ -3,6 +3,27 @@ import { detectSnapshot } from "../../src/detection/detectors.ts";
 import { buildV3FeedIndex } from "../../src/lifecycle/feed.ts";
 import type { GitTreeSnapshot } from "../../src/repository/git.ts";
 
+/** A registered non-OpenAI platform, for the single-platform provider packages. */
+const groqFeed = buildV3FeedIndex({
+  schemaVersion: 3,
+  adapter: { id: "fixture", version: "1", sourceSha256: "a".repeat(64) },
+  generatedAt: "2026-08-01T00:00:00Z",
+  records: [
+    {
+      recordId: "groq-old",
+      servingPlatform: "groq",
+      primarySourceUrl: "https://example.com/groq",
+      supersedesRecordIds: [],
+      recordKind: "model",
+      modelId: "groq-old",
+      literalScanEligible: true,
+      lifecycleStatus: "shutdown-scheduled",
+      shutdownDate: "2027-01-01",
+      replacementModels: [],
+    },
+  ],
+});
+
 const feed = buildV3FeedIndex({
   schemaVersion: 3,
   adapter: { id: "fixture", version: "1", sourceSha256: "a".repeat(64) },
@@ -856,6 +877,27 @@ describe("v3 Vercel AI SDK provider rules", () => {
         selectorKind: "polymorphic",
         policyEligible: false,
       },
+      {
+        source: `import { cohere } from "@ai-sdk/cohere";\nawait cohere("gpt-old");\n`,
+        ruleId: "source.ts.vercel-ai-sdk.cohere-model@1",
+        servingPlatform: "cohere",
+        selectorKind: "model-id",
+        policyEligible: true,
+      },
+      {
+        source: `import { groq } from "@ai-sdk/groq";\nawait groq("gpt-old");\n`,
+        ruleId: "source.ts.vercel-ai-sdk.groq-model@1",
+        servingPlatform: "groq",
+        selectorKind: "model-id",
+        policyEligible: true,
+      },
+      {
+        source: `import { xai } from "@ai-sdk/xai";\nawait xai("gpt-old");\n`,
+        ruleId: "source.ts.vercel-ai-sdk.xai-model@1",
+        servingPlatform: "xai",
+        selectorKind: "model-id",
+        policyEligible: true,
+      },
     ] as const;
     for (const testCase of cases) {
       expect(providerFact(testCase.source), testCase.ruleId).toMatchObject({
@@ -937,6 +979,23 @@ describe("v3 Vercel AI SDK provider rules", () => {
       servingPlatform: "openai",
     });
     expect(binding?.locations.map((location) => location.path)).toEqual([".env", "src/chat.ts"]);
+  });
+
+  test("keeps a single-platform integration on its own platform for env bindings", () => {
+    // A single-platform provider names its own platform, so the dotenv join must
+    // reach it rather than falling through to the Bedrock candidate set.
+    const evidence = detectSnapshot(
+      repositorySnapshot({
+        "src/chat.ts": `import { groq } from "@ai-sdk/groq";\nawait groq(process.env.MODEL_ID);\n`,
+        ".env": "MODEL_ID=groq-old\n",
+      }),
+      groqFeed,
+    ).evidence;
+    expect(evidence.find((fact) => fact.kind === "env-binding")).toMatchObject({
+      detectorRuleId: "binding.env.consumed-model@1",
+      modelId: "groq-old",
+      servingPlatform: "groq",
+    });
   });
 
   test("resolves a provider factory and leaves a custom gateway unresolved", () => {

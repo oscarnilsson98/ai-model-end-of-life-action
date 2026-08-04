@@ -99,7 +99,7 @@ The action detects static model values in these supported integrations:
 - Anthropic's JavaScript/TypeScript and Python SDKs
 - Google's current Gen AI JavaScript/TypeScript and Python SDKs
 - Amazon Bedrock Runtime calls through the AWS JavaScript SDK and boto3
-- the Vercel AI SDK's OpenAI, Anthropic, Google, Google Vertex, Azure, and Amazon Bedrock providers
+- the Vercel AI SDK's OpenAI, Anthropic, Google, Google Vertex, Azure, Amazon Bedrock, Cohere, Groq, and xAI providers
 - Azure Cognitive Services model deployments in Terraform
 - model-valued environment bindings connected to supported calls
 

@@ -14,7 +14,7 @@ export type DetectorQualificationEntry = {
   sourceUrl: string;
 };
 
-export const DETECTOR_MANIFEST_VERSION = "3.0.0-4";
+export const DETECTOR_MANIFEST_VERSION = "3.0.0-5";
 
 /** Syntax baselines reviewed for the v3.0 rule set; repository packages are never installed. */
 export const DETECTOR_QUALIFICATION: readonly DetectorQualificationEntry[] =
@@ -115,6 +115,24 @@ export const DETECTOR_QUALIFICATION: readonly DetectorQualificationEntry[] =
       package: "@ai-sdk/amazon-bedrock",
       version: "5.0.40",
       sourceUrl: "https://www.npmjs.com/package/@ai-sdk/amazon-bedrock/v/5.0.40",
+    }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "@ai-sdk/cohere",
+      version: "4.0.20",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/cohere/v/4.0.20",
+    }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "@ai-sdk/groq",
+      version: "4.0.21",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/groq/v/4.0.21",
+    }),
+    Object.freeze({
+      ecosystem: "npm",
+      package: "@ai-sdk/xai",
+      version: "4.0.27",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/xai/v/4.0.27",
     }),
   ]);
 
@@ -217,6 +235,24 @@ export const DETECTOR_RULES: readonly DetectorRuleManifestEntry[] = Object.freez
     languages: ["javascript", "typescript"],
     confidence: "high",
     policyEligible: false,
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.cohere-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true,
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.groq-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true,
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.xai-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true,
   },
   {
     ruleId: "deploy.hcl.azure.cognitive-deployment-model@1",

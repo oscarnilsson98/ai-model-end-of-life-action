@@ -7977,7 +7977,7 @@ function alertFingerprint(findings) {
 }
 
 // src/detection/manifest.ts
-var DETECTOR_MANIFEST_VERSION = "3.0.0-4";
+var DETECTOR_MANIFEST_VERSION = "3.0.0-5";
 var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
@@ -8074,6 +8074,24 @@ var DETECTOR_QUALIFICATION = Object.freeze([
     package: "@ai-sdk/amazon-bedrock",
     version: "5.0.40",
     sourceUrl: "https://www.npmjs.com/package/@ai-sdk/amazon-bedrock/v/5.0.40"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "@ai-sdk/cohere",
+    version: "4.0.20",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/cohere/v/4.0.20"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "@ai-sdk/groq",
+    version: "4.0.21",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/groq/v/4.0.21"
+  }),
+  Object.freeze({
+    ecosystem: "npm",
+    package: "@ai-sdk/xai",
+    version: "4.0.27",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/xai/v/4.0.27"
   })
 ]);
 var DETECTOR_RULES = Object.freeze([
@@ -8172,6 +8190,24 @@ var DETECTOR_RULES = Object.freeze([
     languages: ["javascript", "typescript"],
     confidence: "high",
     policyEligible: false
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.cohere-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.groq-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true
+  },
+  {
+    ruleId: "source.ts.vercel-ai-sdk.xai-model@1",
+    languages: ["javascript", "typescript"],
+    confidence: "high",
+    policyEligible: true
   },
   {
     ruleId: "deploy.hcl.azure.cognitive-deployment-model@1",
@@ -10889,6 +10925,9 @@ var AWS_COMMANDS = new Set([
   "ConverseCommand",
   "ConverseStreamCommand"
 ]);
+function includesName(names, name) {
+  return names.includes(name);
+}
 var AI_SDK_PROVIDERS = [
   {
     providerId: "openai",
@@ -10937,6 +10976,30 @@ var AI_SDK_PROVIDERS = [
     platform: "aws-bedrock",
     instanceNames: ["amazonBedrock", "bedrock"],
     factoryNames: ["createAmazonBedrock"]
+  },
+  {
+    providerId: "cohere",
+    module: "@ai-sdk/cohere",
+    integration: "cohere",
+    platform: "cohere",
+    instanceNames: ["cohere"],
+    factoryNames: ["createCohere"]
+  },
+  {
+    providerId: "groq",
+    module: "@ai-sdk/groq",
+    integration: "groq",
+    platform: "groq",
+    instanceNames: ["groq"],
+    factoryNames: ["createGroq"]
+  },
+  {
+    providerId: "xai",
+    module: "@ai-sdk/xai",
+    integration: "xai",
+    platform: "xai",
+    instanceNames: ["xai"],
+    factoryNames: ["createXai"]
   }
 ];
 var AI_SDK_MODEL_FAMILIES = [
@@ -11056,7 +11119,7 @@ function importProvenance(tokens, language, analysis) {
     const provider = AI_SDK_PROVIDER_BY_MODULE.get(moduleName);
     if (provider === undefined || conflicted.has(localName))
       return;
-    const kind = provider.instanceNames.includes(canonicalName) ? "instance" : provider.factoryNames.includes(canonicalName) ? "factory" : undefined;
+    const kind = includesName(provider.instanceNames, canonicalName) ? "instance" : includesName(provider.factoryNames, canonicalName) ? "factory" : undefined;
     if (kind === undefined)
       return;
     const existingInstance = aiSdkInstances.get(localName);
@@ -12542,7 +12605,9 @@ function compatiblePlatforms(binding) {
     return new Set(["anthropic"]);
   if (binding.integration === "google")
     return new Set(["google", "google-vertex"]);
-  return new Set(["aws-bedrock"]);
+  if (binding.integration === "aws-bedrock")
+    return new Set(["aws-bedrock"]);
+  return new Set([binding.integration]);
 }
 function protectedAssignmentScope(path) {
   const scope = classifyEvidenceScope(path);
