@@ -227,25 +227,30 @@ function feedDiagnostics(
         severity: "notice",
       };
     }
-    const renderPairs = (
-      pairs: readonly (readonly [provider: string, identifier: string])[],
-    ) => pairs.slice(0, 10).map(([provider, identifier]) => `${provider}/${identifier}`).join(", ");
-    const added = renderPairs(diagnostic.addedPairs);
-    const removed = renderPairs(diagnostic.removedPairs);
+    const providers = diagnostic.providers.slice(0, 10).join(", ");
     return {
       code: diagnostic.kind,
-      message: `The untyped lifecycle-feed pair set changed: ${diagnostic.addedPairCount} unreviewed addition(s) were quarantined${added === "" ? "" : ` (${added})`}; ${diagnostic.removedPairCount} reviewed pair(s) were absent${removed === "" ? "" : ` (${removed})`}. No unreviewed row was normalized into lifecycle authority.`,
+      message: `The untyped lifecycle feed carried ${diagnostic.skippedRecordCount} record(s) from ${diagnostic.providerCount} provider label(s) that yield no valid serving-platform slug${providers === "" ? "" : ` (${providers})`}, so those records were skipped. A provider that is merely unregistered is still carried as nonblocking evidence; only an unusable label costs coverage.`,
       severity: "partial",
     };
   });
   return [...upstream, ...staleness];
 }
 
+/**
+ * Only an unusable provider label degrades coverage. A newly published upstream row, or a
+ * row on a provider that has no canonical slug yet, is carried as unsupported nonblocking
+ * evidence and therefore does not make the scan partial.
+ */
 function applyFeedCoverage(
   detection: DetectionResult,
   feed: LoadedV3Feed,
 ): DetectionResult {
-  if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change")) {
+  if (
+    !feed.index.diagnostics.some(
+      (diagnostic) => diagnostic.kind === "feed-unresolved-provider",
+    )
+  ) {
     return detection;
   }
   return detection.scanStatus === "partial"

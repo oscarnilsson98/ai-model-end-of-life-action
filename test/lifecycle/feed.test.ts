@@ -592,11 +592,10 @@ describe("v3 feed identities and digests", () => {
       classifications: ["complete-fixture-set"],
     }, [
       {
-        kind: "feed-pair-set-change",
-        addedPairCount: 1,
-        removedPairCount: 0,
-        addedPairs: [["OpenAI", "unreviewed-model"]],
-        removedPairs: [],
+        kind: "feed-unresolved-provider",
+        skippedRecordCount: 1,
+        providerCount: 1,
+        providers: ["***"],
       },
     ]);
 
@@ -604,7 +603,7 @@ describe("v3 feed identities and digests", () => {
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
     expect(loaded.index.diagnostics).toEqual([
-      expect.objectContaining({ kind: "feed-pair-set-change", addedPairCount: 1 }),
+      expect.objectContaining({ kind: "feed-unresolved-provider", skippedRecordCount: 1 }),
     ]);
     expect(() =>
       loadAdaptedV3Feed(new TextEncoder().encode("different"), envelope, {

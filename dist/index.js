@@ -7181,6 +7181,13 @@ function isCanonicalPlatformSlug(value) {
 function platformForSourceProvider(sourceProvider) {
   return Object.prototype.hasOwnProperty.call(SOURCE_PROVIDER_PLATFORM_MAPPING, sourceProvider) ? SOURCE_PROVIDER_PLATFORM_MAPPING[sourceProvider] ?? null : null;
 }
+function resolveSourcePlatformSlug(sourceProvider) {
+  const canonical = platformForSourceProvider(sourceProvider);
+  if (canonical !== null)
+    return canonical;
+  const derived = sourceProvider.normalize("NFKD").replace(/\p{M}+/gu, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return derived !== "" && isPlatformSlug(derived) ? derived : null;
+}
 function modelPairIdentity(servingPlatform, modelId) {
   return JSON.stringify(["model", servingPlatform, modelId]);
 }
@@ -13363,435 +13370,12 @@ async function postSlack(webhook, text2, policy) {
 
 // src/lifecycle/legacy-feed-adapter.ts
 var import_node_crypto4 = require("node:crypto");
-
-// src/lifecycle/legacy-feed-pairs.ts
-var REVIEWED_LEGACY_SOURCE_PAIRS = Object.freeze([
-  ["AWS Bedrock", "ai21.jamba-1-5-large-v1:0"],
-  ["AWS Bedrock", "ai21.jamba-1-5-mini-v1:0"],
-  ["AWS Bedrock", "amazon.nova-canvas-v1:0"],
-  ["AWS Bedrock", "amazon.nova-premier-v1:0"],
-  ["AWS Bedrock", "amazon.nova-reel-v1:0"],
-  ["AWS Bedrock", "amazon.nova-reel-v1:1"],
-  ["AWS Bedrock", "amazon.nova-sonic-v1:0"],
-  ["AWS Bedrock", "anthropic.claude-3-5-sonnet-20240620-v1:0"],
-  ["AWS Bedrock", "anthropic.claude-3-5-sonnet-20241022-v2:0"],
-  ["AWS Bedrock", "anthropic.claude-3-7-sonnet-20250219-v1:0"],
-  ["AWS Bedrock", "anthropic.claude-3-haiku-20240307-v1:0"],
-  ["AWS Bedrock", "anthropic.claude-3-sonnet-20240229-v1:0"],
-  ["AWS Bedrock", "anthropic.claude-opus-4-1-20250805-v1:0"],
-  ["AWS Bedrock", "anthropic.claude-sonnet-4-20250514-v1:0"],
-  ["AWS Bedrock", "cohere.command-r-plus-v1:0"],
-  ["AWS Bedrock", "cohere.command-r-v1:0"],
-  ["AWS Bedrock", "twelvelabs.marengo-embed-2-7-v1:0"],
-  ["Anthropic", "claude-1.0"],
-  ["Anthropic", "claude-1.1"],
-  ["Anthropic", "claude-1.2"],
-  ["Anthropic", "claude-1.3"],
-  ["Anthropic", "claude-2.0"],
-  ["Anthropic", "claude-2.1"],
-  ["Anthropic", "claude-3-5-haiku-20241022"],
-  ["Anthropic", "claude-3-5-sonnet-20240620"],
-  ["Anthropic", "claude-3-5-sonnet-20241022"],
-  ["Anthropic", "claude-3-7-sonnet-20250219"],
-  ["Anthropic", "claude-3-haiku-20240307"],
-  ["Anthropic", "claude-3-opus-20240229"],
-  ["Anthropic", "claude-3-sonnet-20240229"],
-  ["Anthropic", "claude-instant-1.0"],
-  ["Anthropic", "claude-instant-1.1"],
-  ["Anthropic", "claude-instant-1.2"],
-  ["Anthropic", "claude-opus-4-1-20250805"],
-  ["Anthropic", "claude-opus-4-20250514"],
-  ["Anthropic", "claude-sonnet-4-20250514"],
-  ["Azure", "Cohere-command-a-plus-05-2026"],
-  ["Azure", "Cohere-command-r-08-2024"],
-  ["Azure", "Cohere-command-r-plus-08-2024"],
-  ["Azure", "Cohere-rerank-v3.5"],
-  ["Azure", "DeepSeek-R1"],
-  ["Azure", "DeepSeek-R1-0528"],
-  ["Azure", "DeepSeek-V3-0324"],
-  ["Azure", "DeepSeek-V3.1"],
-  ["Azure", "DeepSeek-V4-Flash"],
-  ["Azure", "DeepSeek-V4-Pro"],
-  ["Azure", "FW-DeepSeek-V3.1"],
-  ["Azure", "FW-DeepSeek-V3.2"],
-  ["Azure", "FW-GLM-4.7"],
-  ["Azure", "FW-GLM-5"],
-  ["Azure", "FW-GLM-5.1"],
-  ["Azure", "FW-GPT-OSS-120B"],
-  ["Azure", "FW-Kimi-K2-Instruct-0905"],
-  ["Azure", "FW-Kimi-K2-Thinking"],
-  ["Azure", "FW-Kimi-K2.5"],
-  ["Azure", "FW-MiniMax-M2.5"],
-  ["Azure", "FW-Qwen3-14B"],
-  ["Azure", "FW-Qwen3.5-122B-A10B"],
-  ["Azure", "FW-Qwen3.5-397B-A17B"],
-  ["Azure", "Kimi-K2.5"],
-  ["Azure", "Kimi-K2.6"],
-  ["Azure", "Kimi-K2.7-Code"],
-  ["Azure", "Llama-3.2-11B-Vision-Instruct"],
-  ["Azure", "Llama-3.2-90B-Vision-Instruct"],
-  ["Azure", "MAI-Image-2"],
-  ["Azure", "MAI-Image-2e"],
-  ["Azure", "Meta-Llama-3.1-405B-Instruct"],
-  ["Azure", "Meta-Llama-3.1-8B"],
-  ["Azure", "Meta-Llama-3.1-8B-Instruct"],
-  ["Azure", "Stable-Diffusion-3.5-Large"],
-  ["Azure", "Stable-Image-Core"],
-  ["Azure", "Stable-Image-Ultra"],
-  ["Azure", "TimeGEN-1"],
-  ["Azure", "claude-haiku-4-5"],
-  ["Azure", "claude-opus-4-1"],
-  ["Azure", "claude-opus-4-5"],
-  ["Azure", "claude-opus-4-6"],
-  ["Azure", "claude-opus-4-7"],
-  ["Azure", "claude-sonnet-4-5"],
-  ["Azure", "claude-sonnet-4-6"],
-  ["Azure", "codex-mini"],
-  ["Azure", "gpt-4.1"],
-  ["Azure", "gpt-4.1-mini"],
-  ["Azure", "gpt-4.1-nano"],
-  ["Azure", "gpt-4o"],
-  ["Azure", "gpt-4o-mini"],
-  ["Azure", "gpt-4o-mini-transcribe"],
-  ["Azure", "gpt-4o-mini-tts"],
-  ["Azure", "gpt-4o-transcribe"],
-  ["Azure", "gpt-4o-transcribe-diarize"],
-  ["Azure", "gpt-5"],
-  ["Azure", "gpt-5-chat"],
-  ["Azure", "gpt-5-codex"],
-  ["Azure", "gpt-5-mini"],
-  ["Azure", "gpt-5-nano"],
-  ["Azure", "gpt-5-pro"],
-  ["Azure", "gpt-5.1"],
-  ["Azure", "gpt-5.1-chat"],
-  ["Azure", "gpt-5.1-codex"],
-  ["Azure", "gpt-5.1-codex-max"],
-  ["Azure", "gpt-5.1-codex-mini"],
-  ["Azure", "gpt-5.2"],
-  ["Azure", "gpt-5.2-chat"],
-  ["Azure", "gpt-5.2-codex"],
-  ["Azure", "gpt-5.3-chat"],
-  ["Azure", "gpt-5.3-codex"],
-  ["Azure", "gpt-5.4"],
-  ["Azure", "gpt-5.4-mini"],
-  ["Azure", "gpt-5.4-nano"],
-  ["Azure", "gpt-5.4-pro"],
-  ["Azure", "gpt-5.5"],
-  ["Azure", "gpt-5.6-luna"],
-  ["Azure", "gpt-5.6-sol"],
-  ["Azure", "gpt-5.6-terra"],
-  ["Azure", "gpt-audio"],
-  ["Azure", "gpt-audio-1.5"],
-  ["Azure", "gpt-audio-mini"],
-  ["Azure", "gpt-chat-latest"],
-  ["Azure", "gpt-image-1"],
-  ["Azure", "gpt-image-1-mini"],
-  ["Azure", "gpt-image-1.5"],
-  ["Azure", "gpt-image-2"],
-  ["Azure", "gpt-realtime"],
-  ["Azure", "gpt-realtime-1.5"],
-  ["Azure", "gpt-realtime-2"],
-  ["Azure", "gpt-realtime-2.1"],
-  ["Azure", "gpt-realtime-2.1-mini"],
-  ["Azure", "gpt-realtime-mini"],
-  ["Azure", "grok-3"],
-  ["Azure", "grok-3-mini"],
-  ["Azure", "grok-4-20-non-reasoning"],
-  ["Azure", "grok-4-20-reasoning"],
-  ["Azure", "grok-4-fast-non-reasoning"],
-  ["Azure", "grok-4-fast-reasoning"],
-  ["Azure", "mistral-document-ai-2505"],
-  ["Azure", "model-router"],
-  ["Azure", "o1"],
-  ["Azure", "o1-pro"],
-  ["Azure", "o3"],
-  ["Azure", "o3-deep-research"],
-  ["Azure", "o3-mini"],
-  ["Azure", "o3-pro"],
-  ["Azure", "o4-mini"],
-  ["Azure", "sora-2"],
-  ["Azure", "text-embedding-3-large"],
-  ["Azure", "text-embedding-3-small"],
-  ["Azure", "text-embedding-ada-002"],
-  ["Azure", "tsuzumi-7b"],
-  ["Azure", "tts"],
-  ["Azure", "tts-hd"],
-  ["Azure", "whisper"],
-  ["Cohere", "c4ai-aya-expanse-8b"],
-  ["Cohere", "c4ai-aya-vision-8b"],
-  ["Cohere", "command"],
-  ["Cohere", "command-light"],
-  ["Cohere", "command-r"],
-  ["Cohere", "command-r-03-2024"],
-  ["Cohere", "command-r-plus"],
-  ["Cohere", "command-r-plus-04-2024"],
-  ["Cohere", "embed-english-light-v2.0"],
-  ["Cohere", "embed-english-v2.0"],
-  ["Cohere", "embed-multilingual-v2.0"],
-  ["Cohere", "rerank-english-v2.0"],
-  ["Cohere", "rerank-multilingual-v2.0"],
-  ["Google Vertex", "claude-3-5-haiku"],
-  ["Google Vertex", "claude-3-5-sonnet"],
-  ["Google Vertex", "claude-3-5-sonnet-v2"],
-  ["Google Vertex", "claude-3-7-sonnet"],
-  ["Google Vertex", "claude-3-haiku"],
-  ["Google Vertex", "claude-3-opus"],
-  ["Google Vertex", "jamba-1.5-large"],
-  ["Google Vertex", "jamba-1.5-mini"],
-  ["Google", "embedding-001"],
-  ["Google", "embedding-2-preview"],
-  ["Google", "embedding-gecko-001"],
-  ["Google", "gemini-1.0-pro"],
-  ["Google", "gemini-1.0-pro-vision"],
-  ["Google", "gemini-1.5-flash"],
-  ["Google", "gemini-1.5-flash-8b"],
-  ["Google", "gemini-1.5-pro"],
-  ["Google", "gemini-2.0-flash"],
-  ["Google", "gemini-2.0-flash-001"],
-  ["Google", "gemini-2.0-flash-exp"],
-  ["Google", "gemini-2.0-flash-exp-image-generation"],
-  ["Google", "gemini-2.0-flash-lite"],
-  ["Google", "gemini-2.0-flash-lite-001"],
-  ["Google", "gemini-2.0-flash-lite-preview"],
-  ["Google", "gemini-2.0-flash-lite-preview-02-05"],
-  ["Google", "gemini-2.0-flash-live-001"],
-  ["Google", "gemini-2.0-flash-preview-image-generation"],
-  ["Google", "gemini-2.0-flash-thinking-exp"],
-  ["Google", "gemini-2.0-flash-thinking-exp-01-21"],
-  ["Google", "gemini-2.0-flash-thinking-exp-1219"],
-  ["Google", "gemini-2.0-pro-exp"],
-  ["Google", "gemini-2.0-pro-exp-02-05"],
-  ["Google", "gemini-2.5-flash"],
-  ["Google", "gemini-2.5-flash-exp-native-audio-thinking-dialog"],
-  ["Google", "gemini-2.5-flash-image"],
-  ["Google", "gemini-2.5-flash-image-preview"],
-  ["Google", "gemini-2.5-flash-lite"],
-  ["Google", "gemini-2.5-flash-lite-preview-06-17"],
-  ["Google", "gemini-2.5-flash-lite-preview-09-2025"],
-  ["Google", "gemini-2.5-flash-preview-04-17"],
-  ["Google", "gemini-2.5-flash-preview-05-20"],
-  ["Google", "gemini-2.5-flash-preview-09-25"],
-  ["Google", "gemini-2.5-flash-preview-native-audio-dialog"],
-  ["Google", "gemini-2.5-pro"],
-  ["Google", "gemini-2.5-pro-exp-03-25"],
-  ["Google", "gemini-2.5-pro-preview-03-25"],
-  ["Google", "gemini-2.5-pro-preview-05-06"],
-  ["Google", "gemini-2.5-pro-preview-06-05"],
-  ["Google", "gemini-3-pro-image-preview"],
-  ["Google", "gemini-3-pro-preview"],
-  ["Google", "gemini-3.1-flash-image-preview"],
-  ["Google", "gemini-3.1-flash-lite"],
-  ["Google", "gemini-3.1-flash-lite-preview"],
-  ["Google", "gemini-embedding-001"],
-  ["Google", "gemini-embedding-exp"],
-  ["Google", "gemini-embedding-exp-03-07"],
-  ["Google", "gemini-live-2.5-flash-preview"],
-  ["Google", "gemini-robotics-er-1.5-preview"],
-  ["Google", "gemini-robotics-er-1.6-preview"],
-  ["Google", "imagen-3.0-generate-002"],
-  ["Google", "imagen-4.0-fast-generate-001"],
-  ["Google", "imagen-4.0-generate-001"],
-  ["Google", "imagen-4.0-generate-preview-06-06"],
-  ["Google", "imagen-4.0-ultra-generate-001"],
-  ["Google", "imagen-4.0-ultra-generate-preview-06-06"],
-  ["Google", "text-embedding-004"],
-  ["Google", "veo-2.0-generate-001"],
-  ["Google", "veo-3.0-fast-generate-001"],
-  ["Google", "veo-3.0-fast-generate-preview"],
-  ["Google", "veo-3.0-generate-001"],
-  ["Google", "veo-3.0-generate-preview"],
-  ["Groq", "deepseek-r1-distill-llama-70b"],
-  ["Groq", "deepseek-r1-distill-llama-70b-specdec"],
-  ["Groq", "deepseek-r1-distill-qwen-32b"],
-  ["Groq", "distil-whisper-large-v3-en"],
-  ["Groq", "gemma-7b-it"],
-  ["Groq", "gemma2-9b-it"],
-  ["Groq", "llama-3.1-70b-specdec"],
-  ["Groq", "llama-3.1-70b-versatile"],
-  ["Groq", "llama-3.1-8b-instant"],
-  ["Groq", "llama-3.2-11b-text-preview"],
-  ["Groq", "llama-3.2-11b-vision-preview"],
-  ["Groq", "llama-3.2-1b-preview"],
-  ["Groq", "llama-3.2-3b-preview"],
-  ["Groq", "llama-3.2-90b-text-preview"],
-  ["Groq", "llama-3.2-90b-vision-preview"],
-  ["Groq", "llama-3.3-70b-specdec"],
-  ["Groq", "llama-3.3-70b-versatile"],
-  ["Groq", "llama-guard-3-8b"],
-  ["Groq", "llama3-70b-8192"],
-  ["Groq", "llama3-8b-8192"],
-  ["Groq", "llama3-groq-70b-8192-tool-use-preview"],
-  ["Groq", "llama3-groq-8b-8192-tool-use-preview"],
-  ["Groq", "llava-v1.5-7b-4096-preview"],
-  ["Groq", "meta-llama/llama-4-maverick-17b-128e-instruct"],
-  ["Groq", "meta-llama/llama-4-scout-17b-16e-instruct"],
-  ["Groq", "meta-llama/llama-guard-4-12b"],
-  ["Groq", "mistral-saba-24b"],
-  ["Groq", "mixtral-8x7b-32768"],
-  ["Groq", "moonshotai/kimi-k2-instruct"],
-  ["Groq", "moonshotai/kimi-k2-instruct-0905"],
-  ["Groq", "playai-tts"],
-  ["Groq", "playai-tts-arabic"],
-  ["Groq", "qwen-2.5-32b"],
-  ["Groq", "qwen-2.5-coder-32b"],
-  ["Groq", "qwen-qwq-32b"],
-  ["Groq", "qwen/qwen3-32b"],
-  ["OpenAI", "Agent Builder"],
-  ["OpenAI", "Evals platform"],
-  ["OpenAI", "Reusable prompts"],
-  ["OpenAI", "ada"],
-  ["OpenAI", "babbage"],
-  ["OpenAI", "babbage-002"],
-  ["OpenAI", "chatgpt-4o-latest"],
-  ["OpenAI", "chatgpt-image-latest"],
-  ["OpenAI", "code-cushman-001"],
-  ["OpenAI", "code-cushman-002"],
-  ["OpenAI", "code-davinci-001"],
-  ["OpenAI", "code-davinci-002"],
-  ["OpenAI", "code-davinci-edit-001"],
-  ["OpenAI", "code-search-ada-code-001"],
-  ["OpenAI", "code-search-ada-text-001"],
-  ["OpenAI", "code-search-babbage-code-001"],
-  ["OpenAI", "code-search-babbage-text-001"],
-  ["OpenAI", "codex-mini-latest"],
-  ["OpenAI", "computer-use-preview"],
-  ["OpenAI", "computer-use-preview-2025-03-11"],
-  ["OpenAI", "curie"],
-  ["OpenAI", "dall-e-2"],
-  ["OpenAI", "dall-e-3"],
-  ["OpenAI", "davinci"],
-  ["OpenAI", "davinci-002"],
-  ["OpenAI", "ft-babbage-002"],
-  ["OpenAI", "ft-davinci-002"],
-  ["OpenAI", "ft-gpt-3.5-turbo"],
-  ["OpenAI", "ft-gpt-4"],
-  ["OpenAI", "ft-gpt-4.1-nano-2025-04-14"],
-  ["OpenAI", "ft-o4-mini-2025-04-16"],
-  ["OpenAI", "gpt-3.5-turbo"],
-  ["OpenAI", "gpt-3.5-turbo-0125"],
-  ["OpenAI", "gpt-3.5-turbo-0301"],
-  ["OpenAI", "gpt-3.5-turbo-0613"],
-  ["OpenAI", "gpt-3.5-turbo-1106"],
-  ["OpenAI", "gpt-3.5-turbo-16k-0613"],
-  ["OpenAI", "gpt-3.5-turbo-completions"],
-  ["OpenAI", "gpt-3.5-turbo-instruct"],
-  ["OpenAI", "gpt-4"],
-  ["OpenAI", "gpt-4-0125-preview"],
-  ["OpenAI", "gpt-4-0314"],
-  ["OpenAI", "gpt-4-0613"],
-  ["OpenAI", "gpt-4-0613-completions"],
-  ["OpenAI", "gpt-4-1106-preview"],
-  ["OpenAI", "gpt-4-1106-vision-preview"],
-  ["OpenAI", "gpt-4-32k"],
-  ["OpenAI", "gpt-4-32k-0314"],
-  ["OpenAI", "gpt-4-32k-0613"],
-  ["OpenAI", "gpt-4-completions"],
-  ["OpenAI", "gpt-4-turbo"],
-  ["OpenAI", "gpt-4-turbo-2024-04-09"],
-  ["OpenAI", "gpt-4-turbo-completions"],
-  ["OpenAI", "gpt-4-turbo-preview"],
-  ["OpenAI", "gpt-4-turbo-preview-completions"],
-  ["OpenAI", "gpt-4-vision-preview"],
-  ["OpenAI", "gpt-4.1-nano"],
-  ["OpenAI", "gpt-4.1-nano-2025-04-14"],
-  ["OpenAI", "gpt-4.5-preview"],
-  ["OpenAI", "gpt-4o-2024-05-13"],
-  ["OpenAI", "gpt-4o-audio"],
-  ["OpenAI", "gpt-4o-audio-preview"],
-  ["OpenAI", "gpt-4o-audio-preview-2024-10-01"],
-  ["OpenAI", "gpt-4o-mini-audio"],
-  ["OpenAI", "gpt-4o-mini-audio-preview"],
-  ["OpenAI", "gpt-4o-mini-realtime"],
-  ["OpenAI", "gpt-4o-mini-realtime-preview"],
-  ["OpenAI", "gpt-4o-mini-search-preview-2025-03-11"],
-  ["OpenAI", "gpt-4o-mini-transcribe-2025-03-20"],
-  ["OpenAI", "gpt-4o-mini-tts-2025-03-20"],
-  ["OpenAI", "gpt-4o-realtime"],
-  ["OpenAI", "gpt-4o-realtime-preview"],
-  ["OpenAI", "gpt-4o-realtime-preview-2024-10-01"],
-  ["OpenAI", "gpt-4o-realtime-preview-2024-12-17"],
-  ["OpenAI", "gpt-4o-realtime-preview-2025-06-03"],
-  ["OpenAI", "gpt-4o-search-preview-2025-03-11"],
-  ["OpenAI", "gpt-5-2025-08-07"],
-  ["OpenAI", "gpt-5-chat-latest"],
-  ["OpenAI", "gpt-5-codex"],
-  ["OpenAI", "gpt-5-mini-2025-08-07"],
-  ["OpenAI", "gpt-5-nano-2025-08-07"],
-  ["OpenAI", "gpt-5-pro-2025-10-06"],
-  ["OpenAI", "gpt-5.1-chat-latest"],
-  ["OpenAI", "gpt-5.1-codex"],
-  ["OpenAI", "gpt-5.1-codex-max"],
-  ["OpenAI", "gpt-5.1-codex-mini"],
-  ["OpenAI", "gpt-5.2-chat-latest"],
-  ["OpenAI", "gpt-5.2-codex"],
-  ["OpenAI", "gpt-5.3-chat-latest"],
-  ["OpenAI", "gpt-audio"],
-  ["OpenAI", "gpt-audio-mini"],
-  ["OpenAI", "gpt-audio-mini-2025-10-06"],
-  ["OpenAI", "gpt-image-1"],
-  ["OpenAI", "gpt-image-1-mini"],
-  ["OpenAI", "gpt-image-1.5"],
-  ["OpenAI", "gpt-realtime"],
-  ["OpenAI", "gpt-realtime-mini"],
-  ["OpenAI", "gpt-realtime-mini-2025-10-06"],
-  ["OpenAI", "o1"],
-  ["OpenAI", "o1-2024-12-17"],
-  ["OpenAI", "o1-mini"],
-  ["OpenAI", "o1-preview"],
-  ["OpenAI", "o1-pro"],
-  ["OpenAI", "o1-pro-2025-03-19"],
-  ["OpenAI", "o3-2025-04-16"],
-  ["OpenAI", "o3-deep-research"],
-  ["OpenAI", "o3-deep-research-2025-06-26"],
-  ["OpenAI", "o3-mini"],
-  ["OpenAI", "o3-mini-2025-01-31"],
-  ["OpenAI", "o3-pro-2025-06-10"],
-  ["OpenAI", "o4-mini"],
-  ["OpenAI", "o4-mini-2025-04-16"],
-  ["OpenAI", "o4-mini-deep-research"],
-  ["OpenAI", "o4-mini-deep-research-2025-06-26"],
-  ["OpenAI", "sora-2"],
-  ["OpenAI", "sora-2-2025-10-06"],
-  ["OpenAI", "sora-2-2025-12-08"],
-  ["OpenAI", "sora-2-pro"],
-  ["OpenAI", "sora-2-pro-2025-10-06"],
-  ["OpenAI", "text-ada-001"],
-  ["OpenAI", "text-babbage-001"],
-  ["OpenAI", "text-curie-001"],
-  ["OpenAI", "text-davinci-001"],
-  ["OpenAI", "text-davinci-002"],
-  ["OpenAI", "text-davinci-003"],
-  ["OpenAI", "text-davinci-edit-001"],
-  ["OpenAI", "text-moderation-007"],
-  ["OpenAI", "text-moderation-latest"],
-  ["OpenAI", "text-moderation-stable"],
-  ["OpenAI", "text-search-ada-doc-001"],
-  ["OpenAI", "text-search-ada-query-001"],
-  ["OpenAI", "text-search-babbage-doc-001"],
-  ["OpenAI", "text-search-babbage-query-001"],
-  ["OpenAI", "text-search-curie-doc-001"],
-  ["OpenAI", "text-search-curie-query-001"],
-  ["OpenAI", "text-search-davinci-doc-001"],
-  ["OpenAI", "text-search-davinci-query-001"],
-  ["OpenAI", "text-similarity-ada-001"],
-  ["OpenAI", "text-similarity-babbage-001"],
-  ["OpenAI", "text-similarity-curie-001"],
-  ["OpenAI", "text-similarity-davinci-001"],
-  ["xAI", "grok-4"],
-  ["xAI", "grok-4-1-fast"],
-  ["xAI", "grok-4-fast"],
-  ["xAI", "grok-code-fast-1"],
-  ["xAI", "grok-imagine-image-pro"]
-]);
-
-// src/lifecycle/legacy-feed-adapter.ts
 var MAX_LEGACY_RECORDS = 1e5;
-var MAX_PAIR_DIAGNOSTIC_PREVIEWS = 50;
+var MAX_PROVIDER_DIAGNOSTIC_PREVIEWS = 50;
 var MAX_DEPRECATION_CONTEXT_CODE_POINTS = 16384;
 var MAX_CONTENT_HASH_CODE_POINTS = 256;
 var EXPLICIT_OFFSET_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.(\d+))?(Z|([+-])([01]\d|2[0-3]):([0-5]\d))$/;
 var MAX_FUTURE_SCRAPED_AT_SKEW_MS = 24 * 60 * 60 * 1000;
-var SHA256_PATTERN2 = /^[a-f0-9]{64}$/;
 var NON_MODEL_RECORD_KINDS2 = new Set([
   "api",
   "sdk",
@@ -13817,11 +13401,8 @@ var LEGACY_FIELDS = new Set([
   "last_observed"
 ]);
 var DEFAULT_LEGACY_ADAPTER_MANIFEST = Object.freeze({
-  id: "deprecations-info-v1-reviewed-adapter",
-  version: "2026-08-02.1+6317cee249b2",
-  reviewedPairs: REVIEWED_LEGACY_SOURCE_PAIRS,
-  reviewedPairCount: 416,
-  reviewedPairsSha256: "6317cee249b2bf90918c816c842ecf7c1212eaddf9f05842b11babb2d60ac695",
+  id: "deprecations-info-v1-adapter",
+  version: "2026-08-04.1",
   nonModels: Object.freeze([
     Object.freeze({ provider: "OpenAI", resourceId: "Reusable prompts", recordKind: "prompt" }),
     Object.freeze({ provider: "OpenAI", resourceId: "Evals platform", recordKind: "product" }),
@@ -13852,9 +13433,6 @@ function compareText6(left, right) {
 }
 function pairIdentity(provider, identifier) {
   return JSON.stringify([provider, identifier]);
-}
-function legacyPairSetSha256(pairs) {
-  return sha2562(JSON.stringify([...pairs].sort((left, right) => compareText6(JSON.stringify(left), JSON.stringify(right)))));
 }
 function object3(value, label) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -13929,38 +13507,14 @@ function parseExplicitOffsetTimestamp(value, label) {
 function validateManifestClassifications(manifest) {
   text2(manifest.id, "Legacy adapter manifest id", V3_FEED_LIMITS.maxAdapterIdCodePoints);
   text2(manifest.version, "Legacy adapter manifest version", V3_FEED_LIMITS.maxAdapterVersionCodePoints);
-  if (!Number.isSafeInteger(manifest.reviewedPairCount) || manifest.reviewedPairCount < 1 || manifest.reviewedPairCount > MAX_LEGACY_RECORDS) {
-    throw new Error(`Legacy adapter manifest reviewedPairCount must be an integer from 1 to ${MAX_LEGACY_RECORDS}.`);
-  }
-  if (!SHA256_PATTERN2.test(manifest.reviewedPairsSha256)) {
-    throw new Error("Legacy adapter manifest reviewedPairsSha256 must be lower-case SHA-256 hex.");
-  }
   if (manifest.dateCorrections?.announcementAfterLifecycle !== "reject" && manifest.dateCorrections?.announcementAfterLifecycle !== "omit-source-observation-date") {
     throw new Error("Legacy adapter manifest has an invalid announcement-date correction policy.");
   }
   if (manifest.dateCorrections?.deprecationAfterShutdown !== "reject" && manifest.dateCorrections?.deprecationAfterShutdown !== "omit-inverted-source-date") {
     throw new Error("Legacy adapter manifest has an invalid deprecation-date correction policy.");
   }
-  if (!Array.isArray(manifest.reviewedPairs) || !Array.isArray(manifest.nonModels) || !Array.isArray(manifest.lexicalIneligiblePairs)) {
+  if (!Array.isArray(manifest.nonModels) || !Array.isArray(manifest.lexicalIneligiblePairs)) {
     throw new Error("Legacy adapter manifest classifications must be arrays.");
-  }
-  const reviewedPairs = manifest.reviewedPairs.map((rawPair, index) => {
-    if (!Array.isArray(rawPair) || rawPair.length !== 2) {
-      throw new Error(`Legacy adapter manifest reviewedPairs[${index}] must be a provider/identifier pair.`);
-    }
-    const provider = text2(rawPair[0], `Legacy adapter manifest reviewedPairs[${index}][0]`, 100);
-    if (platformForSourceProvider(provider) === null) {
-      throw new Error(`Legacy adapter manifest reviewedPairs[${index}] uses an unregistered source provider.`);
-    }
-    const identifier = text2(rawPair[1], `Legacy adapter manifest reviewedPairs[${index}][1]`, V3_FEED_LIMITS.maxIdentifierCodePoints);
-    return [provider, identifier];
-  });
-  const reviewedPairIdentities = new Set(reviewedPairs.map(([provider, identifier]) => pairIdentity(provider, identifier)));
-  if (reviewedPairIdentities.size !== reviewedPairs.length) {
-    throw new Error("Legacy adapter manifest reviewedPairs contains duplicates.");
-  }
-  if (reviewedPairs.length !== manifest.reviewedPairCount || legacyPairSetSha256(reviewedPairs) !== manifest.reviewedPairsSha256) {
-    throw new Error("Legacy adapter manifest reviewedPairs does not match its pinned count and digest.");
   }
   const nonModels = new Map;
   for (const [index, rawEntry] of manifest.nonModels.entries()) {
@@ -13972,9 +13526,6 @@ function validateManifestClassifications(manifest) {
       throw new Error(`Legacy adapter manifest nonModels[${index}].recordKind must be a supported non-model kind.`);
     }
     const identity = pairIdentity(provider, resourceId);
-    if (!reviewedPairIdentities.has(identity)) {
-      throw new Error(`Legacy adapter manifest classifies absent source pair ${provider}/${resourceId}.`);
-    }
     if (nonModels.has(identity)) {
       throw new Error(`Legacy adapter manifest duplicates non-model source pair ${provider}/${resourceId}.`);
     }
@@ -13988,9 +13539,6 @@ function validateManifestClassifications(manifest) {
     const provider = text2(rawPair[0], `Legacy adapter manifest lexicalIneligiblePairs[${index}][0]`, 100);
     const modelId2 = text2(rawPair[1], `Legacy adapter manifest lexicalIneligiblePairs[${index}][1]`, V3_FEED_LIMITS.maxIdentifierCodePoints);
     const identity = pairIdentity(provider, modelId2);
-    if (!reviewedPairIdentities.has(identity)) {
-      throw new Error(`Legacy adapter manifest marks absent source pair ${provider}/${modelId2} as lexical-ineligible.`);
-    }
     if (nonModels.has(identity)) {
       throw new Error(`Legacy adapter manifest redundantly marks non-model source pair ${provider}/${modelId2} as lexical-ineligible.`);
     }
@@ -13999,7 +13547,7 @@ function validateManifestClassifications(manifest) {
     }
     lexicalIneligible.add(identity);
   }
-  return { reviewedPairs, reviewedPairIdentities, nonModels, lexicalIneligible };
+  return { nonModels, lexicalIneligible };
 }
 function parseLegacyRecord(value, index, now) {
   const label = `Legacy feed record ${index}`;
@@ -14009,9 +13557,6 @@ function parseLegacyRecord(value, index, now) {
     throw new Error(`${label} has unreviewed field(s): ${unknown.sort().join(", ")}.`);
   }
   const provider = text2(source.provider, `${label}.provider`, 100);
-  if (platformForSourceProvider(provider) === null) {
-    throw new Error(`${label}.provider is not present in the reviewed platform mapping.`);
-  }
   const modelId2 = text2(source.model_id, `${label}.model_id`, 2048);
   const shutdownDate = optionalDate(source.shutdown_date, `${label}.shutdown_date`);
   const deprecationDate = optionalDate(source.deprecation_date, `${label}.deprecation_date`);
@@ -14109,39 +13654,39 @@ function adaptDecodedLegacyFeed(payload, sourceBytes, manifest = DEFAULT_LEGACY_
     throw new Error(`Legacy feed must be a non-empty array of at most ${MAX_LEGACY_RECORDS} records.`);
   }
   const records = payload.map((value, index) => parseLegacyRecord(value, index, now));
-  const pairs = records.map((record) => [record.provider, record.modelId]);
-  const receivedPairIdentities = new Set(pairs.map(([provider, identifier]) => pairIdentity(provider, identifier)));
+  const receivedPairIdentities = new Set(records.map((record) => pairIdentity(record.provider, record.modelId)));
   if (receivedPairIdentities.size !== records.length) {
     throw new Error("Legacy feed contains duplicate source provider/identifier pairs.");
   }
   const classifications = validateManifestClassifications(manifest);
-  const addedPairs = pairs.filter(([provider, identifier]) => !classifications.reviewedPairIdentities.has(pairIdentity(provider, identifier))).sort((left, right) => compareText6(pairIdentity(...left), pairIdentity(...right)));
-  const removedPairs = classifications.reviewedPairs.filter(([provider, identifier]) => !receivedPairIdentities.has(pairIdentity(provider, identifier))).sort((left, right) => compareText6(pairIdentity(...left), pairIdentity(...right)));
-  const diagnostics = addedPairs.length === 0 && removedPairs.length === 0 ? [] : [
+  const resolved = [];
+  const unresolvedProviders = new Set;
+  for (const record of records) {
+    const servingPlatform = resolveSourcePlatformSlug(record.provider);
+    if (servingPlatform === null) {
+      unresolvedProviders.add(record.provider);
+      continue;
+    }
+    resolved.push({ record, servingPlatform });
+  }
+  const skippedRecordCount = records.length - resolved.length;
+  const diagnostics = skippedRecordCount === 0 ? [] : [
     {
-      kind: "feed-pair-set-change",
-      addedPairCount: addedPairs.length,
-      removedPairCount: removedPairs.length,
-      addedPairs: addedPairs.slice(0, MAX_PAIR_DIAGNOSTIC_PREVIEWS),
-      removedPairs: removedPairs.slice(0, MAX_PAIR_DIAGNOSTIC_PREVIEWS)
+      kind: "feed-unresolved-provider",
+      skippedRecordCount,
+      providerCount: unresolvedProviders.size,
+      providers: [...unresolvedProviders].sort(compareText6).slice(0, MAX_PROVIDER_DIAGNOSTIC_PREVIEWS)
     }
   ];
-  for (const record of records)
-    normalizeDates(record, manifest);
-  const reviewedRecords = records.filter((record) => classifications.reviewedPairIdentities.has(pairIdentity(record.provider, record.modelId)));
-  if (reviewedRecords.length === 0) {
-    throw new Error("Legacy feed contains no reviewed records after pair-set quarantine.");
+  if (resolved.length === 0) {
+    throw new Error("Legacy feed contains no records with a resolvable serving platform.");
   }
-  const generatedAt = reviewedRecords.map((record) => record.scrapedAt).filter((value) => value !== undefined).sort(compareText6).at(-1);
+  const generatedAt = resolved.map(({ record }) => record.scrapedAt).filter((value) => value !== undefined).sort(compareText6).at(-1);
   if (generatedAt === undefined) {
-    throw new Error("Legacy feed has no reviewed scraped_at timestamp for generatedAt.");
+    throw new Error("Legacy feed has no scraped_at timestamp for generatedAt.");
   }
   const generatedDate = generatedAt.slice(0, 10);
-  const adaptedRecords = reviewedRecords.map((record) => {
-    const servingPlatform = platformForSourceProvider(record.provider);
-    if (servingPlatform === null) {
-      throw new Error(`Unmapped source provider ${record.provider}.`);
-    }
+  const adaptedRecords = resolved.map(({ record, servingPlatform }) => {
     const common = {
       recordId: legacyRecordId(record),
       servingPlatform,
@@ -14187,7 +13732,7 @@ function adaptDecodedLegacyFeed(payload, sourceBytes, manifest = DEFAULT_LEGACY_
     diagnostics
   };
 }
-function loadTypedOrReviewedLegacyFeed(sourceBytes, now = Date.now()) {
+function loadTypedOrAdaptedLegacyFeed(sourceBytes, now = Date.now()) {
   if (sourceBytes.byteLength > V3_FEED_LIMITS.maxDocumentBytes) {
     throw new Error(`Lifecycle feed document exceeds ${V3_FEED_LIMITS.maxDocumentBytes} bytes.`);
   }
@@ -14205,7 +13750,7 @@ function loadTypedOrReviewedLegacyFeed(sourceBytes, now = Date.now()) {
 var DEFAULT_V3_FEED_URL = "https://deprecations.info/v1/deprecations.json";
 async function loadLifecycleFeed(dependencies = {}) {
   const bytes = dependencies.bytes ?? await fetchBoundedDocumentBytes(DEFAULT_V3_FEED_URL, dependencies.requestPolicy ?? defaultRequestPolicy(dependencies.fetch ?? fetch), V3_FEED_LIMITS.maxDocumentBytes);
-  return loadTypedOrReviewedLegacyFeed(bytes);
+  return loadTypedOrAdaptedLegacyFeed(bytes);
 }
 
 // src/action/input.ts
@@ -15361,19 +14906,17 @@ function feedDiagnostics(feed, freshness) {
         severity: "notice"
       };
     }
-    const renderPairs = (pairs) => pairs.slice(0, 10).map(([provider, identifier]) => `${provider}/${identifier}`).join(", ");
-    const added = renderPairs(diagnostic.addedPairs);
-    const removed = renderPairs(diagnostic.removedPairs);
+    const providers = diagnostic.providers.slice(0, 10).join(", ");
     return {
       code: diagnostic.kind,
-      message: `The untyped lifecycle-feed pair set changed: ${diagnostic.addedPairCount} unreviewed addition(s) were quarantined${added === "" ? "" : ` (${added})`}; ${diagnostic.removedPairCount} reviewed pair(s) were absent${removed === "" ? "" : ` (${removed})`}. No unreviewed row was normalized into lifecycle authority.`,
+      message: `The untyped lifecycle feed carried ${diagnostic.skippedRecordCount} record(s) from ${diagnostic.providerCount} provider label(s) that yield no valid serving-platform slug${providers === "" ? "" : ` (${providers})`}, so those records were skipped. A provider that is merely unregistered is still carried as nonblocking evidence; only an unusable label costs coverage.`,
       severity: "partial"
     };
   });
   return [...upstream, ...staleness];
 }
 function applyFeedCoverage(detection, feed) {
-  if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change")) {
+  if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-unresolved-provider")) {
     return detection;
   }
   return detection.scanStatus === "partial" ? detection : { ...detection, scanStatus: "partial" };

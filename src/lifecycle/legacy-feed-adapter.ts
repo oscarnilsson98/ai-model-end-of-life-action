@@ -1,22 +1,21 @@
 import { createHash } from "node:crypto";
 import { decodeJsonDocument } from "../shared/document.ts";
-import { REVIEWED_LEGACY_SOURCE_PAIRS } from "./legacy-feed-pairs.ts";
 import {
   V3_FEED_LIMITS,
   isDateOnly,
   isRfc3339UtcInstant,
   loadAdaptedV3Feed,
   loadV3FeedJson,
-  platformForSourceProvider,
+  resolveSourcePlatformSlug,
   type FeedEnvelope,
-  type FeedPairSetDiagnostic,
   type FeedRecord,
+  type FeedUnresolvedProviderDiagnostic,
   type LoadedV3Feed,
   type NonModelRecordKind,
 } from "./feed.ts";
 
 const MAX_LEGACY_RECORDS = 100_000;
-const MAX_PAIR_DIAGNOSTIC_PREVIEWS = 50;
+const MAX_PROVIDER_DIAGNOSTIC_PREVIEWS = 50;
 const MAX_DEPRECATION_CONTEXT_CODE_POINTS = 16_384;
 const MAX_CONTENT_HASH_CODE_POINTS = 256;
 /** RFC 3339-style instant that carries a mandatory explicit "Z" or numeric UTC offset. */
@@ -24,7 +23,6 @@ const EXPLICIT_OFFSET_TIMESTAMP_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.(\d+))?(Z|([+-])([01]\d|2[0-3]):([0-5]\d))$/;
 /** Reject scraped_at values further ahead of the runtime clock than this skew allowance. */
 const MAX_FUTURE_SCRAPED_AT_SKEW_MS = 24 * 60 * 60 * 1000;
-const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const NON_MODEL_RECORD_KINDS: ReadonlySet<NonModelRecordKind> = new Set([
   "api",
   "sdk",
@@ -59,9 +57,6 @@ export type LegacyNonModelClassification = {
 export type LegacyFeedAdapterManifest = {
   id: string;
   version: string;
-  reviewedPairs: readonly (readonly [provider: string, identifier: string])[];
-  reviewedPairCount: number;
-  reviewedPairsSha256: string;
   nonModels: readonly LegacyNonModelClassification[];
   lexicalIneligiblePairs: readonly (readonly [provider: string, modelId: string])[];
   dateCorrections: {
@@ -71,16 +66,19 @@ export type LegacyFeedAdapterManifest = {
 };
 
 /**
- * Reviewed against the complete deprecations.info source-pair set observed on 2026-07-31.
- * The exact registry lets the adapter distinguish additions from removals. Either
- * change is quarantined as partial coverage; unreviewed rows never become records.
+ * Every well-formed upstream row becomes a record. The adapter holds no allowlist of
+ * reviewed source pairs: gating lifecycle authority on a hand-maintained registry made
+ * newly published deprecations invisible until a maintainer re-pinned and released,
+ * which is the failure this source exists to prevent.
+ *
+ * What remains here is classification, not permission. `nonModels` keeps the source's
+ * few non-model rows from being reported as models, and `lexicalIneligiblePairs` keeps
+ * short ambiguous identifiers from substring-matching unrelated source text. A stale
+ * entry in either list is inert, never an error, so neither can stall the feed.
  */
 export const DEFAULT_LEGACY_ADAPTER_MANIFEST: LegacyFeedAdapterManifest = Object.freeze({
-  id: "deprecations-info-v1-reviewed-adapter",
-  version: "2026-08-02.1+6317cee249b2",
-  reviewedPairs: REVIEWED_LEGACY_SOURCE_PAIRS,
-  reviewedPairCount: 416,
-  reviewedPairsSha256: "6317cee249b2bf90918c816c842ecf7c1212eaddf9f05842b11babb2d60ac695",
+  id: "deprecations-info-v1-adapter",
+  version: "2026-08-04.1",
   nonModels: Object.freeze([
     Object.freeze({ provider: "OpenAI", resourceId: "Reusable prompts", recordKind: "prompt" }),
     Object.freeze({ provider: "OpenAI", resourceId: "Evals platform", recordKind: "product" }),
@@ -127,18 +125,6 @@ function compareText(left: string, right: string): number {
 
 function pairIdentity(provider: string, identifier: string): string {
   return JSON.stringify([provider, identifier]);
-}
-
-export function legacyPairSetSha256(
-  pairs: readonly (readonly [provider: string, identifier: string])[],
-): string {
-  return sha256(
-    JSON.stringify(
-      [...pairs].sort((left, right) =>
-        compareText(JSON.stringify(left), JSON.stringify(right)),
-      ),
-    ),
-  );
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -234,8 +220,6 @@ function parseExplicitOffsetTimestamp(value: unknown, label: string): {
 function validateManifestClassifications(
   manifest: LegacyFeedAdapterManifest,
 ): {
-  reviewedPairs: readonly (readonly [provider: string, identifier: string])[];
-  reviewedPairIdentities: ReadonlySet<string>;
   nonModels: ReadonlyMap<string, LegacyNonModelClassification>;
   lexicalIneligible: ReadonlySet<string>;
 } {
@@ -245,18 +229,6 @@ function validateManifestClassifications(
     "Legacy adapter manifest version",
     V3_FEED_LIMITS.maxAdapterVersionCodePoints,
   );
-  if (
-    !Number.isSafeInteger(manifest.reviewedPairCount) ||
-    manifest.reviewedPairCount < 1 ||
-    manifest.reviewedPairCount > MAX_LEGACY_RECORDS
-  ) {
-    throw new Error(
-      `Legacy adapter manifest reviewedPairCount must be an integer from 1 to ${MAX_LEGACY_RECORDS}.`,
-    );
-  }
-  if (!SHA256_PATTERN.test(manifest.reviewedPairsSha256)) {
-    throw new Error("Legacy adapter manifest reviewedPairsSha256 must be lower-case SHA-256 hex.");
-  }
   if (
     manifest.dateCorrections?.announcementAfterLifecycle !== "reject" &&
     manifest.dateCorrections?.announcementAfterLifecycle !== "omit-source-observation-date"
@@ -269,50 +241,8 @@ function validateManifestClassifications(
   ) {
     throw new Error("Legacy adapter manifest has an invalid deprecation-date correction policy.");
   }
-  if (
-    !Array.isArray(manifest.reviewedPairs) ||
-    !Array.isArray(manifest.nonModels) ||
-    !Array.isArray(manifest.lexicalIneligiblePairs)
-  ) {
+  if (!Array.isArray(manifest.nonModels) || !Array.isArray(manifest.lexicalIneligiblePairs)) {
     throw new Error("Legacy adapter manifest classifications must be arrays.");
-  }
-
-  const reviewedPairs = manifest.reviewedPairs.map((rawPair, index) => {
-    if (!Array.isArray(rawPair) || rawPair.length !== 2) {
-      throw new Error(
-        `Legacy adapter manifest reviewedPairs[${index}] must be a provider/identifier pair.`,
-      );
-    }
-    const provider = text(
-      rawPair[0],
-      `Legacy adapter manifest reviewedPairs[${index}][0]`,
-      100,
-    );
-    if (platformForSourceProvider(provider) === null) {
-      throw new Error(
-        `Legacy adapter manifest reviewedPairs[${index}] uses an unregistered source provider.`,
-      );
-    }
-    const identifier = text(
-      rawPair[1],
-      `Legacy adapter manifest reviewedPairs[${index}][1]`,
-      V3_FEED_LIMITS.maxIdentifierCodePoints,
-    );
-    return [provider, identifier] as const;
-  });
-  const reviewedPairIdentities = new Set(
-    reviewedPairs.map(([provider, identifier]) => pairIdentity(provider, identifier)),
-  );
-  if (reviewedPairIdentities.size !== reviewedPairs.length) {
-    throw new Error("Legacy adapter manifest reviewedPairs contains duplicates.");
-  }
-  if (
-    reviewedPairs.length !== manifest.reviewedPairCount ||
-    legacyPairSetSha256(reviewedPairs) !== manifest.reviewedPairsSha256
-  ) {
-    throw new Error(
-      "Legacy adapter manifest reviewedPairs does not match its pinned count and digest.",
-    );
   }
 
   const nonModels = new Map<string, LegacyNonModelClassification>();
@@ -334,12 +264,9 @@ function validateManifestClassifications(
         `Legacy adapter manifest nonModels[${index}].recordKind must be a supported non-model kind.`,
       );
     }
+    // A classification for a pair the source no longer publishes is inert, not invalid:
+    // the source drops rows freely and that must never stall the feed.
     const identity = pairIdentity(provider, resourceId);
-    if (!reviewedPairIdentities.has(identity)) {
-      throw new Error(
-        `Legacy adapter manifest classifies absent source pair ${provider}/${resourceId}.`,
-      );
-    }
     if (nonModels.has(identity)) {
       throw new Error(
         `Legacy adapter manifest duplicates non-model source pair ${provider}/${resourceId}.`,
@@ -366,11 +293,6 @@ function validateManifestClassifications(
       V3_FEED_LIMITS.maxIdentifierCodePoints,
     );
     const identity = pairIdentity(provider, modelId);
-    if (!reviewedPairIdentities.has(identity)) {
-      throw new Error(
-        `Legacy adapter manifest marks absent source pair ${provider}/${modelId} as lexical-ineligible.`,
-      );
-    }
     if (nonModels.has(identity)) {
       throw new Error(
         `Legacy adapter manifest redundantly marks non-model source pair ${provider}/${modelId} as lexical-ineligible.`,
@@ -384,7 +306,7 @@ function validateManifestClassifications(
     lexicalIneligible.add(identity);
   }
 
-  return { reviewedPairs, reviewedPairIdentities, nonModels, lexicalIneligible };
+  return { nonModels, lexicalIneligible };
 }
 
 function parseLegacyRecord(value: unknown, index: number, now: number): LegacyRecord {
@@ -394,10 +316,10 @@ function parseLegacyRecord(value: unknown, index: number, now: number): LegacyRe
   if (unknown.length > 0) {
     throw new Error(`${label} has unreviewed field(s): ${unknown.sort().join(", ")}.`);
   }
+  // A provider absent from the canonical mapping is not an error. Slug resolution happens
+  // in adaptDecodedLegacyFeed so an added provider degrades to nonblocking evidence
+  // instead of failing the whole document.
   const provider = text(source.provider, `${label}.provider`, 100);
-  if (platformForSourceProvider(provider) === null) {
-    throw new Error(`${label}.provider is not present in the reviewed platform mapping.`);
-  }
   const modelId = text(source.model_id, `${label}.model_id`, 2_048);
   const shutdownDate = optionalDate(source.shutdown_date, `${label}.shutdown_date`);
   const deprecationDate = optionalDate(source.deprecation_date, `${label}.deprecation_date`);
@@ -532,69 +454,59 @@ function adaptDecodedLegacyFeed(
   sourceBytes: Uint8Array,
   manifest: LegacyFeedAdapterManifest = DEFAULT_LEGACY_ADAPTER_MANIFEST,
   now: number = Date.now(),
-): { envelope: FeedEnvelope; diagnostics: readonly FeedPairSetDiagnostic[] } {
+): { envelope: FeedEnvelope; diagnostics: readonly FeedUnresolvedProviderDiagnostic[] } {
   if (!Number.isFinite(now)) throw new Error("Legacy feed evaluation time must be finite.");
   if (!Array.isArray(payload) || payload.length === 0 || payload.length > MAX_LEGACY_RECORDS) {
     throw new Error(`Legacy feed must be a non-empty array of at most ${MAX_LEGACY_RECORDS} records.`);
   }
   const records = payload.map((value, index) => parseLegacyRecord(value, index, now));
-  const pairs = records.map((record) => [record.provider, record.modelId] as const);
   const receivedPairIdentities = new Set(
-    pairs.map(([provider, identifier]) => pairIdentity(provider, identifier)),
+    records.map((record) => pairIdentity(record.provider, record.modelId)),
   );
   if (receivedPairIdentities.size !== records.length) {
     throw new Error("Legacy feed contains duplicate source provider/identifier pairs.");
   }
   const classifications = validateManifestClassifications(manifest);
-  const addedPairs = pairs
-    .filter(
-      ([provider, identifier]) =>
-        !classifications.reviewedPairIdentities.has(pairIdentity(provider, identifier)),
-    )
-    .sort((left, right) => compareText(pairIdentity(...left), pairIdentity(...right)));
-  const removedPairs = classifications.reviewedPairs
-    .filter(
-      ([provider, identifier]) =>
-        !receivedPairIdentities.has(pairIdentity(provider, identifier)),
-    )
-    .sort((left, right) => compareText(pairIdentity(...left), pairIdentity(...right)));
-  const diagnostics: FeedPairSetDiagnostic[] =
-    addedPairs.length === 0 && removedPairs.length === 0
+
+  // Every row whose provider yields a slug is carried. A canonical provider keeps
+  // blocking authority; a derived one is indexed as unsupported, nonblocking evidence.
+  const resolved: { record: LegacyRecord; servingPlatform: string }[] = [];
+  const unresolvedProviders = new Set<string>();
+  for (const record of records) {
+    const servingPlatform = resolveSourcePlatformSlug(record.provider);
+    if (servingPlatform === null) {
+      unresolvedProviders.add(record.provider);
+      continue;
+    }
+    resolved.push({ record, servingPlatform });
+  }
+  const skippedRecordCount = records.length - resolved.length;
+  const diagnostics: FeedUnresolvedProviderDiagnostic[] =
+    skippedRecordCount === 0
       ? []
       : [
           {
-            kind: "feed-pair-set-change",
-            addedPairCount: addedPairs.length,
-            removedPairCount: removedPairs.length,
-            addedPairs: addedPairs.slice(0, MAX_PAIR_DIAGNOSTIC_PREVIEWS),
-            removedPairs: removedPairs.slice(0, MAX_PAIR_DIAGNOSTIC_PREVIEWS),
+            kind: "feed-unresolved-provider",
+            skippedRecordCount,
+            providerCount: unresolvedProviders.size,
+            providers: [...unresolvedProviders]
+              .sort(compareText)
+              .slice(0, MAX_PROVIDER_DIAGNOSTIC_PREVIEWS),
           },
         ];
-  // Quarantined rows still pass every record-level semantic check. Pair-set drift
-  // changes authority, not the requirement that the source document be well formed.
-  for (const record of records) normalizeDates(record, manifest);
-  const reviewedRecords = records.filter((record) =>
-    classifications.reviewedPairIdentities.has(
-      pairIdentity(record.provider, record.modelId),
-    ),
-  );
-  if (reviewedRecords.length === 0) {
-    throw new Error("Legacy feed contains no reviewed records after pair-set quarantine.");
+  if (resolved.length === 0) {
+    throw new Error("Legacy feed contains no records with a resolvable serving platform.");
   }
-  const generatedAt = reviewedRecords
-    .map((record) => record.scrapedAt)
+  const generatedAt = resolved
+    .map(({ record }) => record.scrapedAt)
     .filter((value): value is string => value !== undefined)
     .sort(compareText)
     .at(-1);
   if (generatedAt === undefined) {
-    throw new Error("Legacy feed has no reviewed scraped_at timestamp for generatedAt.");
+    throw new Error("Legacy feed has no scraped_at timestamp for generatedAt.");
   }
   const generatedDate = generatedAt.slice(0, 10);
-  const adaptedRecords: FeedRecord[] = reviewedRecords.map((record): FeedRecord => {
-    const servingPlatform = platformForSourceProvider(record.provider);
-    if (servingPlatform === null) {
-      throw new Error(`Unmapped source provider ${record.provider}.`);
-    }
+  const adaptedRecords: FeedRecord[] = resolved.map(({ record, servingPlatform }): FeedRecord => {
     const common = {
       recordId: legacyRecordId(record),
       servingPlatform,
@@ -658,7 +570,7 @@ export function adaptLegacyFeed(
   sourceBytes: Uint8Array,
   manifest: LegacyFeedAdapterManifest = DEFAULT_LEGACY_ADAPTER_MANIFEST,
   now: number = Date.now(),
-): { envelope: FeedEnvelope; diagnostics: readonly FeedPairSetDiagnostic[] } {
+): { envelope: FeedEnvelope; diagnostics: readonly FeedUnresolvedProviderDiagnostic[] } {
   if (sourceBytes.byteLength > V3_FEED_LIMITS.maxDocumentBytes) {
     throw new Error(
       `Legacy feed document exceeds ${V3_FEED_LIMITS.maxDocumentBytes} bytes.`,
@@ -668,7 +580,7 @@ export function adaptLegacyFeed(
   return adaptDecodedLegacyFeed(payload, sourceBytes, manifest, now);
 }
 
-export function loadTypedOrReviewedLegacyFeed(
+export function loadTypedOrAdaptedLegacyFeed(
   sourceBytes: Uint8Array,
   now: number = Date.now(),
 ): LoadedV3Feed {
