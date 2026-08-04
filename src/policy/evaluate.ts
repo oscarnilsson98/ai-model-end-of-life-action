@@ -8,6 +8,8 @@ import { matchRepositoryPattern } from "./policy.ts";
 import {
   canonicalSha256,
   combineEvidenceHealth,
+  daysUntilEarliestLifecycleDate,
+  earliestLifecycleDays,
   resultFromFindings,
   strongerOutcome,
 } from "../shared/status.ts";
@@ -263,6 +265,27 @@ function suppressionMatches(
   );
 }
 
+function dayPhrase(subject: string, days: number): string {
+  if (days < 0) return `${subject} was ${Math.abs(days)} UTC calendar day(s) ago`;
+  if (days === 0) return `${subject} is today`;
+  return `${subject} is ${days} UTC calendar day(s) away`;
+}
+
+function horizonReason(
+  daysUntilShutdown: number | null,
+  daysUntilDeprecation: number | null,
+): string {
+  if (daysUntilShutdown === null) {
+    return daysUntilDeprecation === null
+      ? "The joined lifecycle record has no published shutdown date."
+      : `The joined lifecycle record has no published shutdown date; ${dayPhrase("deprecation", daysUntilDeprecation)}.`;
+  }
+  if (daysUntilDeprecation === null || daysUntilDeprecation >= daysUntilShutdown) {
+    return `${dayPhrase("Shutdown", daysUntilShutdown)}.`;
+  }
+  return `${dayPhrase("Deprecation", daysUntilDeprecation)}; ${dayPhrase("shutdown", daysUntilShutdown)}.`;
+}
+
 function policyOutcome(input: {
   fact: EvidenceFact;
   pair: IndexedModelPair;
@@ -270,10 +293,19 @@ function policyOutcome(input: {
   policy: Policy;
   now: number;
   exactPlatform: boolean;
-}): { outcome: PolicyOutcome; daysUntilShutdown: number | null; reasons: string[] } {
+}): {
+  outcome: PolicyOutcome;
+  daysUntilShutdown: number | null;
+  daysUntilDeprecation: number | null;
+  reasons: string[];
+} {
   const { fact, pair, lifecycle, policy, exactPlatform } = input;
   const daysUntilShutdown =
     lifecycle.shutdownDate === null ? null : calendarDaysUntil(lifecycle.shutdownDate, input.now);
+  const daysUntilDeprecation =
+    lifecycle.deprecationDate === null
+      ? null
+      : calendarDaysUntil(lifecycle.deprecationDate, input.now);
   const reasons: string[] = [];
   const scopeEligible = fact.scope === "application" || fact.scope === "deployment";
   const protectedOrUnknown =
@@ -281,8 +313,12 @@ function policyOutcome(input: {
     fact.scope === "test" ||
     fact.scope === "example" ||
     fact.scope === "unknown";
+  const daysUntilLifecycle = daysUntilEarliestLifecycleDate(
+    daysUntilShutdown,
+    daysUntilDeprecation,
+  );
   const insideWarning =
-    daysUntilShutdown === null || daysUntilShutdown <= policy.warnWithinDays;
+    daysUntilLifecycle === null || daysUntilLifecycle <= policy.warnWithinDays;
   let outcome: PolicyOutcome = "none";
   if (insideWarning) {
     if (fact.kind === "lexical") {
@@ -294,11 +330,7 @@ function policyOutcome(input: {
       );
     } else if (scopeEligible || fact.origin !== "repository") {
       outcome = "warning";
-      reasons.push(
-        lifecycle.shutdownDate === null
-          ? "The joined lifecycle record has no published shutdown date."
-          : `Shutdown is ${daysUntilShutdown} UTC calendar day(s) away.`,
-      );
+      reasons.push(horizonReason(daysUntilShutdown, daysUntilDeprecation));
     } else if (protectedOrUnknown) {
       outcome = "notice";
       reasons.push("Evidence is outside an actionable application/deployment scope.");
@@ -311,6 +343,9 @@ function policyOutcome(input: {
     if (outcome === "notice" || outcome === "none") outcome = "warning";
     reasons.push("The feed has conflicting active lifecycle signatures for this exact pair.");
   }
+  // Enforcement deliberately stays keyed to the shutdown date. The warning horizon may
+  // open early on a deprecation, but failing a job is the irreversible direction and
+  // `failWithinDays` is contracted against the date the model stops being served.
   const breachEligible =
     policy.failWithinDays !== null &&
     daysUntilShutdown !== null &&
@@ -331,7 +366,7 @@ function policyOutcome(input: {
     outcome = "breach";
     reasons.push(`Definite evidence breaches failWithinDays=${policy.failWithinDays}.`);
   }
-  return { outcome, daysUntilShutdown, reasons };
+  return { outcome, daysUntilShutdown, daysUntilDeprecation, reasons };
 }
 
 function strongestScope(left: EvidenceScope, right: EvidenceScope): EvidenceScope {
@@ -407,6 +442,9 @@ function lifecycleFinding(
     ...(lifecycle.deprecationDate === null ? {} : { deprecationDate: lifecycle.deprecationDate }),
     ...(lifecycle.shutdownDate === null ? {} : { shutdownDate: lifecycle.shutdownDate }),
     daysUntilShutdown: evaluated.daysUntilShutdown,
+    ...(evaluated.daysUntilDeprecation === null
+      ? {}
+      : { daysUntilDeprecation: evaluated.daysUntilDeprecation }),
     replacementModels: lifecycle.provenance.flatMap((entry) => [...entry.replacementModels]),
     sourceUrls: [...lifecycle.primarySourceUrls],
     feedConflict: pair.conflict,
@@ -485,8 +523,10 @@ function aggregateFindings(findings: readonly LifecycleFinding[]): LifecycleFind
     if (existing.suppressedBy !== finding.suppressedBy) delete existing.suppressedBy;
   }
   return [...byKey.values()].sort((left, right) => {
-    const daysLeft = left.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
-    const daysRight = right.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
+    // Order by the deadline the horizon actually measures, so a model already past its
+    // deprecation date is not buried under one with a nearer shutdown.
+    const daysLeft = earliestLifecycleDays(left) ?? Number.MAX_SAFE_INTEGER;
+    const daysRight = earliestLifecycleDays(right) ?? Number.MAX_SAFE_INTEGER;
     return daysLeft - daysRight || compareText(left.semanticKey, right.semanticKey);
   });
 }

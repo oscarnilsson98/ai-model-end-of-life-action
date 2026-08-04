@@ -98,6 +98,73 @@ test("unknown results never render a clean outcome", () => {
   expect(summary).not.toContain("No actionable lifecycle risk found");
 });
 
+test("the summary names the deprecation date when it is the nearer deadline", () => {
+  const report = cleanReport();
+  report.result = "advisory";
+  report.lifecycleFindings = [
+    {
+      findingId: "finding",
+      semanticKey: "semantic",
+      evidenceIds: ["evidence"],
+      modelId: "gpt-old",
+      servingPlatform: "openai",
+      lifecycleMatch: "exact",
+      lifecycleStatus: "shutdown-scheduled",
+      deprecationDate: "2026-06-01",
+      shutdownDate: "2027-06-01",
+      daysUntilShutdown: 303,
+      daysUntilDeprecation: -62,
+      replacementModels: [],
+      sourceUrls: [],
+      feedConflict: false,
+      outcome: "warning",
+      reasons: ["Deprecation was 62 UTC calendar day(s) ago; shutdown is 303 UTC calendar day(s) away."],
+      scope: "application",
+      environment: "production",
+      confidence: "high",
+      selectorKind: "model-id",
+      locations: [{ path: "src/chat.ts", line: 1, column: 1 }],
+    },
+  ];
+
+  const summary = renderSummary(report);
+  // A bare "2027-06-01 (303d)" next to a warning reads as a false alarm.
+  expect(summary).toContain("deprecation 2026-06-01 (-62d)");
+  expect(summary).not.toContain("(303d)");
+});
+
+test("the summary keeps naming the shutdown date when it is the nearer deadline", () => {
+  const report = cleanReport();
+  report.result = "advisory";
+  report.lifecycleFindings = [
+    {
+      findingId: "finding",
+      semanticKey: "semantic",
+      evidenceIds: ["evidence"],
+      modelId: "gpt-old",
+      servingPlatform: "openai",
+      lifecycleMatch: "exact",
+      lifecycleStatus: "shutdown-scheduled",
+      deprecationDate: "2026-08-20",
+      shutdownDate: "2026-08-20",
+      daysUntilShutdown: 18,
+      daysUntilDeprecation: 18,
+      replacementModels: [],
+      sourceUrls: [],
+      feedConflict: false,
+      outcome: "warning",
+      reasons: ["Shutdown is 18 UTC calendar day(s) away."],
+      scope: "application",
+      environment: "production",
+      confidence: "high",
+      selectorKind: "model-id",
+      locations: [{ path: "src/chat.ts", line: 1, column: 1 }],
+    },
+  ];
+
+  expect(renderSummary(report)).toContain("shutdown 2026-08-20 (18d)");
+});
+
 test("active suppressions stay visible in the summary", () => {
   const report = cleanReport();
   report.lifecycleFindings = [

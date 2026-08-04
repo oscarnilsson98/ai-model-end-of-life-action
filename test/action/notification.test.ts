@@ -284,6 +284,45 @@ describe("v3 Slack snapshot delivery", () => {
     expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(12_000);
   });
 
+  test("names the deprecation date and orders by the nearest lifecycle date", async () => {
+    let captured: CapturedRequest | undefined;
+    const assessment = report({
+      result: "advisory",
+      lifecycleFindings: [
+        finding({
+          findingId: "near-shutdown",
+          modelId: "shutting-down-soon",
+          shutdownDate: "2026-09-01",
+          daysUntilShutdown: 30,
+        }),
+        finding({
+          findingId: "past-deprecation",
+          modelId: "already-deprecated",
+          deprecationDate: "2026-06-01",
+          shutdownDate: "2027-06-01",
+          daysUntilShutdown: 303,
+          daysUntilDeprecation: -62,
+        }),
+      ],
+    });
+
+    const result = await deliverSlackNotification({
+      webhookUrl: WEBHOOK,
+      report: assessment,
+      fetchImpl: async (input, init) => {
+        captured = init === undefined ? { input } : { input, init };
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    expect(result.status).toBe("sent");
+    const text = payloadText(captured as CapturedRequest);
+    expect(text).toContain("deprecation 2026-06-01 (62d overdue)");
+    expect(text).toContain("shutdown 2027-06-01 (303d)");
+    // The already-deprecated model is the more urgent of the two.
+    expect(text.indexOf("already-deprecated")).toBeLessThan(text.indexOf("shutting-down-soon"));
+  });
+
   test("names low-confidence findings an advisory result counted", async () => {
     const lifecycleFindings = [
       finding({

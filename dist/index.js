@@ -7882,6 +7882,19 @@ function chooseExitReason(...reasons) {
   }
   return result;
 }
+function daysUntilEarliestLifecycleDate(daysUntilShutdown, daysUntilDeprecation) {
+  if (daysUntilShutdown === null)
+    return null;
+  return daysUntilDeprecation === null || daysUntilDeprecation === undefined ? daysUntilShutdown : Math.min(daysUntilDeprecation, daysUntilShutdown);
+}
+function earliestLifecycleDays(finding) {
+  return daysUntilEarliestLifecycleDate(finding.daysUntilShutdown, finding.daysUntilDeprecation);
+}
+function deprecationLeadsHorizon(finding) {
+  if (finding.deprecationDate === undefined)
+    return false;
+  return finding.daysUntilShutdown === null || (finding.daysUntilDeprecation ?? 0) < finding.daysUntilShutdown;
+}
 function resultFromFindings(findings) {
   let result = "no-actionable-risk";
   for (const finding of findings) {
@@ -8836,13 +8849,31 @@ function suppressionMatches(suppression, fact, modelId2, servingPlatform) {
   }
   return target.modelId === modelId2 && target.servingPlatform === servingPlatform && target.detectorRuleIds.includes(fact.detectorRuleId) && pathsForFact(fact).some((path) => target.paths.some((pattern) => matchRepositoryPattern(pattern, path)));
 }
+function dayPhrase(subject, days) {
+  if (days < 0)
+    return `${subject} was ${Math.abs(days)} UTC calendar day(s) ago`;
+  if (days === 0)
+    return `${subject} is today`;
+  return `${subject} is ${days} UTC calendar day(s) away`;
+}
+function horizonReason(daysUntilShutdown, daysUntilDeprecation) {
+  if (daysUntilShutdown === null) {
+    return daysUntilDeprecation === null ? "The joined lifecycle record has no published shutdown date." : `The joined lifecycle record has no published shutdown date; ${dayPhrase("deprecation", daysUntilDeprecation)}.`;
+  }
+  if (daysUntilDeprecation === null || daysUntilDeprecation >= daysUntilShutdown) {
+    return `${dayPhrase("Shutdown", daysUntilShutdown)}.`;
+  }
+  return `${dayPhrase("Deprecation", daysUntilDeprecation)}; ${dayPhrase("shutdown", daysUntilShutdown)}.`;
+}
 function policyOutcome(input) {
   const { fact, pair, lifecycle, policy, exactPlatform } = input;
   const daysUntilShutdown = lifecycle.shutdownDate === null ? null : calendarDaysUntil(lifecycle.shutdownDate, input.now);
+  const daysUntilDeprecation = lifecycle.deprecationDate === null ? null : calendarDaysUntil(lifecycle.deprecationDate, input.now);
   const reasons = [];
   const scopeEligible = fact.scope === "application" || fact.scope === "deployment";
   const protectedOrUnknown = fact.scope === "documentation" || fact.scope === "test" || fact.scope === "example" || fact.scope === "unknown";
-  const insideWarning = daysUntilShutdown === null || daysUntilShutdown <= policy.warnWithinDays;
+  const daysUntilLifecycle = daysUntilEarliestLifecycleDate(daysUntilShutdown, daysUntilDeprecation);
+  const insideWarning = daysUntilLifecycle === null || daysUntilLifecycle <= policy.warnWithinDays;
   let outcome = "none";
   if (insideWarning) {
     if (fact.kind === "lexical") {
@@ -8850,7 +8881,7 @@ function policyOutcome(input) {
       reasons.push(scopeEligible ? "Exact typed-feed ID appears in application/deployment text; lexical evidence cannot block." : "Exact typed-feed ID appears only in protected or unknown-scope text.");
     } else if (scopeEligible || fact.origin !== "repository") {
       outcome = "warning";
-      reasons.push(lifecycle.shutdownDate === null ? "The joined lifecycle record has no published shutdown date." : `Shutdown is ${daysUntilShutdown} UTC calendar day(s) away.`);
+      reasons.push(horizonReason(daysUntilShutdown, daysUntilDeprecation));
     } else if (protectedOrUnknown) {
       outcome = "notice";
       reasons.push("Evidence is outside an actionable application/deployment scope.");
@@ -8869,7 +8900,7 @@ function policyOutcome(input) {
     outcome = "breach";
     reasons.push(`Definite evidence breaches failWithinDays=${policy.failWithinDays}.`);
   }
-  return { outcome, daysUntilShutdown, reasons };
+  return { outcome, daysUntilShutdown, daysUntilDeprecation, reasons };
 }
 function strongestScope(left, right) {
   const rank = {
@@ -8918,6 +8949,7 @@ function lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform) {
     ...lifecycle.deprecationDate === null ? {} : { deprecationDate: lifecycle.deprecationDate },
     ...lifecycle.shutdownDate === null ? {} : { shutdownDate: lifecycle.shutdownDate },
     daysUntilShutdown: evaluated.daysUntilShutdown,
+    ...evaluated.daysUntilDeprecation === null ? {} : { daysUntilDeprecation: evaluated.daysUntilDeprecation },
     replacementModels: lifecycle.provenance.flatMap((entry) => [...entry.replacementModels]),
     sourceUrls: [...lifecycle.primarySourceUrls],
     feedConflict: pair.conflict,
@@ -8989,8 +9021,8 @@ function aggregateFindings(findings) {
       delete existing.suppressedBy;
   }
   return [...byKey.values()].sort((left, right) => {
-    const daysLeft = left.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
-    const daysRight = right.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
+    const daysLeft = earliestLifecycleDays(left) ?? Number.MAX_SAFE_INTEGER;
+    const daysRight = earliestLifecycleDays(right) ?? Number.MAX_SAFE_INTEGER;
     return daysLeft - daysRight || compareText3(left.semanticKey, right.semanticKey);
   });
 }
@@ -13874,8 +13906,8 @@ function partitionFindings(report) {
     const tierDifference = Number(isTextMatch(left)) - Number(isTextMatch(right));
     if (tierDifference !== 0)
       return tierDifference;
-    const leftDays = left.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
-    const rightDays = right.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
+    const leftDays = earliestLifecycleDays(left) ?? Number.POSITIVE_INFINITY;
+    const rightDays = earliestLifecycleDays(right) ?? Number.POSITIVE_INFINITY;
     if (leftDays !== rightDays)
       return leftDays - rightDays;
     const platformDifference = compareText7(left.servingPlatform, right.servingPlatform);
@@ -13886,17 +13918,20 @@ function partitionFindings(report) {
     withheld: notifiable.filter((finding) => PROTECTED_SCOPES2.has(finding.scope))
   };
 }
+function dateText(label, date, days) {
+  if (days === null || days === undefined || !Number.isSafeInteger(days)) {
+    return `${label} ${date}`;
+  }
+  if (days < 0)
+    return `${label} ${date} (${Math.abs(days)}d overdue)`;
+  if (days === 0)
+    return `${label} ${date} (today)`;
+  return `${label} ${date} (${days}d)`;
+}
 function deadlineText(finding) {
   if (finding.shutdownDate === undefined)
     return "shutdown date not announced";
-  const days = finding.daysUntilShutdown;
-  if (days === null || !Number.isSafeInteger(days))
-    return `shutdown ${finding.shutdownDate}`;
-  if (days < 0)
-    return `shutdown ${finding.shutdownDate} (${Math.abs(days)}d overdue)`;
-  if (days === 0)
-    return `shutdown ${finding.shutdownDate} (today)`;
-  return `shutdown ${finding.shutdownDate} (${days}d)`;
+  return dateText("shutdown", finding.shutdownDate, finding.daysUntilShutdown);
 }
 function safeLink(candidate) {
   if (candidate === undefined)
@@ -13928,7 +13963,11 @@ function findingLabel(finding) {
   return isTextMatch(finding) ? "ADVISORY (text match)" : "ADVISORY";
 }
 function findingLine(finding) {
-  const qualifiers = [deadlineText(finding)];
+  const qualifiers = [];
+  if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
+    qualifiers.push(dateText("deprecation", finding.deprecationDate, finding.daysUntilDeprecation));
+  }
+  qualifiers.push(deadlineText(finding));
   if (finding.delta !== undefined && finding.delta !== "unchanged") {
     qualifiers.push(finding.delta);
   }
@@ -14101,10 +14140,15 @@ function deliveryLine(report, options = {}) {
   }
   return `Delivery: GitHub Actions summary; Slack skipped (${escapeHtml(compact2(report.notificationReason, 300))})`;
 }
+function deadlineCell(finding) {
+  if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
+    return `deprecation ${escapeHtml(finding.deprecationDate)} (${finding.daysUntilDeprecation ?? "?"}d)`;
+  }
+  return finding.shutdownDate === undefined ? "Not announced" : `shutdown ${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
+}
 function findingRow(finding) {
-  const deadline = finding.shutdownDate === undefined ? "Not announced" : `${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
   const delta = finding.delta === undefined ? "—" : finding.delta;
-  return `| <code>${escapeHtml(compact2(finding.modelId, 160))}</code> | ${escapeHtml(finding.servingPlatform)} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadline} |`;
+  return `| <code>${escapeHtml(compact2(finding.modelId, 160))}</code> | ${escapeHtml(finding.servingPlatform)} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadlineCell(finding)} |`;
 }
 function renderSummary(report, options = {}) {
   const actionable = report.lifecycleFindings.filter((finding) => finding.outcome === "breach" || finding.outcome === "warning");
@@ -14128,7 +14172,7 @@ function renderSummary(report, options = {}) {
       lines.push("No runtime or control-plane evidence source was supplied; those systems were not assessed.", "");
     }
   } else {
-    lines.push("### Actionable lifecycle findings", "", "| Model | Serving platform | Outcome | Change | Shutdown |", "| --- | --- | --- | --- | --- |", ...actionable.slice(0, 100).map(findingRow), "");
+    lines.push("### Actionable lifecycle findings", "", "| Model | Serving platform | Outcome | Change | Next lifecycle date |", "| --- | --- | --- | --- | --- |", ...actionable.slice(0, 100).map(findingRow), "");
     if (actionable.length > 100) {
       lines.push(`${actionable.length - 100} additional finding(s) are in the local JSON report.`, "");
     }
@@ -14160,7 +14204,8 @@ function renderSummary(report, options = {}) {
 }
 function annotationText(finding) {
   const deadline = finding.shutdownDate === undefined ? "shutdown date not announced" : `shutdown ${finding.shutdownDate} (${finding.daysUntilShutdown ?? "?"} day(s))`;
-  return `${finding.modelId} on ${finding.servingPlatform}: ${deadline}. ${finding.reasons.join(" ")}`;
+  const deprecation = deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined ? `deprecation ${finding.deprecationDate} (${finding.daysUntilDeprecation ?? "?"} day(s)), ` : "";
+  return `${finding.modelId} on ${finding.servingPlatform}: ${deprecation}${deadline}. ${finding.reasons.join(" ")}`;
 }
 function publishAnnotations(report, log = console.log) {
   const actionable = report.lifecycleFindings.filter((finding) => (finding.outcome === "breach" || finding.outcome === "warning") && finding.delta !== "unchanged" && finding.delta !== "resolved");
