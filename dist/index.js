@@ -7973,7 +7973,7 @@ function alertFingerprint(findings) {
 }
 
 // src/detection/manifest.ts
-var DETECTOR_MANIFEST_VERSION = "3.0.0-2";
+var DETECTOR_MANIFEST_VERSION = "3.0.0-3";
 var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
@@ -9575,6 +9575,7 @@ var SOURCE_EXTENSIONS = new Set([
   ".sh"
 ]);
 var JS_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"]);
+var JSX_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".tsx"]);
 var HCL_EXTENSIONS = new Set([".tf", ".hcl"]);
 var IDENTIFIER_CHARACTER = /^[\p{L}\p{N}\p{M}._:/-]$/u;
 var DIRECT_POLICY_RULES = new Set(DETECTOR_RULES.filter((rule) => rule.policyEligible).map((rule) => rule.ruleId));
@@ -9637,19 +9638,206 @@ var REGEX_PRECEDING_KEYWORDS = new Set([
   "yield",
   "await"
 ]);
-function regexLiteralAllowed(tokens) {
-  const previous = tokens[tokens.length - 1];
-  if (previous === undefined)
+function valueEndingToken(token) {
+  if (token === undefined)
+    return false;
+  if (token.kind === "string")
     return true;
-  if (previous.kind === "string")
-    return false;
-  if (previous.kind === "identifier")
-    return REGEX_PRECEDING_KEYWORDS.has(previous.value);
-  if (/^[0-9]$/u.test(previous.value))
-    return false;
-  return previous.value !== ")" && previous.value !== "]" && previous.value !== "}" && previous.value !== "++" && previous.value !== "--";
+  if (token.kind === "identifier")
+    return !REGEX_PRECEDING_KEYWORDS.has(token.value);
+  if (/^[0-9]$/u.test(token.value))
+    return true;
+  return token.value === ")" || token.value === "]" || token.value === "}" || token.value === "++" || token.value === "--";
 }
-function tokenize(source, language) {
+function regexLiteralAllowed(tokens) {
+  let index = tokens.length - 1;
+  if (structuralValue(tokens[index]) === "!" && valueEndingToken(tokens[index - 1])) {
+    index -= 1;
+  }
+  return !valueEndingToken(tokens[index]);
+}
+var JSX_TAG_LOOKAHEAD_CHARACTERS = 4096;
+var JSX_NAME_START = /[A-Za-z_$]/u;
+var JSX_NAME_CHARACTER = /[A-Za-z0-9_$.:-]/u;
+function jsxQuotedEnd(source, index, limit) {
+  const quote = source[index];
+  for (let scan = index + 1;scan < limit; scan += 1) {
+    if (source[scan] === quote)
+      return scan + 1;
+  }
+  return -1;
+}
+var JSX_VALUE_ENDING_CHARACTER = /[\p{L}\p{N}_$)\]}]/u;
+var JSX_STEPPED_OVER_VALUE = "0";
+function jsxOpaqueEnd(source, index, limit, previous) {
+  const character = source[index];
+  if (character === '"' || character === "'") {
+    for (let scan = index + 1;scan < limit; scan += 1) {
+      const inner = source[scan];
+      if (inner === "\\")
+        scan += 1;
+      else if (inner === `
+`)
+        break;
+      else if (inner === character)
+        return scan + 1;
+    }
+    return index;
+  }
+  if (character === "`") {
+    let substitutions = 0;
+    for (let scan = index + 1;scan < limit; scan += 1) {
+      const inner = source[scan];
+      if (inner === "\\")
+        scan += 1;
+      else if (inner === "$" && source[scan + 1] === "{") {
+        substitutions += 1;
+        scan += 1;
+      } else if (inner === "}" && substitutions > 0)
+        substitutions -= 1;
+      else if (inner === "`" && substitutions === 0)
+        return scan + 1;
+    }
+    return index;
+  }
+  if (character !== "/")
+    return index;
+  if (source[index + 1] === "*") {
+    const closed = source.indexOf("*/", index + 2);
+    return closed < 0 || closed + 2 > limit ? index : closed + 2;
+  }
+  if (source[index + 1] === "/") {
+    const newline = source.indexOf(`
+`, index + 2);
+    return newline < 0 || newline >= limit ? index : newline + 1;
+  }
+  if (JSX_VALUE_ENDING_CHARACTER.test(previous))
+    return index;
+  let characterClass = false;
+  for (let scan = index + 1;scan < limit; scan += 1) {
+    const inner = source[scan];
+    if (inner === "\\")
+      scan += 1;
+    else if (inner === `
+`)
+      break;
+    else if (inner === "[")
+      characterClass = true;
+    else if (inner === "]")
+      characterClass = false;
+    else if (inner === "/" && !characterClass)
+      return scan + 1;
+  }
+  return index;
+}
+function jsxBalancedEnd(source, index, limit, open, close) {
+  let depth = 0;
+  let previous = "";
+  for (let scan = index;scan < limit; scan += 1) {
+    const character = source[scan];
+    const opaque = jsxOpaqueEnd(source, scan, limit, previous);
+    if (opaque > scan) {
+      const comment = character === "/" && (source[scan + 1] === "/" || source[scan + 1] === "*");
+      if (!comment)
+        previous = JSX_STEPPED_OVER_VALUE;
+      scan = opaque - 1;
+      continue;
+    }
+    if (character === open)
+      depth += 1;
+    else if (character === close) {
+      depth -= 1;
+      if (depth === 0)
+        return scan + 1;
+    }
+    if (!/\s/u.test(character))
+      previous = character;
+  }
+  return -1;
+}
+function jsxBracedEnd(source, index, limit) {
+  return jsxBalancedEnd(source, index, limit, "{", "}");
+}
+function jsxAngleEnd(source, index, limit) {
+  return jsxBalancedEnd(source, index, limit, "<", ">");
+}
+function looksLikeJsxTag(source, offset) {
+  const limit = Math.min(source.length, offset + JSX_TAG_LOOKAHEAD_CHARACTERS);
+  let index = offset + 1;
+  const first = source[index];
+  if (first === undefined)
+    return false;
+  if (first === ">")
+    return true;
+  if (!JSX_NAME_START.test(first))
+    return false;
+  while (index < limit && JSX_NAME_CHARACTER.test(source[index]))
+    index += 1;
+  while (index < limit) {
+    const character = source[index];
+    if (/\s/u.test(character)) {
+      index += 1;
+      continue;
+    }
+    if (character === ">")
+      return true;
+    if (character === "/" && source[index + 1] === ">")
+      return true;
+    if (character === "/" && source[index + 1] === "*") {
+      const closed = source.indexOf("*/", index + 2);
+      if (closed < 0 || closed + 2 > limit)
+        return false;
+      index = closed + 2;
+      continue;
+    }
+    if (character === "/" && source[index + 1] === "/") {
+      const newline = source.indexOf(`
+`, index + 2);
+      if (newline < 0 || newline >= limit)
+        return false;
+      index = newline + 1;
+      continue;
+    }
+    if (character === "=") {
+      index += 1;
+      continue;
+    }
+    if (character === "{") {
+      index = jsxBracedEnd(source, index, limit);
+      if (index < 0)
+        return false;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      index = jsxQuotedEnd(source, index, limit);
+      if (index < 0)
+        return false;
+      continue;
+    }
+    if (character === "<") {
+      index = jsxAngleEnd(source, index, limit);
+      if (index < 0)
+        return false;
+      continue;
+    }
+    if (JSX_NAME_START.test(character)) {
+      const nameStart = index;
+      while (index < limit && JSX_NAME_CHARACTER.test(source[index]))
+        index += 1;
+      if (source.slice(nameStart, index) === "extends")
+        return false;
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+function jsxElementAllowed(tokens, source, offset) {
+  const previous = tokens[tokens.length - 1];
+  const valuePosition = regexLiteralAllowed(tokens) || structuralValue(previous) === "}" || isIdentifier(previous, "default");
+  return valuePosition && looksLikeJsxTag(source, offset);
+}
+function tokenize(source, language, jsx = false) {
   const tokens = [];
   let issue;
   const reportIssue = (candidate) => {
@@ -9658,6 +9846,7 @@ function tokenize(source, language) {
   let offset = 0;
   let line = 1;
   let column = 1;
+  const frames = [];
   const advance = (character) => {
     offset += character.length;
     if (character === `
@@ -9668,8 +9857,42 @@ function tokenize(source, language) {
       column += [...character].length;
     }
   };
+  const emitPunctuation = (value) => {
+    const tokenStart = offset;
+    const tokenLine = line;
+    const tokenColumn = column;
+    for (const part of value)
+      advance(part);
+    tokens.push({
+      kind: "punctuation",
+      value,
+      raw: value,
+      offset: tokenStart,
+      line: tokenLine,
+      column: tokenColumn,
+      static: true
+    });
+  };
+  const emitJsxName = () => {
+    const tokenStart = offset;
+    const tokenLine = line;
+    const tokenColumn = column;
+    while (offset < source.length && JSX_NAME_CHARACTER.test(source[offset])) {
+      advance(source[offset]);
+    }
+    const raw = source.slice(tokenStart, offset);
+    tokens.push({
+      kind: "identifier",
+      value: raw,
+      raw,
+      offset: tokenStart,
+      line: tokenLine,
+      column: tokenColumn,
+      static: true
+    });
+  };
   const consumeJavascriptTemplate = () => {
-    const frames = [{ mode: "text", braceDepth: 0, regexAllowed: true }];
+    const frames2 = [{ mode: "text", braceDepth: 0, regexAllowed: true }];
     let dynamic = false;
     const consumeQuotedExpressionString = (quote) => {
       advance(quote);
@@ -9720,7 +9943,7 @@ function tokenize(source, language) {
     };
     advance("`");
     while (offset < source.length) {
-      const frame = frames.at(-1);
+      const frame = frames2.at(-1);
       const current = source[offset];
       const next = source[offset + 1];
       if (frame.mode === "text") {
@@ -9732,10 +9955,10 @@ function tokenize(source, language) {
         }
         if (current === "`") {
           advance(current);
-          frames.pop();
-          if (frames.length === 0)
+          frames2.pop();
+          if (frames2.length === 0)
             return { closed: true, dynamic };
-          const parent = frames.at(-1);
+          const parent = frames2.at(-1);
           if (parent !== undefined)
             parent.regexAllowed = false;
           continue;
@@ -9763,7 +9986,7 @@ function tokenize(source, language) {
         continue;
       }
       if (current === "`") {
-        frames.push({ mode: "text", braceDepth: 0, regexAllowed: true });
+        frames2.push({ mode: "text", braceDepth: 0, regexAllowed: true });
         advance(current);
         continue;
       }
@@ -9864,8 +10087,112 @@ function tokenize(source, language) {
     const startColumn = column;
     const character = source[offset];
     const next = source[offset + 1];
+    const frame = frames.at(-1);
+    if (frame?.kind === "jsx" && frame.mode === "children") {
+      if (character === "<" && next === "/") {
+        emitPunctuation("<");
+        emitPunctuation("/");
+        frame.mode = "closing";
+        continue;
+      }
+      if (character === "<" && looksLikeJsxTag(source, offset)) {
+        emitPunctuation("<");
+        frames.push({
+          kind: "jsx",
+          mode: "tag",
+          angleDepth: 0,
+          line: startLine,
+          column: startColumn
+        });
+        continue;
+      }
+      if (character === "{") {
+        emitPunctuation("{");
+        frames.push({
+          kind: "jsx-expression",
+          braceDepth: 0,
+          line: startLine,
+          column: startColumn
+        });
+        continue;
+      }
+      advance(character);
+      continue;
+    }
+    if (frame?.kind === "jsx" && frame.mode === "closing") {
+      if (character === ">") {
+        emitPunctuation(">");
+        frames.pop();
+        continue;
+      }
+      if (JSX_NAME_START.test(character)) {
+        emitJsxName();
+        continue;
+      }
+      advance(character);
+      continue;
+    }
+    if (frame?.kind === "jsx" && frame.mode === "tag" && character !== "'" && character !== '"' && !(character === "/" && (next === "/" || next === "*"))) {
+      if (character === "/" && next === ">") {
+        emitPunctuation("/");
+        emitPunctuation(">");
+        frames.pop();
+        continue;
+      }
+      if (character === "<") {
+        emitPunctuation("<");
+        frame.angleDepth += 1;
+        continue;
+      }
+      if (character === ">") {
+        emitPunctuation(">");
+        if (frame.angleDepth > 0)
+          frame.angleDepth -= 1;
+        else
+          frame.mode = "children";
+        continue;
+      }
+      if (character === "{") {
+        emitPunctuation("{");
+        frames.push({
+          kind: "jsx-expression",
+          braceDepth: 0,
+          line: startLine,
+          column: startColumn
+        });
+        continue;
+      }
+      if (/\s/u.test(character)) {
+        advance(character);
+        continue;
+      }
+      if (JSX_NAME_START.test(character)) {
+        emitJsxName();
+        continue;
+      }
+      emitPunctuation(character);
+      continue;
+    }
+    if (frame?.kind === "jsx-expression") {
+      if (character === "{")
+        frame.braceDepth += 1;
+      else if (character === "}") {
+        if (frame.braceDepth === 0) {
+          emitPunctuation("}");
+          frames.pop();
+          continue;
+        }
+        frame.braceDepth -= 1;
+      }
+    }
     if (/\s/u.test(character)) {
       advance(character);
+      continue;
+    }
+    if (language === "javascript" && start === 0 && character === "#" && next === "!") {
+      while (offset < source.length && source[offset] !== `
+`)
+        advance(source[offset]);
       continue;
     }
     if (language === "python" && character === "#" || language === "hcl" && character === "#" || language !== "python" && character === "/" && next === "/") {
@@ -9961,9 +10288,10 @@ function tokenize(source, language) {
       continue;
     }
     if (character === "'" || character === '"') {
+      const jsxAttribute = frame?.kind === "jsx" && frame.mode === "tag";
       const triple = language === "python" && source.slice(offset, offset + 3) === character.repeat(3);
       const quoteLength = triple ? 3 : 1;
-      const multiline = triple;
+      const multiline = triple || jsxAttribute;
       for (let count = 0;count < quoteLength; count += 1)
         advance(character);
       let escaped = false;
@@ -9992,7 +10320,7 @@ function tokenize(source, language) {
         advance(current);
         if (escaped)
           escaped = false;
-        else if (current === "\\")
+        else if (current === "\\" && !jsxAttribute)
           escaped = true;
       }
       const raw = source.slice(start, offset);
@@ -10038,6 +10366,17 @@ function tokenize(source, language) {
       });
       continue;
     }
+    if (jsx && character === "<" && jsxElementAllowed(tokens, source, offset)) {
+      emitPunctuation("<");
+      frames.push({
+        kind: "jsx",
+        mode: "tag",
+        angleDepth: 0,
+        line: startLine,
+        column: startColumn
+      });
+      continue;
+    }
     const pair = source.slice(offset, offset + 2);
     const punctuation = [
       "??",
@@ -10072,6 +10411,14 @@ function tokenize(source, language) {
       line: startLine,
       column: startColumn,
       static: true
+    });
+  }
+  const unterminatedFrame = frames.at(-1);
+  if (unterminatedFrame !== undefined) {
+    reportIssue({
+      kind: "mismatched-delimiter",
+      line: unterminatedFrame.line,
+      column: unterminatedFrame.column
     });
   }
   if (issue === undefined) {
@@ -11159,8 +11506,8 @@ function directSemanticLiteralSpan(token, resolved) {
     endOffset: startOffset + literalContent.length
   };
 }
-function detectSdkCalls(source, path, blobOid, language, scope) {
-  const tokenization = tokenize(source, language);
+function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
+  const tokenization = tokenize(source, language, jsx);
   if (tokenization.issue !== undefined) {
     return {
       facts: [],
@@ -11797,6 +12144,30 @@ function tokenizationFidelityDiagnostic(path, language, issue) {
     severity: "notice"
   };
 }
+var AGGREGATED_DIAGNOSTIC_PATH_SAMPLE = 10;
+function aggregateDiagnostics(diagnostics) {
+  const groups = new Map;
+  for (const diagnostic of diagnostics) {
+    const key = JSON.stringify([diagnostic.code, diagnostic.severity]);
+    const group = groups.get(key);
+    if (group === undefined)
+      groups.set(key, [diagnostic]);
+    else
+      group.push(diagnostic);
+  }
+  return [...groups.values()].map((group) => {
+    const first = group[0];
+    if (group.length === 1)
+      return first;
+    const paths = group.map((diagnostic) => diagnostic.path).filter((path) => path !== undefined);
+    const sample = paths.slice(0, AGGREGATED_DIAGNOSTIC_PATH_SAMPLE);
+    return {
+      code: first.code,
+      message: `${group.length} files reported this diagnostic; the first is representative: ${first.message}${sample.length === 0 ? "" : ` Sampled paths (${sample.length} of ${paths.length}): ${sample.join(", ")}.`}`,
+      severity: first.severity
+    };
+  });
+}
 function isClaimDocument(path) {
   return path === ".github/ai-model-lifecycle.yml" || path.startsWith(".github/ai-model-evidence/");
 }
@@ -11840,7 +12211,7 @@ function detectSnapshot(snapshot, feed) {
     let semanticLanguage;
     if (JS_EXTENSIONS.has(extension)) {
       semanticLanguage = "javascript";
-      const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "javascript", scope);
+      const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "javascript", scope, JSX_EXTENSIONS.has(extension));
       semantic = detected.facts;
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
@@ -11905,7 +12276,7 @@ function detectSnapshot(snapshot, feed) {
   evidence.sort((left, right) => compareText5(left.evidenceId, right.evidenceId));
   return {
     evidence,
-    diagnostics,
+    diagnostics: aggregateDiagnostics(diagnostics),
     scanStatus: partial ? "partial" : "complete"
   };
 }

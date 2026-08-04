@@ -249,7 +249,7 @@ export default function Page() {
 }
 `;
 
-/** A snapshot whose only source blob is JSX that no published tokenizer accepts. */
+/** A snapshot whose only source blob is a JSX component. */
 function jsxSnapshot(treeObjectId: string): GitTreeSnapshot {
   const entries = [entry("app/page.tsx", JSX_SOURCE, 2)];
   const assessedBytes = entries.reduce(
@@ -669,17 +669,15 @@ describe("v3 production orchestration", () => {
       }),
     );
 
-    // The tokenizer cannot accept JSX, so the semantic pass is discarded on every
-    // run. The lexical fallback still assessed the blob, so coverage stays complete
-    // and enforcement remains usable without buying `allow-partial: true`.
+    // The tokenizer lexes JSX, so the semantic pass survives and no fidelity
+    // diagnostic is raised at all. Enforcement remains usable without buying
+    // `allow-partial: true`.
     expect(report).toMatchObject({
       scanStatus: "complete",
       exitReason: "none",
     });
-    expect(report.diagnostics).toContainEqual(expect.objectContaining({
+    expect(report.diagnostics).not.toContainEqual(expect.objectContaining({
       code: "semantic-tokenization-incomplete@1",
-      path: "app/page.tsx",
-      severity: "notice",
     }));
     expect(
       report.evidenceFacts.some((fact) => fact.kind === "lexical" && fact.modelId === "gpt-old"),

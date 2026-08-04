@@ -113,11 +113,11 @@ function repositorySnapshot(files: Readonly<Record<string, string>>): GitTreeSna
       metadataBytes: entries.length,
     },
     limits: {
-      maxEntries: 100,
-      maxUniqueObjects: 100,
-      maxMetadataBytes: 10_000,
+      maxEntries: Math.max(100, entries.length),
+      maxUniqueObjects: Math.max(100, entries.length),
+      maxMetadataBytes: Math.max(10_000, bytes),
       maxBlobBytes: 10_000,
-      maxTotalBlobBytes: 100_000,
+      maxTotalBlobBytes: Math.max(100_000, bytes),
     },
   };
 }
@@ -251,16 +251,14 @@ const names = { __proto__: null, hasOwnProperty: true };
     }));
   });
 
-  test("keeps declared coverage complete for JSX the tokenizer cannot accept", () => {
+  test("keeps declared coverage complete for a construct the tokenizer cannot accept", () => {
+    // Element syntax itself is lexed now, so the fidelity path is reached by a
+    // documented gap instead: JSX inside a template-literal substitution.
     const source = `import { useChat } from "ai/react";
 
 export default function Page() {
   const { messages } = useChat({ model: "gpt-old" });
-  return (
-    <ul className="messages">
-      {messages.map((message) => <li key={message.id}>{message.text}</li>)}
-    </ul>
-  );
+  return html\`<ul class="messages">\${<li>{messages.length}</li>}</ul>\`;
 }
 `;
     const result = detectSnapshot(snapshot("app/page.tsx", source), feed);
@@ -284,7 +282,7 @@ export default function Page() {
     const result = detectSnapshot(
       {
         ...repositorySnapshot({
-          "app/page.tsx": "export const view = <div>gpt-old</div>;\n",
+          "app/page.tsx": "export const view = html`${<div>gpt-old</div>}`;\n",
         }),
         scanStatus: "partial",
         diagnostics: [
@@ -365,6 +363,272 @@ export default function Page() {
         testCase.path,
       ).toBe(true);
     }
+  });
+
+  test("resolves semantic evidence from a JSX component instead of lexical fallback", () => {
+    const result = detectSnapshot(
+      snapshot(
+        "app/components/chat.tsx",
+        `import OpenAI from "openai";
+import { useState } from "react";
+const client = new OpenAI();
+export function Chat() {
+  const [reply, setReply] = useState("");
+  async function send() {
+    const result = await client.responses.create({ model: "gpt-old", input: "hi" });
+    setReply(result.output_text);
+  }
+  return (
+    <div className="chat">
+      <button onClick={send}>Send</button>
+      <p>It's ready — see https://example.com/docs</p>
+    </div>
+  );
+}
+`,
+      ),
+      feed,
+    );
+    expect(result.scanStatus).toBe("complete");
+    expect(result.diagnostics).toEqual([]);
+    expect(result.evidence.find((fact) => fact.kind === "sdk-argument")).toMatchObject({
+      detectorRuleId: "source.ts.openai.request-model@1",
+      modelId: "gpt-old",
+      servingPlatform: "openai",
+      confidence: "high",
+      policyEligible: true,
+    });
+  });
+
+  test("keeps JSX syntax forms synchronized without discarding semantic evidence", () => {
+    const cases = [
+      {
+        name: "closing tags and text punctuation",
+        path: "app/text.tsx",
+        body: `return <div className="a">It's 50/50 — 3 < 4 and "quoted"</div>;`,
+      },
+      {
+        name: "fragments",
+        path: "app/fragment.jsx",
+        body: `return (<><span>a</span><React.Fragment key="k">b</React.Fragment></>);`,
+      },
+      {
+        name: "expression containers and nested elements",
+        path: "app/list.tsx",
+        body:
+          `return (<ul>{["a"].map((item, index) => (<li key={item} data-index={index}>` +
+          `{item.replace(/-/g, " ")} · {index / 2} · {index < 3 ? <b>lo</b> : <i>hi</i>}</li>))}</ul>);`,
+      },
+      {
+        name: "spread, boolean, dashed, and namespaced attributes",
+        path: "app/input.tsx",
+        body: `return <input {...props} disabled data-testid="x" xlink:href="#a" />;`,
+      },
+      {
+        name: "jsx comments",
+        path: "app/comment.tsx",
+        body: `return (<div>{/* it's a "note" with a / and </div> inside */}<b /* inline */ id="a">ok</b></div>);`,
+      },
+      {
+        name: "multi-line attribute text",
+        path: "app/svg.tsx",
+        body: `return (<feColorMatrix type="matrix" values="0 0 0 0 0\n  0 0 0 1 0" />);`,
+      },
+      {
+        name: "type-argument list on an element",
+        path: "app/generic.tsx",
+        body: `return (<Tooltip<Datum> render={(datum) => <b>{datum.id}</b>} />);`,
+      },
+      {
+        name: "member and deeply nested elements",
+        path: "app/nested.tsx",
+        body: `return (<Form.Group><a><b><c>{[1].map((n) => <d key={n}>{n}</d>)}</c></b></a></Form.Group>);`,
+      },
+      {
+        name: "template literal and regex inside a container",
+        path: "app/template.tsx",
+        body: 'return (<div aria-label={`row ${count}`}>{/x/.test(name) ? name : "-"}</div>);',
+      },
+      // An unbalanced brace inside an attribute expression must not end the
+      // opening-tag lookahead early: the tag would go unrecognized and the
+      // paired `</…>` would then reopen regex-literal disambiguation, which
+      // discards every semantic fact in the file.
+      {
+        name: "unbalanced brace in an attribute expression string",
+        path: "app/sample.tsx",
+        body: `return (<CodeBlock code={"if (ready) {"}>{name}</CodeBlock>);`,
+      },
+      {
+        name: "unbalanced brace in an attribute expression regex",
+        path: "app/pattern.tsx",
+        body: `return (<Input test={/^\\{/.source}>{name}</Input>);`,
+      },
+      {
+        name: "unbalanced brace in an attribute expression comment",
+        path: "app/handler.tsx",
+        body: `return (<Button onClick={() => { /* } */ reset(); }}>{name}</Button>);`,
+      },
+      {
+        name: "unbalanced brace in an attribute expression template literal",
+        path: "app/css.tsx",
+        body: 'return (<Styled css={`&:hover { color: red;`}>{name}</Styled>);',
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const source = `import OpenAI from "openai";
+const client = new OpenAI();
+export function Component({ props, count, name }) {
+  client.responses.create({ model: "gpt-old" });
+  ${testCase.body}
+}
+`;
+      const result = detectSnapshot(snapshot(testCase.path, source), feed);
+      expect(result.diagnostics, testCase.name).toEqual([]);
+      expect(result.scanStatus, testCase.name).toBe("complete");
+      expect(
+        result.evidence.some((fact) => fact.kind === "sdk-argument" && fact.modelId === "gpt-old"),
+        testCase.name,
+      ).toBe(true);
+    }
+  });
+
+  test("keeps `<` an operator where JSX is impossible or ambiguous", () => {
+    const cases = [
+      {
+        name: "generic arrow functions in a .tsx file",
+        path: "app/generics.tsx",
+        source: `import OpenAI from "openai";
+const client = new OpenAI();
+const identity = <T,>(value: T): T => value;
+const widen = <T extends object>(value: T): T => value;
+const sizes = new Map<string, number>();
+export function Component({ count }) {
+  client.responses.create({ model: "gpt-old" });
+  sizes.set(identity("a"), widen({ n: 1 }).n);
+  for (let index = 0; index < count; index += 1) void (index << 1);
+  return count < 3;
+}
+`,
+      },
+      {
+        name: "a type assertion in a .ts file where JSX is illegal",
+        path: "src/assertion.ts",
+        source: `import OpenAI from "openai";
+const client = new OpenAI();
+const field = <HTMLInputElement>document.getElementById("a");
+client.responses.create({ model: "gpt-old" });
+export const value = field.value;
+`,
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const result = detectSnapshot(snapshot(testCase.path, testCase.source), feed);
+      expect(result.diagnostics, testCase.name).toEqual([]);
+      expect(result.scanStatus, testCase.name).toBe("complete");
+      expect(
+        result.evidence.some((fact) => fact.kind === "sdk-argument"),
+        testCase.name,
+      ).toBe(true);
+    }
+  });
+
+  test("divides after a non-null assertion and skips a shebang line", () => {
+    const cases = [
+      {
+        name: "non-null assertion before a division",
+        path: "src/ratio.ts",
+        source: `import OpenAI from "openai";
+const client = new OpenAI();
+const scaled = filters[0]! / 100;
+export const ready = !/pending/.test(String(scaled));
+client.responses.create({ model: "gpt-old" });
+`,
+      },
+      {
+        name: "shebang line",
+        path: "scripts/run.js",
+        source: `#!/usr/bin/env node
+import OpenAI from "openai";
+const client = new OpenAI();
+client.responses.create({ model: "gpt-old" });
+`,
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const result = detectSnapshot(snapshot(testCase.path, testCase.source), feed);
+      expect(result.diagnostics, testCase.name).toEqual([]);
+      expect(result.scanStatus, testCase.name).toBe("complete");
+      expect(
+        result.evidence.some((fact) => fact.kind === "sdk-argument"),
+        testCase.name,
+      ).toBe(true);
+    }
+  });
+
+  test("scans a thousand-component React application with complete coverage", () => {
+    const files: Record<string, string> = {};
+    for (let index = 0; index < 1_000; index += 1) {
+      const extension = index % 5 === 0 ? "jsx" : "tsx";
+      files[`apps/web/components/Component${index}.${extension}`] = `import OpenAI from "openai";
+const client = new OpenAI();
+export function Component${index}({ items, open }) {
+  client.responses.create({ model: "gpt-old" });
+  return (
+    <section className="card" data-index="${index}">
+      {/* component ${index} */}
+      <h2>Item's list — ${index}/1000</h2>
+      {open && <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>}
+      <>{open ? <b>open</b> : <i>closed</i>}</>
+    </section>
+  );
+}
+`;
+    }
+    const result = detectSnapshot(repositorySnapshot(files), feed);
+    expect(
+      result.diagnostics.filter(
+        (diagnostic) => diagnostic.code === "semantic-tokenization-incomplete@1",
+      ),
+    ).toEqual([]);
+    expect(result.scanStatus).toBe("complete");
+    expect(result.evidence.filter((fact) => fact.kind === "sdk-argument")).toHaveLength(1_000);
+  });
+
+  test("aggregates a repeated diagnostic code into one counted entry", () => {
+    const files: Record<string, string> = {};
+    for (let index = 0; index < 12; index += 1) {
+      files[`src/broken${index}.ts`] = `const invalid = /unterminated\nconst model = "gpt-old";\n`;
+    }
+    const result = detectSnapshot(repositorySnapshot(files), feed);
+    const aggregated = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "semantic-tokenization-incomplete@1",
+    );
+    expect(aggregated).toHaveLength(1);
+    expect(aggregated[0]?.severity).toBe("notice");
+    expect(aggregated[0]?.path).toBeUndefined();
+    expect(aggregated[0]?.message).toContain("12 files reported this diagnostic");
+    expect(aggregated[0]?.message).toContain("Sampled paths (10 of 12)");
+    expect(aggregated[0]?.message).toContain("src/broken0.ts");
+    expect(aggregated[0]?.message).not.toContain("src/broken11.ts");
+    // Every blob stayed assessed by lexical fallback, so aggregation reports
+    // degraded fidelity without pinning declared coverage to partial.
+    expect(result.scanStatus).toBe("complete");
+  });
+
+  test("keeps a single diagnostic addressable by path", () => {
+    const result = detectSnapshot(
+      snapshot("src/regex.ts", `const invalid = /unterminated\nconst model = "gpt-old";\n`),
+      feed,
+    );
+    expect(result.diagnostics).toHaveLength(1);
+    expect(result.diagnostics[0]).toMatchObject({
+      code: "semantic-tokenization-incomplete@1",
+      path: "src/regex.ts",
+      severity: "notice",
+    });
   });
 
   test("treats a comment-only workflow as complete coverage", () => {
