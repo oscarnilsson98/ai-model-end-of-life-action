@@ -58,19 +58,21 @@ const DIRECT_POLICY_RULES = new Set(
 );
 
 type Token = {
-  kind: "identifier" | "string" | "punctuation";
+  /**
+   * `jsx-name` is a JSX tag or attribute name. It is a name, so bracket tracking
+   * and `structuralValue` treat it like any other token, but it is markup rather
+   * than an expression — `<Row openai="x" />` neither reassigns nor shadows the
+   * `openai` binding, and `<Row modelId="x" />` does not rebind `modelId`. Giving
+   * it its own kind means every `kind === "identifier"` test excludes markup by
+   * construction instead of having to opt out.
+   */
+  kind: "identifier" | "string" | "punctuation" | "jsx-name";
   value: string;
   raw: string;
   offset: number;
   line: number;
   column: number;
   static: boolean;
-  /**
-   * A JSX tag or attribute name. It lexes as an identifier so bracket tracking
-   * stays balanced, but it is markup rather than an expression: `<Row openai="x" />`
-   * must not read as reassigning the `openai` binding.
-   */
-  jsx?: true;
 };
 
 type TokenizationIssue = {
@@ -519,14 +521,13 @@ function tokenize(
     }
     const raw = source.slice(tokenStart, offset);
     tokens.push({
-      kind: "identifier",
+      kind: "jsx-name",
       value: raw,
       raw,
       offset: tokenStart,
       line: tokenLine,
       column: tokenColumn,
       static: true,
-      jsx: true,
     });
   };
   const consumeJavascriptTemplate = (): { closed: boolean; dynamic: boolean } => {
@@ -1164,6 +1165,14 @@ function matchingOpenIndex(
   return null;
 }
 
+/**
+ * Tokens that can never precede a method name. A method head sits in a class or
+ * object body, so it never directly follows a `.`, an operand position, or an
+ * arrow — which also keeps the `matchingIndex` probe below off the nested
+ * `wrap(wrap(...))` chains that would otherwise make the scan quadratic.
+ */
+const NON_METHOD_PREDECESSORS = new Set([".", "?.", "(", "=", "=>", "[", ":", "&&", "||", "??"]);
+
 /** Keywords whose parenthesised head is a condition or binder, not a parameter list. */
 const PARENTHESISED_KEYWORDS = new Set([
   "if",
@@ -1257,11 +1266,9 @@ function functionParameterNames(
     // trailing `{` is what separates it from an ordinary call.
     if (
       token?.kind === "identifier" &&
-      token.jsx !== true &&
       !PARENTHESISED_KEYWORDS.has(value ?? "") &&
       structuralValue(tokens[index + 1]) === "(" &&
-      structuralValue(tokens[index - 1]) !== "." &&
-      structuralValue(tokens[index - 1]) !== "?."
+      !NON_METHOD_PREDECESSORS.has(structuralValue(tokens[index - 1]) ?? "")
     ) {
       const close = matchingIndex(tokens, index + 1, "(", ")");
       if (close !== null && structuralValue(tokens[close + 1]) === "{") {
@@ -1279,6 +1286,29 @@ function functionParameterNames(
   return names;
 }
 
+/**
+ * Whole-file facts every binding pass needs. Both are derived from one walk of the
+ * token array and are identical for every consumer, so they are computed once per
+ * file in `detectSdkCalls` and threaded down rather than recomputed — the
+ * parameter-name scan in particular is the most expensive pass in the pipeline.
+ */
+type TokenAnalysis = {
+  /** Names bound locally, which therefore are not the import of the same name. */
+  parameterNames: ReadonlySet<string>;
+  /** How many times each name is an assignment target. */
+  assignmentCounts: ReadonlyMap<string, number>;
+};
+
+function analyzeTokens(
+  tokens: readonly Token[],
+  language: "javascript" | "python",
+): TokenAnalysis {
+  return {
+    parameterNames: functionParameterNames(tokens, language),
+    assignmentCounts: assignmentTargetCounts(tokens),
+  };
+}
+
 const DIRECT_VALUE_TERMINATORS = new Set([",", ")", "}", "]", ";"]);
 
 function isCompleteDirectValue(
@@ -1293,7 +1323,11 @@ function isCompleteDirectValue(
   return allowLineBoundary && next.line > value.line;
 }
 
-function collectConstants(tokens: readonly Token[], language: "javascript" | "python"): Map<string, string> {
+function collectConstants(
+  tokens: readonly Token[],
+  language: "javascript" | "python",
+  analysis: TokenAnalysis,
+): Map<string, string> {
   const candidates = new Map<string, string | null>();
   const record = (name: string, value: string): void => {
     candidates.set(name, candidates.has(name) ? null : value);
@@ -1334,14 +1368,7 @@ function collectConstants(tokens: readonly Token[], language: "javascript" | "py
       record(token.value, tokens[index + 2]?.value as string);
     }
   }
-  const shadowed = functionParameterNames(tokens, language);
-  const assignmentCounts = new Map<string, number>();
-  for (let index = 0; index < tokens.length - 1; index += 1) {
-    const token = tokens[index];
-    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
-      assignmentCounts.set(token.value, (assignmentCounts.get(token.value) ?? 0) + 1);
-    }
-  }
+  const { parameterNames: shadowed, assignmentCounts } = analysis;
   return new Map(
     [...candidates.entries()].filter(
       (entry): entry is [string, string] =>
@@ -1470,12 +1497,11 @@ type UnsupportedFramework = {
   displayName: string;
   modulePrefixes: readonly FrameworkModulePrefix[];
   /**
-   * `partial` means published rules cover this framework's common shapes, so the
-   * notice fires only for a specifier none of them resolved. `none` means no
-   * rule exists and every model choice degrades to lexical fallback.
+   * Rule-ID prefix that counts as having understood this framework, present only
+   * when published rules cover some of its shapes. Its absence is what "no rule
+   * exists, so every model choice degrades to lexical fallback" means — one field
+   * rather than two that can be set inconsistently.
    */
-  semanticSupport: "partial" | "none";
-  /** Rule-ID prefix that counts as having understood this framework. */
   rulePrefix?: string;
 };
 
@@ -1483,63 +1509,76 @@ const npmPrefix = (prefix: string): FrameworkModulePrefix => ({ prefix, ecosyste
 const pythonPrefix = (prefix: string): FrameworkModulePrefix => ({ prefix, ecosystem: "python" });
 
 /**
+ * Vercel AI SDK packages that export no provider: the framework entrypoints and the
+ * UI bindings. They select no model on their own, so an unread import of one is not
+ * a coverage gap the way an unread provider package is. Naming them as data is what
+ * keeps `@ai-sdk/react` from being classified by how npm spells a scope.
+ */
+const AI_SDK_NON_PROVIDER_PACKAGES: ReadonlySet<string> = new Set([
+  "ai",
+  "@ai-sdk/react",
+  "@ai-sdk/rsc",
+  "@ai-sdk/vue",
+  "@ai-sdk/svelte",
+  "@ai-sdk/angular",
+  "@ai-sdk/provider",
+  "@ai-sdk/provider-utils",
+]);
+
+/** The package an npm specifier names, dropping any subpath (`ai/rsc` -> `ai`). */
+function npmPackageRoot(specifier: string): string {
+  const segments = specifier.split("/");
+  return specifier.startsWith("@") ? segments.slice(0, 2).join("/") : (segments[0] as string);
+}
+
+const PARTIAL_SUPPORT_CAUSE =
+  "but no published rule for it resolved a model in those files, so the selector shape is one this " +
+  "manifest does not read yet (for example a gateway model string such as \"openai/gpt-5\", or a " +
+  "provider member outside the published set)";
+const NO_SUPPORT_CAUSE = "and this detector manifest publishes no semantic rule for it";
+
+/**
  * Integrations that route model selection through their own abstraction. Where
  * no rule matches, model choices reach the assessment through bounded lexical
  * fallback only, so the gap is reported instead of left silent.
  */
-const UNSUPPORTED_INTEGRATION_FRAMEWORKS: readonly UnsupportedFramework[] = Object.freeze([
-  Object.freeze({
+const UNSUPPORTED_INTEGRATION_FRAMEWORKS: readonly UnsupportedFramework[] = [
+  {
     frameworkId: "vercel-ai-sdk",
     displayName: "The Vercel AI SDK",
-    modulePrefixes: Object.freeze([npmPrefix("ai"), npmPrefix("@ai-sdk")]),
-    semanticSupport: "partial" as const,
+    modulePrefixes: [npmPrefix("ai"), npmPrefix("@ai-sdk")],
     rulePrefix: "source.ts.vercel-ai-sdk.",
-  }),
-  Object.freeze({
+  },
+  {
     frameworkId: "langchain",
     displayName: "LangChain",
-    modulePrefixes: Object.freeze([
-      npmPrefix("langchain"),
-      npmPrefix("@langchain"),
-      pythonPrefix("langchain"),
-    ]),
-    semanticSupport: "none" as const,
-  }),
-  Object.freeze({
+    modulePrefixes: [npmPrefix("langchain"), npmPrefix("@langchain"), pythonPrefix("langchain")],
+  },
+  {
     frameworkId: "llamaindex",
     displayName: "LlamaIndex",
-    modulePrefixes: Object.freeze([
+    modulePrefixes: [
       npmPrefix("llamaindex"),
       npmPrefix("@llamaindex"),
       pythonPrefix("llama_index"),
-    ]),
-    semanticSupport: "none" as const,
-  }),
-  Object.freeze({
+    ],
+  },
+  {
     frameworkId: "litellm",
     displayName: "LiteLLM",
-    modulePrefixes: Object.freeze([npmPrefix("litellm"), pythonPrefix("litellm")]),
-    semanticSupport: "none" as const,
-  }),
-  Object.freeze({
+    modulePrefixes: [npmPrefix("litellm"), pythonPrefix("litellm")],
+  },
+  {
     frameworkId: "google-generative-ai-legacy",
     displayName: "The legacy Google Generative AI SDK",
-    modulePrefixes: Object.freeze([
-      npmPrefix("@google/generative-ai"),
-      pythonPrefix("google.generativeai"),
-    ]),
-    semanticSupport: "none" as const,
-  }),
-  Object.freeze({
+    modulePrefixes: [npmPrefix("@google/generative-ai"), pythonPrefix("google.generativeai")],
+  },
+  {
     frameworkId: "vertex-ai-generative-legacy",
     displayName: "The retired Vertex AI generative SDK module",
-    modulePrefixes: Object.freeze([
-      npmPrefix("@google-cloud/vertexai"),
-      pythonPrefix("vertexai"),
-    ]),
-    semanticSupport: "none" as const,
-  }),
-]);
+    modulePrefixes: [npmPrefix("@google-cloud/vertexai"), pythonPrefix("vertexai")],
+  },
+];
 
 /**
  * Whether an import specifier from `language` names a framework module. An npm
@@ -1555,17 +1594,14 @@ function unsupportedFrameworkForModule(
   language: "javascript" | "python",
 ): UnsupportedFramework | undefined {
   const ecosystem = language === "javascript" ? "npm" : "python";
+  // A Python prefix also matches a dotted submodule and an underscored sibling
+  // distribution; an npm prefix matches only a subpath.
+  const suffixes = ecosystem === "npm" ? ["/"] : [".", "_"];
   for (const framework of UNSUPPORTED_INTEGRATION_FRAMEWORKS) {
     for (const { prefix, ecosystem: prefixEcosystem } of framework.modulePrefixes) {
       if (prefixEcosystem !== ecosystem) continue;
       if (specifier === prefix) return framework;
-      if (ecosystem === "npm" ? specifier.startsWith(`${prefix}/`) : false) return framework;
-      if (
-        ecosystem === "python" &&
-        (specifier.startsWith(`${prefix}.`) || specifier.startsWith(`${prefix}_`))
-      ) {
-        return framework;
-      }
+      if (suffixes.some((suffix) => specifier.startsWith(`${prefix}${suffix}`))) return framework;
     }
   }
   return undefined;
@@ -1590,26 +1626,25 @@ function unsupportedFrameworkImports(
   facts: readonly EvidenceFact[],
   language: "javascript" | "python",
 ): Array<{ frameworkId: string; facade: boolean }> {
-  const facadeById = new Map<string, boolean>();
+  const unreadByFramework = new Map<UnsupportedFramework, string[]>();
   for (const specifier of specifiers) {
     const framework = unsupportedFrameworkForModule(specifier, language);
     if (framework === undefined) continue;
     const provider = AI_SDK_PROVIDER_BY_MODULE.get(specifier);
-    if (provider !== undefined) {
-      const ruleId = aiSdkRuleId(provider);
-      if (facts.some((fact) => fact.detectorRuleId === ruleId)) continue;
+    if (provider !== undefined && facts.some((fact) => fact.detectorRuleId === aiSdkRuleId(provider))) {
+      continue;
     }
-    // Only the framework's own entrypoints are a façade; a provider package
-    // names a platform, so an unread one is a gap wherever it appears.
-    const facade = framework.semanticSupport === "partial" &&
-      provider === undefined &&
-      !specifier.startsWith("@");
-    facadeById.set(
-      framework.frameworkId,
-      (facadeById.get(framework.frameworkId) ?? true) && facade,
-    );
+    const unread = unreadByFramework.get(framework) ?? [];
+    unread.push(specifier);
+    unreadByFramework.set(framework, unread);
   }
-  return [...facadeById].map(([frameworkId, facade]) => ({ frameworkId, facade }));
+  return [...unreadByFramework].map(([framework, unread]) => ({
+    frameworkId: framework.frameworkId,
+    // The file is a façade only if every unread specifier in it is one. A single
+    // unread provider package makes it a real gap.
+    facade: framework.rulePrefix !== undefined &&
+      unread.every((specifier) => AI_SDK_NON_PROVIDER_PACKAGES.has(npmPackageRoot(specifier))),
+  }));
 }
 
 const CONSTRUCTORS_BY_MODULE: Readonly<Record<string, Readonly<Record<string, ClientBinding["integration"]>>>> = {
@@ -1643,11 +1678,6 @@ type AiSdkProvider = {
   module: string;
   integration: ClientBinding["integration"];
   platform: string;
-  /**
-   * Azure names a deployment and Bedrock accepts profiles and ARNs, exactly as
-   * in the official-SDK rules, so neither selector is an exact model ID.
-   */
-  selectorKind: ModelSelectorKind;
   /** Exported provider instances, including the package's own aliases. */
   instanceNames: readonly string[];
   /** Exported provider factories, including the package's own aliases. */
@@ -1660,67 +1690,79 @@ type AiSdkProvider = {
  * exact rules rather than generic framework matching. Instance and factory
  * names are taken from each package's published type surface.
  */
-const AI_SDK_PROVIDERS: readonly AiSdkProvider[] = Object.freeze([
-  Object.freeze({
+const AI_SDK_PROVIDERS: readonly AiSdkProvider[] = [
+  {
     providerId: "openai",
     module: "@ai-sdk/openai",
-    integration: "openai" as const,
+    integration: "openai",
     platform: "openai",
-    selectorKind: "model-id" as const,
-    instanceNames: Object.freeze(["openai"]),
-    factoryNames: Object.freeze(["createOpenAI"]),
-  }),
-  Object.freeze({
+    instanceNames: ["openai"],
+    factoryNames: ["createOpenAI"],
+  },
+  {
     providerId: "azure",
     module: "@ai-sdk/azure",
-    integration: "openai" as const,
+    integration: "openai",
     platform: "azure",
-    selectorKind: "deployment-name" as const,
-    instanceNames: Object.freeze(["azure"]),
-    factoryNames: Object.freeze(["createAzure"]),
-  }),
-  Object.freeze({
+    instanceNames: ["azure"],
+    factoryNames: ["createAzure"],
+  },
+  {
     providerId: "anthropic",
     module: "@ai-sdk/anthropic",
-    integration: "anthropic" as const,
+    integration: "anthropic",
     platform: "anthropic",
-    selectorKind: "model-id" as const,
-    instanceNames: Object.freeze(["anthropic"]),
-    factoryNames: Object.freeze(["createAnthropic"]),
-  }),
-  Object.freeze({
+    instanceNames: ["anthropic"],
+    factoryNames: ["createAnthropic"],
+  },
+  {
     providerId: "google",
     module: "@ai-sdk/google",
-    integration: "google" as const,
+    integration: "google",
     platform: "google",
-    selectorKind: "model-id" as const,
-    instanceNames: Object.freeze(["google"]),
-    factoryNames: Object.freeze(["createGoogle", "createGoogleGenerativeAI"]),
-  }),
-  Object.freeze({
+    instanceNames: ["google"],
+    factoryNames: ["createGoogle", "createGoogleGenerativeAI"],
+  },
+  {
     providerId: "google-vertex",
     module: "@ai-sdk/google-vertex",
-    integration: "google" as const,
+    integration: "google",
     platform: "google-vertex",
-    selectorKind: "model-id" as const,
-    instanceNames: Object.freeze(["googleVertex", "vertex"]),
-    factoryNames: Object.freeze(["createGoogleVertex", "createVertex"]),
-  }),
-  Object.freeze({
+    instanceNames: ["googleVertex", "vertex"],
+    factoryNames: ["createGoogleVertex", "createVertex"],
+  },
+  {
     providerId: "amazon-bedrock",
     module: "@ai-sdk/amazon-bedrock",
-    integration: "aws-bedrock" as const,
+    integration: "aws-bedrock",
     platform: "aws-bedrock",
-    selectorKind: "polymorphic" as const,
-    instanceNames: Object.freeze(["amazonBedrock", "bedrock"]),
-    factoryNames: Object.freeze(["createAmazonBedrock"]),
-  }),
-]);
+    instanceNames: ["amazonBedrock", "bedrock"],
+    factoryNames: ["createAmazonBedrock"],
+  },
+];
+
+/**
+ * Non-language model families a provider exposes. Each is published under both a
+ * bare and a `Model`-suffixed name, so the pair is generated rather than listed —
+ * a hand-written list had already drifted into naming one spelling of a family and
+ * not the other.
+ */
+const AI_SDK_MODEL_FAMILIES = [
+  "embedding",
+  "textEmbedding",
+  "image",
+  "video",
+  "speech",
+  "transcription",
+  "reranking",
+];
 
 /**
  * Provider members whose first positional argument is a model selector. An
  * allowlist keeps an unrecognized future member a reported gap rather than a
- * guessed model ID; `tools`, `files`, and `skills` are not model factories.
+ * guessed model ID: `tools`, `files`, and `skills` are not model factories, and a
+ * member whose first argument is something else — a locale, say — would otherwise
+ * be published as a model. Every name here is one the detector contract lists.
  */
 const AI_SDK_MODEL_METHODS: ReadonlySet<string> = new Set([
   "languageModel",
@@ -1728,26 +1770,7 @@ const AI_SDK_MODEL_METHODS: ReadonlySet<string> = new Set([
   "messages",
   "responses",
   "completion",
-  "deepseek",
-  "generativeAI",
-  "interactions",
-  "embedding",
-  "embeddingModel",
-  "textEmbedding",
-  "textEmbeddingModel",
-  "image",
-  "imageModel",
-  "video",
-  "videoModel",
-  "speech",
-  "speechModel",
-  "speechTranslationModel",
-  "transcription",
-  "transcriptionModel",
-  "translation",
-  "reranking",
-  "rerankingModel",
-  "experimental_realtime",
+  ...AI_SDK_MODEL_FAMILIES.flatMap((family) => [family, `${family}Model`]),
 ]);
 
 const AI_SDK_PROVIDER_BY_MODULE = new Map(
@@ -1759,16 +1782,125 @@ function aiSdkRuleId(provider: AiSdkProvider): string {
 }
 
 /**
- * Whether `index` names a variable being assigned rather than a property or a
- * JSX attribute. `flags.openai = true` and `<Row openai="x" />` both put the
- * identifier immediately before an `=`, so without this the provider names an
- * import registered — which are ordinary object keys and React props — would
- * read as reassignments and discard the import for the whole file.
+ * Rule IDs this detector builds from a registry rather than a literal, so a test
+ * can assert the manifest declares them. An undeclared rule still emits facts but
+ * `DIRECT_POLICY_RULES` — derived from the manifest — leaves them ineligible, so
+ * the omission fails open with no error.
+ */
+export function emittableDetectorRuleIds(): readonly string[] {
+  return AI_SDK_PROVIDERS.map(aiSdkRuleId);
+}
+
+/**
+ * Whether `index` names a variable being assigned rather than a property.
+ * `flags.openai = true` puts the identifier immediately before an `=`, so without
+ * this the provider names an import registered — which are ordinary object keys —
+ * would read as reassignments and discard the import for the whole file. A JSX
+ * attribute name is excluded by its own token kind.
  */
 function isBareAssignmentTarget(tokens: readonly Token[], index: number): boolean {
-  if (tokens[index]?.jsx === true) return false;
   const previous = structuralValue(tokens[index - 1]);
   return previous !== "." && previous !== "?.";
+}
+
+/**
+ * A binding map that distrusts an ambiguous name. Registering a second, different
+ * binding for one variable means this pass cannot tell which one a later call
+ * uses, so the name is dropped and permanently marked conflicted rather than
+ * resolved to whichever assignment came last.
+ */
+function conflictAwareBindings<T extends { variable: string }>(): {
+  bindings: Map<string, T>;
+  setBinding: (binding: T) => void;
+} {
+  const bindings = new Map<string, T>();
+  const conflicted = new Set<string>();
+  const setBinding = (binding: T): void => {
+    if (conflicted.has(binding.variable)) return;
+    const existing = bindings.get(binding.variable);
+    if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(binding)) {
+      bindings.delete(binding.variable);
+      conflicted.add(binding.variable);
+      return;
+    }
+    bindings.set(binding.variable, binding);
+  };
+  return { bindings, setBinding };
+}
+
+/**
+ * How many times each name appears as an assignment target. A name assigned more
+ * than once cannot be attributed to one construction site, and one that is also a
+ * locally bound parameter is not the import at all.
+ */
+function assignmentTargetCounts(tokens: readonly Token[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    const token = tokens[index];
+    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
+      counts.set(token.value, (counts.get(token.value) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/** Drop every binding whose variable is reassigned or locally bound as a parameter. */
+function pruneUntrustedBindings(
+  bindings: Map<string, { variable: string }>,
+  analysis: TokenAnalysis,
+): void {
+  for (const variable of [...bindings.keys()]) {
+    if (
+      (analysis.assignmentCounts.get(variable) ?? 0) > 1 ||
+      analysis.parameterNames.has(variable)
+    ) {
+      bindings.delete(variable);
+    }
+  }
+}
+
+/** How far past a statement keyword the `from "module"` clause is looked for. */
+const MODULE_CLAUSE_LOOKAHEAD = 80;
+
+/**
+ * The `from "module"` clause of the statement starting at `index`, or undefined when
+ * the statement has none within the lookahead. Shared by `import … from` and
+ * `export … from`, which are the same clause after different keywords.
+ */
+function moduleClauseAfter(
+  tokens: readonly Token[],
+  index: number,
+): { fromIndex: number; moduleIndex: number } | undefined {
+  const limit = Math.min(tokens.length, index + MODULE_CLAUSE_LOOKAHEAD);
+  for (let cursor = index + 1; cursor < limit; cursor += 1) {
+    if (
+      structuralValue(tokens[cursor]) === ";" ||
+      isIdentifier(tokens[cursor], "import") ||
+      isIdentifier(tokens[cursor], "export")
+    ) break;
+    if (isIdentifier(tokens[cursor], "from") && tokens[cursor + 1]?.kind === "string") {
+      return { fromIndex: cursor, moduleIndex: cursor + 1 };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The brace clause of an import statement, or undefined when it has none (a
+ * default, namespace, or side-effect-only import). Located once per statement and
+ * shared by the value check and the named-specifier walk.
+ */
+function importClauseBraces(
+  tokens: readonly Token[],
+  importIndex: number,
+  fromIndex: number,
+): { open: number; close: number } | undefined {
+  for (let open = importIndex + 1; open < fromIndex; open += 1) {
+    if (structuralValue(tokens[open]) !== "{") continue;
+    const close = matchingIndex(tokens, open, "{", "}");
+    return close === null || close >= fromIndex ? undefined : { open, close };
+  }
+  return undefined;
 }
 
 /**
@@ -1781,38 +1913,32 @@ function importsAnyValue(
   tokens: readonly Token[],
   importIndex: number,
   fromIndex: number,
+  braces: { open: number; close: number } | undefined,
 ): boolean {
-  const open = tokens.findIndex(
-    (token, index) =>
-      index > importIndex && index < fromIndex && structuralValue(token) === "{",
-  );
-  const clauseEnd = open >= 0 ? open : fromIndex;
-  for (let index = importIndex + 1; index < clauseEnd; index += 1) {
+  // A default or namespace specifier before the braces already binds a value.
+  for (let index = importIndex + 1; index < (braces?.open ?? fromIndex); index += 1) {
     const token = tokens[index];
-    if (token?.kind !== "identifier") continue;
-    if (token.value !== "type" && token.value !== "as") return true;
+    if (token?.kind === "identifier" && token.value !== "type") return true;
   }
-  if (open < 0) return true; // a namespace, default, or side-effect-only import
-  const close = matchingIndex(tokens, open, "{", "}");
-  if (close === null || close > fromIndex) return true;
-  let named = 0;
-  for (let index = open + 1; index < close; index += 1) {
+  if (braces === undefined) return true; // namespace, default, or side-effect only
+  // `import {} from "m"` binds nothing but still evaluates the module.
+  if (braces.open + 1 === braces.close) return true;
+  for (let index = braces.open + 1; index < braces.close; index += 1) {
     const token = tokens[index];
     if (token?.kind !== "identifier") continue;
     if (token.value === "type") {
       index += 1;
       continue;
     }
-    named += 1;
-    if (tokens[index + 1]?.value === "as") index += 2;
+    return true;
   }
-  // `import {} from "m"` binds nothing but still evaluates the module.
-  return named > 0 || open + 1 === close;
+  return false;
 }
 
 function importProvenance(
   tokens: readonly Token[],
   language: "javascript" | "python",
+  analysis: TokenAnalysis,
 ): ImportProvenance {
   const constructors = new Map<string, ImportedConstructor>();
   const awsCommands = new Map<string, string>();
@@ -1887,68 +2013,44 @@ function importProvenance(
         continue;
       }
       if (isIdentifier(tokens[index], "export") && tokens[index + 1]?.value !== "type") {
-        for (let cursor = index + 1; cursor < Math.min(tokens.length, index + 80); cursor += 1) {
-          if (
-            structuralValue(tokens[cursor]) === ";" ||
-            isIdentifier(tokens[cursor], "import") ||
-            isIdentifier(tokens[cursor], "export")
-          ) break;
-          if (isIdentifier(tokens[cursor], "from") && tokens[cursor + 1]?.kind === "string") {
-            moduleSpecifiers.add(tokens[cursor + 1]?.value as string);
-            break;
-          }
+        const clause = moduleClauseAfter(tokens, index);
+        if (clause !== undefined) {
+          moduleSpecifiers.add(tokens[clause.moduleIndex]?.value as string);
         }
       }
       if (isIdentifier(tokens[index], "import")) {
-        let fromIndex = -1;
-        let moduleIndex = -1;
-        for (let cursor = index + 1; cursor < Math.min(tokens.length, index + 80); cursor += 1) {
-          if (
-            structuralValue(tokens[cursor]) === ";" ||
-            isIdentifier(tokens[cursor], "import")
-          ) break;
-          if (isIdentifier(tokens[cursor], "from") && tokens[cursor + 1]?.kind === "string") {
-            fromIndex = cursor;
-            moduleIndex = cursor + 1;
-            break;
-          }
-        }
-        if (fromIndex < 0 || moduleIndex < 0) continue;
+        const clause = moduleClauseAfter(tokens, index);
+        if (clause === undefined) continue;
+        const { fromIndex, moduleIndex } = clause;
         const moduleName = tokens[moduleIndex]?.value as string;
         if (tokens[index + 1]?.value === "type") {
           index = moduleIndex;
           continue;
         }
+        const braces = importClauseBraces(tokens, index, fromIndex);
         // Recorded after the type-only check: a discarded type import does not
         // select a model at runtime. An inline `{ type X }` modifier on every
         // specifier erases the import just as the statement-level form does.
-        if (importsAnyValue(tokens, index, fromIndex)) moduleSpecifiers.add(moduleName);
+        if (importsAnyValue(tokens, index, fromIndex, braces)) moduleSpecifiers.add(moduleName);
         const defaultName = DEFAULT_CONSTRUCTOR_BY_MODULE[moduleName];
         const first = tokens[index + 1];
         if (defaultName !== undefined && first?.kind === "identifier" && first.value !== "type") {
           addConstructor(moduleName, defaultName, first.value);
         }
-        const open = tokens.findIndex(
-          (token, tokenIndex) =>
-            tokenIndex > index && tokenIndex < fromIndex && structuralValue(token) === "{",
-        );
-        if (open >= 0) {
-          const close = matchingIndex(tokens, open, "{", "}");
-          if (close !== null && close < fromIndex) {
-            for (let cursor = open + 1; cursor < close; cursor += 1) {
-              const imported = tokens[cursor];
-              if (imported?.kind !== "identifier") continue;
-              if (imported.value === "type") {
-                cursor += 1;
-                continue;
-              }
-              const local = tokens[cursor + 1]?.value === "as" &&
-                  tokens[cursor + 2]?.kind === "identifier"
-                ? tokens[cursor + 2]?.value as string
-                : imported.value;
-              addNamedImport(moduleName, imported.value, local);
-              if (local !== imported.value) cursor += 2;
+        if (braces !== undefined) {
+          for (let cursor = braces.open + 1; cursor < braces.close; cursor += 1) {
+            const imported = tokens[cursor];
+            if (imported?.kind !== "identifier") continue;
+            if (imported.value === "type") {
+              cursor += 1;
+              continue;
             }
+            const local = tokens[cursor + 1]?.value === "as" &&
+                tokens[cursor + 2]?.kind === "identifier"
+              ? tokens[cursor + 2]?.value as string
+              : imported.value;
+            addNamedImport(moduleName, imported.value, local);
+            if (local !== imported.value) cursor += 2;
           }
         }
         index = moduleIndex;
@@ -2067,48 +2169,14 @@ function importProvenance(
     ...aiSdkFactories.keys(),
   ]);
   const shadowed = new Set<string>();
-  for (const name of functionParameterNames(tokens, language)) {
+  // The sole source of parameter shadowing: `analysis.parameterNames` recognizes
+  // every binder form, so nothing below needs to re-derive a subset of it.
+  for (const name of analysis.parameterNames) {
     if (importedNames.has(name)) shadowed.add(name);
   }
-  const inspectParameters = (open: number, close: number): void => {
-    let depth = 0;
-    for (let index = open + 1; index < close; index += 1) {
-      const value = structuralValue(tokens[index]);
-      if (["(", "[", "{"].includes(value ?? "")) depth += 1;
-      else if ([")", "]", "}"].includes(value ?? "")) depth = Math.max(0, depth - 1);
-      if (
-        depth === 0 &&
-        tokens[index]?.kind === "identifier" &&
-        importedNames.has(value ?? "") &&
-        (structuralValue(tokens[index - 1]) === "(" ||
-          structuralValue(tokens[index - 1]) === ",")
-      ) {
-        shadowed.add(value as string);
-      }
-    }
-  };
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     const value = token?.value;
-    if (
-      token?.kind === "identifier" &&
-      (value === "function" || value === "def") &&
-      tokens[index + 1]?.kind === "identifier"
-    ) {
-      let open = index + 2;
-      while (open < Math.min(tokens.length, index + 12) && structuralValue(tokens[open]) !== "(") {
-        open += 1;
-      }
-      if (structuralValue(tokens[open]) === "(") {
-        const close = matchingIndex(tokens, open, "(", ")");
-        if (close !== null) inspectParameters(open, close);
-      }
-    }
-    if (language === "javascript" && structuralValue(token) === "=>") {
-      if (tokens[index - 1]?.kind === "identifier" && importedNames.has(tokens[index - 1]?.value ?? "")) {
-        shadowed.add(tokens[index - 1]?.value as string);
-      }
-    }
     if (
       tokens[index]?.kind === "identifier" &&
       importedNames.has(value ?? "") &&
@@ -2344,6 +2412,20 @@ function endpointSignal(
     : { present: true, platform, safe: true };
 }
 
+/**
+ * What a platform's model selector actually names. Azure names a deployment and
+ * Bedrock accepts profiles and ARNs, so neither is an exact feed model ID. Stating
+ * this once keeps the answer keyed on the platform that was actually resolved — a
+ * per-package copy would keep saying `model-id` for an OpenAI package pointed at
+ * an Azure endpoint, and `createSemanticFact` grants blocking authority on exactly
+ * `selectorKind === "model-id"` plus a resolved platform.
+ */
+function selectorKindForPlatform(platform: string | undefined): ModelSelectorKind {
+  if (platform === "azure") return "deployment-name";
+  if (platform === "aws-bedrock") return "polymorphic";
+  return "model-id";
+}
+
 function resolvedClientPlatform(input: {
   integration: ClientBinding["integration"];
   canonicalName: string;
@@ -2380,20 +2462,10 @@ function resolvedClientPlatform(input: {
 function clientBindings(
   tokens: readonly Token[],
   language: "javascript" | "python",
+  analysis: TokenAnalysis,
 ): { bindings: Map<string, ClientBinding>; imports: ImportProvenance } {
-  const bindings = new Map<string, ClientBinding>();
-  const imports = importProvenance(tokens, language);
-  const conflictedBindings = new Set<string>();
-  const setBinding = (binding: ClientBinding): void => {
-    if (conflictedBindings.has(binding.variable)) return;
-    const existing = bindings.get(binding.variable);
-    if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(binding)) {
-      bindings.delete(binding.variable);
-      conflictedBindings.add(binding.variable);
-      return;
-    }
-    bindings.set(binding.variable, binding);
-  };
+  const imports = importProvenance(tokens, language, analysis);
+  const { bindings, setBinding } = conflictAwareBindings<ClientBinding>();
 
   const googlePlatform = (
     arguments_: readonly Token[],
@@ -2478,17 +2550,11 @@ function clientBindings(
         arguments: arguments_,
         language,
       });
-      const selectorPlatform = resolution.servingPlatform ?? platform;
       setBinding({
         variable,
         integration: "openai",
         ...resolution,
-        selectorKind:
-          selectorPlatform === "azure"
-            ? "deployment-name"
-            : selectorPlatform === "aws-bedrock"
-              ? "polymorphic"
-              : "model-id",
+        selectorKind: selectorKindForPlatform(resolution.servingPlatform ?? platform),
       });
     } else if (imported.integration === "anthropic") {
       const resolution = resolvedClientPlatform({
@@ -2577,27 +2643,17 @@ function clientBindings(
       }
     }
   }
-  const parameterNames = functionParameterNames(tokens, language);
-  const assignmentCounts = new Map<string, number>();
-  for (let index = 0; index < tokens.length - 1; index += 1) {
-    const token = tokens[index];
-    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
-      assignmentCounts.set(token.value, (assignmentCounts.get(token.value) ?? 0) + 1);
-    }
-  }
-  for (const [variable] of bindings) {
-    const assignments = assignmentCounts.get(variable) ?? 0;
-    if (assignments > 1 || parameterNames.has(variable)) {
-      bindings.delete(variable);
-    }
-  }
+  pruneUntrustedBindings(bindings, analysis);
   return { bindings, imports };
 }
 
-function shadowedJavascriptEnvironmentGlobals(tokens: readonly Token[]): ReadonlySet<string> {
+function shadowedJavascriptEnvironmentGlobals(
+  tokens: readonly Token[],
+  analysis: TokenAnalysis,
+): ReadonlySet<string> {
   const candidates = new Set(["process", "Bun", "Deno"]);
   const shadowed = new Set<string>();
-  for (const name of functionParameterNames(tokens, "javascript")) {
+  for (const name of analysis.parameterNames) {
     if (candidates.has(name)) shadowed.add(name);
   }
   for (let index = 0; index < tokens.length; index += 1) {
@@ -3043,10 +3099,18 @@ function directSemanticLiteralSpan(
 type AiSdkProviderBinding = {
   variable: string;
   provider: AiSdkProvider;
-  servingPlatform?: string;
+  /**
+   * The package pins the platform, so a resolved binding always serves
+   * `provider.platform` and an unresolved one serves nothing. `servingPlatform`
+   * and `endpointSafe` are therefore derived where the `ClientBinding` is built,
+   * rather than carried as fields three construction sites must keep consistent.
+   */
   platformResolution: PlatformResolution;
-  endpointSafe: boolean;
 };
+
+/** Tokens that can appear inside the simple type annotations the scan below crosses. */
+const ANNOTATION_TOKENS = new Set([".", "<", ">", "|", "&", "[", "]", "?"]);
+const ANNOTATION_SCAN_LIMIT = 12;
 
 /**
  * The variable a `=` at `equalsIndex` assigns to, or undefined when the target is
@@ -3062,73 +3126,60 @@ function assignedVariableBefore(
   tokens: readonly Token[],
   equalsIndex: number,
 ): string | undefined {
-  let index = equalsIndex - 1;
+  const start = equalsIndex - 1;
+  let index = start;
   // Step back over a simple type annotation — `: OpenAIProvider`, `: Provider<C>`,
   // `: A | B`, `: Foo[]` — to the name it annotates. The run deliberately excludes
   // `,`, `;`, and every bracket that is not part of an index or type-argument
   // list, so the scan cannot walk out of the declaration and mistake an earlier
   // object literal's `a: 1` for the annotation.
-  const annotationToken = new Set([".", "<", ">", "|", "&", "[", "]", "?"]);
-  for (let scan = index; scan > 0 && index - scan < 12; scan -= 1) {
+  for (let scan = start; scan > 0 && start - scan < ANNOTATION_SCAN_LIMIT; scan -= 1) {
     const value = structuralValue(tokens[scan]);
     if (value === ":") {
       index = scan - 1;
       break;
     }
-    if (tokens[scan]?.kind === "identifier") continue;
-    if (value !== null && annotationToken.has(value)) continue;
+    if (tokens[scan]?.kind === "identifier" || (value !== null && ANNOTATION_TOKENS.has(value))) {
+      continue;
+    }
     break;
   }
   const token = tokens[index];
-  if (token === undefined || token.kind !== "identifier" || token.jsx === true) return undefined;
+  if (token?.kind !== "identifier") return undefined;
   return isBareAssignmentTarget(tokens, index) ? token.value : undefined;
 }
 
 /**
- * An explicit recognized endpoint must agree with the provider package. A
- * custom or computed endpoint leaves the platform unknown, exactly as a custom
- * `baseURL` does for the official OpenAI client.
+ * An explicit recognized endpoint must agree with the provider package; a custom
+ * or computed one leaves the platform unknown. That is the policy
+ * `resolvedClientPlatform` already applies to the official clients, so it is
+ * reused rather than restated — otherwise a future change to which hosts are
+ * recognized would reach the official rules and miss these. The provider id is
+ * passed as the canonical name because the endpoint-override escape there is
+ * keyed on the official client's `OpenAI` constructor, which no provider is.
  */
-function aiSdkFactoryPlatform(
+function aiSdkFactoryResolution(
   provider: AiSdkProvider,
   arguments_: readonly Token[],
-): Pick<AiSdkProviderBinding, "servingPlatform" | "platformResolution" | "endpointSafe"> {
-  const endpoint = endpointSignal(arguments_);
-  if (!endpoint.safe) return { platformResolution: "unknown", endpointSafe: false };
-  if (!endpoint.present || endpoint.platform === provider.platform) {
-    return {
-      servingPlatform: provider.platform,
-      platformResolution: "resolved",
-      endpointSafe: true,
-    };
-  }
-  return { platformResolution: "ambiguous", endpointSafe: false };
+): PlatformResolution {
+  return resolvedClientPlatform({
+    integration: provider.integration,
+    canonicalName: provider.providerId,
+    defaultPlatform: provider.platform,
+    arguments: arguments_,
+    language: "javascript",
+  }).platformResolution;
 }
 
 function aiSdkProviderBindings(
   tokens: readonly Token[],
   imports: ImportProvenance,
+  analysis: TokenAnalysis,
 ): Map<string, AiSdkProviderBinding> {
-  const bindings = new Map<string, AiSdkProviderBinding>();
-  const conflicted = new Set<string>();
-  const setBinding = (binding: AiSdkProviderBinding): void => {
-    if (conflicted.has(binding.variable)) return;
-    const existing = bindings.get(binding.variable);
-    if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(binding)) {
-      bindings.delete(binding.variable);
-      conflicted.add(binding.variable);
-      return;
-    }
-    bindings.set(binding.variable, binding);
-  };
+  const { bindings, setBinding } = conflictAwareBindings<AiSdkProviderBinding>();
+  // An imported instance needs no construction site: the import is the binding.
   for (const [variable, provider] of imports.aiSdkInstances) {
-    setBinding({
-      variable,
-      provider,
-      servingPlatform: provider.platform,
-      platformResolution: "resolved",
-      endpointSafe: true,
-    });
+    setBinding({ variable, provider, platformResolution: "resolved" });
   }
   for (let index = 0; index < tokens.length; index += 1) {
     if (tokens[index]?.kind !== "identifier") continue;
@@ -3137,27 +3188,13 @@ function aiSdkProviderBindings(
     if (tokens[index - 1]?.value !== "=") continue;
     const variable = assignedVariableBefore(tokens, index - 1);
     if (variable === undefined) continue;
-    const close = matchingIndex(tokens, index + 1, "(", ")");
-    const arguments_ = close === null ? [] : tokens.slice(index + 2, close);
     setBinding({
       variable,
       provider,
-      ...aiSdkFactoryPlatform(provider, arguments_),
+      platformResolution: aiSdkFactoryResolution(provider, constructorArguments(tokens, index)),
     });
   }
-  const parameterNames = functionParameterNames(tokens, "javascript");
-  const assignmentCounts = new Map<string, number>();
-  for (let index = 0; index < tokens.length - 1; index += 1) {
-    const token = tokens[index];
-    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
-      assignmentCounts.set(token.value, (assignmentCounts.get(token.value) ?? 0) + 1);
-    }
-  }
-  for (const [variable] of bindings) {
-    if ((assignmentCounts.get(variable) ?? 0) > 1 || parameterNames.has(variable)) {
-      bindings.delete(variable);
-    }
-  }
+  pruneUntrustedBindings(bindings, analysis);
   return bindings;
 }
 
@@ -3170,9 +3207,7 @@ function aiSdkProviderBindings(
  * selector shape was never understood.
  */
 function opensModelSelector(token: Token): boolean {
-  if (token.kind === "string") return true;
-  if (token.kind === "identifier") return true;
-  return false;
+  return token.kind === "string" || token.kind === "identifier";
 }
 
 /**
@@ -3185,26 +3220,28 @@ function detectAiSdkModelCalls(input: {
   tokens: readonly Token[];
   constants: ReadonlyMap<string, string>;
   imports: ImportProvenance;
+  analysis: TokenAnalysis;
   path: string;
   blobOid: string;
   scope: EvidenceScope;
   shadowedEnvironmentGlobals: ReadonlySet<string>;
-}): {
+  /** The file's shared fact array, so the evidence budget stays cumulative. */
   facts: EvidenceFact[];
-  consumed: Array<{ fact: EvidenceFact; binding: ClientBinding; resolved: ResolvedValue }>;
   literalSpans: SemanticLiteralSpan[];
-} {
-  const { tokens } = input;
-  const facts: EvidenceFact[] = [];
-  const consumed: Array<{ fact: EvidenceFact; binding: ClientBinding; resolved: ResolvedValue }> = [];
-  const literalSpans: SemanticLiteralSpan[] = [];
-  // Checked before the binding scan, which walks every token twice: a file that
-  // imported no provider can produce no binding, so the passes are pure waste.
-  // A factory can also be invoked directly, without ever binding a variable.
+  recordConsumedEnvironment: (
+    fact: EvidenceFact,
+    binding: ClientBinding,
+    resolved: ResolvedValue,
+  ) => void;
+}): void {
+  const { tokens, facts, literalSpans } = input;
+  // Checked before the binding scan, which walks every token: a file that imported
+  // no provider can produce no binding, so the pass would be pure waste. A factory
+  // can also be invoked directly, without ever binding a variable.
   if (input.imports.aiSdkInstances.size === 0 && input.imports.aiSdkFactories.size === 0) {
-    return { facts, consumed, literalSpans };
+    return;
   }
-  const bindings = aiSdkProviderBindings(tokens, input.imports);
+  const bindings = aiSdkProviderBindings(tokens, input.imports, input.analysis);
   const occurrenceByAnchor = new Map<string, number>();
   for (let openIndex = 0; openIndex < tokens.length; openIndex += 1) {
     if (structuralValue(tokens[openIndex]) !== "(") continue;
@@ -3230,7 +3267,10 @@ function detectAiSdkModelCalls(input: {
       binding = {
         variable: tokens[nameIndex]?.value as string,
         provider,
-        ...aiSdkFactoryPlatform(provider, tokens.slice((factoryOpen as number) + 1, openIndex - 1)),
+        platformResolution: aiSdkFactoryResolution(
+          provider,
+          constructorArguments(tokens, factoryOpen as number - 1),
+        ),
       };
       anchorChain = [tokens[nameIndex]?.value as string, "()"];
     }
@@ -3238,15 +3278,14 @@ function detectAiSdkModelCalls(input: {
     const valueIndex = openIndex + 1;
     const valueToken = tokens[valueIndex];
     if (valueToken === undefined || !opensModelSelector(valueToken)) continue;
+    const resolvedPlatform = binding.platformResolution === "resolved";
     const clientBinding: ClientBinding = {
       variable: binding.variable,
       integration: binding.provider.integration,
-      ...(binding.servingPlatform === undefined
-        ? {}
-        : { servingPlatform: binding.servingPlatform }),
+      ...(resolvedPlatform ? { servingPlatform: binding.provider.platform } : {}),
       platformResolution: binding.platformResolution,
-      selectorKind: binding.provider.selectorKind,
-      endpointSafe: binding.endpointSafe,
+      selectorKind: selectorKindForPlatform(binding.provider.platform),
+      endpointSafe: resolvedPlatform,
     };
     const environmentReference = environmentReferenceAt(
       tokens,
@@ -3261,7 +3300,7 @@ function detectAiSdkModelCalls(input: {
         tokens,
         valueIndex,
         input.constants,
-        binding.provider.selectorKind,
+        clientBinding.selectorKind,
         environmentReference,
       ),
     );
@@ -3283,10 +3322,9 @@ function detectAiSdkModelCalls(input: {
     facts.push(fact);
     const literalSpan = directSemanticLiteralSpan(valueToken, resolved);
     if (literalSpan !== undefined) literalSpans.push(literalSpan);
-    consumed.push({ fact, binding: clientBinding, resolved });
+    input.recordConsumedEnvironment(fact, clientBinding, resolved);
     assertEvidenceBudget(facts.length);
   }
-  return { facts, consumed, literalSpans };
 }
 
 function detectSdkCalls(
@@ -3300,7 +3338,8 @@ function detectSdkCalls(
   facts: EvidenceFact[];
   consumedEnvironmentSelectors: ConsumedEnvironmentSelector[];
   literalSpans: SemanticLiteralSpan[];
-  unsupportedFrameworkImports: Array<{ frameworkId: string; facade: boolean }>;
+  /** Every module this file imports, for the caller's framework-coverage pass. */
+  moduleSpecifiers: ReadonlySet<string>;
   tokenizationIssue?: TokenizationIssue;
 } {
   const tokenization = tokenize(source, language, jsx);
@@ -3311,19 +3350,20 @@ function detectSdkCalls(
       facts: [],
       consumedEnvironmentSelectors: [],
       literalSpans: [],
-      unsupportedFrameworkImports: [],
+      moduleSpecifiers: new Set(),
       tokenizationIssue: tokenization.issue,
     };
   }
   const tokens = tokenization.tokens;
-  const constants = collectConstants(tokens, language);
-  const analyzedClients = clientBindings(tokens, language);
+  const analysis = analyzeTokens(tokens, language);
+  const constants = collectConstants(tokens, language, analysis);
+  const analyzedClients = clientBindings(tokens, language, analysis);
   const bindings = analyzedClients.bindings;
   const facts: EvidenceFact[] = [];
   const consumedEnvironmentSelectors: ConsumedEnvironmentSelector[] = [];
   const literalSpans: SemanticLiteralSpan[] = [];
   const shadowedEnvironmentGlobals = language === "javascript"
-    ? shadowedJavascriptEnvironmentGlobals(tokens)
+    ? shadowedJavascriptEnvironmentGlobals(tokens, analysis)
     : new Set<string>();
   const recordConsumedEnvironment = (
     fact: EvidenceFact,
@@ -3495,31 +3535,25 @@ function detectSdkCalls(
     }
   }
   if (language === "javascript") {
-    const aiSdk = detectAiSdkModelCalls({
+    detectAiSdkModelCalls({
       tokens,
       constants,
       imports: analyzedClients.imports,
+      analysis,
       path,
       blobOid,
       scope,
       shadowedEnvironmentGlobals,
+      facts,
+      literalSpans,
+      recordConsumedEnvironment,
     });
-    facts.push(...aiSdk.facts);
-    literalSpans.push(...aiSdk.literalSpans);
-    for (const entry of aiSdk.consumed) {
-      recordConsumedEnvironment(entry.fact, entry.binding, entry.resolved);
-    }
-    assertEvidenceBudget(facts.length);
   }
   return {
     facts,
     consumedEnvironmentSelectors,
     literalSpans,
-    unsupportedFrameworkImports: unsupportedFrameworkImports(
-      analyzedClients.imports.moduleSpecifiers,
-      facts,
-      language,
-    ),
+    moduleSpecifiers: analyzedClients.imports.moduleSpecifiers,
   };
 }
 
@@ -4205,25 +4239,20 @@ function unsupportedFrameworkDiagnostics(
       : [...record.paths];
     if (paths.length === 0) continue;
     const sorted = paths.sort(compareText);
-    const cause = framework.semanticSupport === "partial"
-      ? "but no published rule for it resolved a model in those files, so the selector shape is one this " +
-        "manifest does not read yet (for example a gateway model string such as \"openai/gpt-5\", or a " +
-        "provider member outside the published set)"
-      : "and this detector manifest publishes no semantic rule for it";
     const preamble =
       `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` +
-      `${cause}. Model selections made that way were assessed by bounded lexical fallback only, so they ` +
-      "cannot block, are reported only as text matches, and produce nothing at all when the " +
-      "selector is dynamic or the model ID is not literal-scan eligible. Files: ";
-    // The sample is the only actionable part, so it is trimmed to what survives
-    // the publisher's message cap rather than being cut mid-path by it.
-    const sample: string[] = [];
-    let budget = UNSUPPORTED_FRAMEWORK_MESSAGE_BUDGET - preamble.length;
-    for (const path of sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS)) {
-      const cost = path.length + (sample.length === 0 ? 0 : 2);
-      if (sample.length > 0 && cost > budget) break;
-      budget -= cost;
-      sample.push(path);
+      `${prefix === undefined ? NO_SUPPORT_CAUSE : PARTIAL_SUPPORT_CAUSE}. Model selections made that way ` +
+      "were assessed by bounded lexical fallback only, so they cannot block, are reported only as text " +
+      "matches, and produce nothing at all when the selector is dynamic or the model ID is not " +
+      "literal-scan eligible. Files: ";
+    // The sample is the only actionable part, so whole paths are dropped until it
+    // fits the publisher's message cap rather than being cut mid-path by it.
+    let sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
+    while (
+      sample.length > 1 &&
+      preamble.length + sample.join(", ").length > UNSUPPORTED_FRAMEWORK_MESSAGE_BUDGET
+    ) {
+      sample = sample.slice(0, -1);
     }
     const remaining = sorted.length - sample.length;
     diagnostics.push({
@@ -4323,7 +4352,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
     let literalSpans: SemanticLiteralSpan[] = [];
     let tokenizationIssue: TokenizationIssue | undefined;
     let semanticLanguage: "javascript" | "python" | "hcl" | undefined;
-    let frameworkImports: readonly { frameworkId: string; facade: boolean }[] = [];
+    let moduleSpecifiers: ReadonlySet<string> = new Set();
     if (JS_EXTENSIONS.has(extension)) {
       semanticLanguage = "javascript";
       const detected = detectSdkCalls(
@@ -4338,7 +4367,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      frameworkImports = detected.unsupportedFrameworkImports;
+      moduleSpecifiers = detected.moduleSpecifiers;
     } else if (extension === ".py") {
       semanticLanguage = "python";
       const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
@@ -4346,7 +4375,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      frameworkImports = detected.unsupportedFrameworkImports;
+      moduleSpecifiers = detected.moduleSpecifiers;
     } else if (HCL_EXTENSIONS.has(extension)) {
       semanticLanguage = "hcl";
       const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
@@ -4358,11 +4387,13 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
         tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue),
       );
     }
-    recordUnsupportedFrameworks(
-      unsupportedFrameworkImportsByFramework,
-      frameworkImports,
-      entry.displayPath,
-    );
+    if (semanticLanguage === "javascript" || semanticLanguage === "python") {
+      recordUnsupportedFrameworks(
+        unsupportedFrameworkImportsByFramework,
+        unsupportedFrameworkImports(moduleSpecifiers, semantic, semanticLanguage),
+        entry.displayPath,
+      );
+    }
     const lexical = lexicalFacts(
       source,
       entry.displayPath,

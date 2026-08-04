@@ -4,6 +4,7 @@ import {
   type IndexedModelPair,
   type V3FeedIndex,
 } from "../lifecycle/feed.ts";
+import { DETECTOR_RULES } from "../detection/manifest.ts";
 import { matchRepositoryPattern, POLICY_PATH } from "./policy.ts";
 import {
   canonicalSha256,
@@ -30,25 +31,18 @@ import type {
   SuppressionRule,
 } from "../shared/types.ts";
 
-const TRUSTED_RESOLUTION_POLICY_RULES = new Set([
-  "source.ts.openai.request-model@1",
-  "source.py.openai.request-model@1",
-  "source.ts.anthropic.messages-model@1",
-  "source.py.anthropic.messages-model@1",
-  "source.ts.google-genai.generate-model@1",
-  "source.py.google-genai.generate-model@1",
-  "source.ts.aws-bedrock.invoke-model@1",
-  "source.ts.aws-bedrock.converse-model@1",
-  "source.py.aws-bedrock.invoke-model@1",
-  "source.py.aws-bedrock.converse-model@1",
-  "source.ts.vercel-ai-sdk.openai-model@1",
-  "source.ts.vercel-ai-sdk.anthropic-model@1",
-  "source.ts.vercel-ai-sdk.google-model@1",
-  "source.ts.vercel-ai-sdk.google-vertex-model@1",
-  "source.ts.vercel-ai-sdk.azure-model@1",
-  "source.ts.vercel-ai-sdk.amazon-bedrock-model@1",
-  "deploy.hcl.azure.cognitive-deployment-model@1",
-]);
+/**
+ * Rules a repository's own trusted resolution can lift to policy eligibility:
+ * every semantic source and deployment rule, and nothing inherited or lexical.
+ * Derived from the manifest rather than restated, because a rule missing from a
+ * hand-kept copy fails open silently — the user's resolution validates, then never
+ * blocks. `DIRECT_POLICY_RULES` in the detector derives from the same list.
+ */
+const TRUSTED_RESOLUTION_POLICY_RULES = new Set(
+  DETECTOR_RULES
+    .filter((rule) => rule.ruleId.startsWith("source.") || rule.ruleId.startsWith("deploy."))
+    .map((rule) => rule.ruleId),
+);
 
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;

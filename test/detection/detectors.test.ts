@@ -1079,6 +1079,31 @@ describe("v3 Vercel AI SDK provider rules", () => {
     ).toBeUndefined();
   });
 
+  test("reads a provider call beside JSX props that share its names", () => {
+    // A JSX attribute is markup, so it neither reassigns a binding nor rebinds a
+    // constant. Two props of the same name used to look like a reassignment.
+    expect(
+      providerFact(
+        `import { openai } from "@ai-sdk/openai";\nexport const m = openai("gpt-old");\nexport const A = () => <Row openai="x" />;\nexport const B = () => <Col openai="y" />;\n`,
+        "app/a.tsx",
+      ),
+    ).toMatchObject({ servingPlatform: "openai", policyEligible: true });
+    expect(
+      providerFact(
+        `import { openai } from "@ai-sdk/openai";\nconst modelId = "gpt-old";\nexport const m = openai(modelId);\nexport const C = () => <Row modelId="x" />;\n`,
+        "app/b.tsx",
+      ),
+    ).toMatchObject({ modelId: "gpt-old", modelResolution: "resolved" });
+    // collectConstants is shared, so the official rules see the same fix.
+    expect(
+      ruleEvidence(
+        "app/c.tsx",
+        `import OpenAI from "openai";\nconst modelId = "gpt-old";\nconst c = new OpenAI();\nc.responses.create({ model: modelId, input: "h" });\nexport const C = () => <Row modelId="x" />;\n`,
+        "source.ts.openai.request-model@1",
+      ),
+    ).toMatchObject({ modelId: "gpt-old", modelResolution: "resolved" });
+  });
+
   test("does not trust two provider packages bound to one local name", () => {
     // Resolving last-wins would date the call against the wrong platform.
     for (const source of [
@@ -1375,6 +1400,21 @@ describe("v3 unsupported integration notices", () => {
           `import { mistral } from "@ai-sdk/mistral";\nimport { openai } from "@ai-sdk/openai";\nexport const a = openai("gpt-old");\nexport const b = mistral(process.env.MODEL_ID);\n`,
       }).map((notice) => notice.code),
     ).toEqual(["unsupported-integration-import.vercel-ai-sdk@1"]);
+  });
+
+  test("treats the framework's non-provider packages as entrypoints", () => {
+    // `@ai-sdk/react` and `@ai-sdk/rsc` export no provider, so an unread import of
+    // one is not the coverage gap an unread provider package is.
+    for (const specifier of ["ai", "ai/rsc", "@ai-sdk/react", "@ai-sdk/rsc"]) {
+      expect(
+        unsupportedNotices({
+          "lib/model.ts":
+            `import { openai } from "@ai-sdk/openai";\nexport const model = openai("gpt-old");\n`,
+          "app/chat.tsx": `import { useChat } from "${specifier}";\nexport const C = () => <div />;\n`,
+        }),
+        specifier,
+      ).toEqual([]);
+    }
   });
 
   test("stays silent when the provider call resolved in another file", () => {

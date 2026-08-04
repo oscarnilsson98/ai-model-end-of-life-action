@@ -7810,9 +7810,6 @@ function loadAdaptedV3Feed(sourceBytes, envelopePayload, adapterManifest, additi
   };
 }
 
-// src/policy/policy.ts
-var import_yaml = __toESM(require_dist(), 1);
-
 // src/shared/status.ts
 var import_node_crypto3 = require("node:crypto");
 var RESULT_RANK = {
@@ -8200,6 +8197,9 @@ var DETECTOR_MANIFEST_SHA256 = canonicalSha256("ai-model-eol/detector-manifest/v
   qualification: DETECTOR_QUALIFICATION,
   providerAliasRegistry: []
 });
+
+// src/policy/policy.ts
+var import_yaml = __toESM(require_dist(), 1);
 
 // src/shared/limits.ts
 var MAX_POLICY_DAYS = 36500;
@@ -8758,25 +8758,7 @@ function assertionsToEvidence(assertions, now) {
 }
 
 // src/policy/evaluate.ts
-var TRUSTED_RESOLUTION_POLICY_RULES = new Set([
-  "source.ts.openai.request-model@1",
-  "source.py.openai.request-model@1",
-  "source.ts.anthropic.messages-model@1",
-  "source.py.anthropic.messages-model@1",
-  "source.ts.google-genai.generate-model@1",
-  "source.py.google-genai.generate-model@1",
-  "source.ts.aws-bedrock.invoke-model@1",
-  "source.ts.aws-bedrock.converse-model@1",
-  "source.py.aws-bedrock.invoke-model@1",
-  "source.py.aws-bedrock.converse-model@1",
-  "source.ts.vercel-ai-sdk.openai-model@1",
-  "source.ts.vercel-ai-sdk.anthropic-model@1",
-  "source.ts.vercel-ai-sdk.google-model@1",
-  "source.ts.vercel-ai-sdk.google-vertex-model@1",
-  "source.ts.vercel-ai-sdk.azure-model@1",
-  "source.ts.vercel-ai-sdk.amazon-bedrock-model@1",
-  "deploy.hcl.azure.cognitive-deployment-model@1"
-]);
+var TRUSTED_RESOLUTION_POLICY_RULES = new Set(DETECTOR_RULES.filter((rule) => rule.ruleId.startsWith("source.") || rule.ruleId.startsWith("deploy.")).map((rule) => rule.ruleId));
 function compareText3(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -9966,14 +9948,13 @@ function tokenize(source, language, jsx = false) {
     }
     const raw = source.slice(tokenStart, offset);
     tokens.push({
-      kind: "identifier",
+      kind: "jsx-name",
       value: raw,
       raw,
       offset: tokenStart,
       line: tokenLine,
       column: tokenColumn,
-      static: true,
-      jsx: true
+      static: true
     });
   };
   const consumeJavascriptTemplate = () => {
@@ -10585,6 +10566,7 @@ function matchingOpenIndex(tokens, closeIndex, open, close) {
   }
   return null;
 }
+var NON_METHOD_PREDECESSORS = new Set([".", "?.", "(", "=", "=>", "[", ":", "&&", "||", "??"]);
 var PARENTHESISED_KEYWORDS = new Set([
   "if",
   "else",
@@ -10655,7 +10637,7 @@ function functionParameterNames(tokens, language) {
         }
       }
     }
-    if (token?.kind === "identifier" && token.jsx !== true && !PARENTHESISED_KEYWORDS.has(value ?? "") && structuralValue(tokens[index + 1]) === "(" && structuralValue(tokens[index - 1]) !== "." && structuralValue(tokens[index - 1]) !== "?.") {
+    if (token?.kind === "identifier" && !PARENTHESISED_KEYWORDS.has(value ?? "") && structuralValue(tokens[index + 1]) === "(" && !NON_METHOD_PREDECESSORS.has(structuralValue(tokens[index - 1]) ?? "")) {
       const close = matchingIndex(tokens, index + 1, "(", ")");
       if (close !== null && structuralValue(tokens[close + 1]) === "{") {
         inspect(index + 1, close);
@@ -10673,6 +10655,12 @@ function functionParameterNames(tokens, language) {
   }
   return names;
 }
+function analyzeTokens(tokens, language) {
+  return {
+    parameterNames: functionParameterNames(tokens, language),
+    assignmentCounts: assignmentTargetCounts(tokens)
+  };
+}
 var DIRECT_VALUE_TERMINATORS = new Set([",", ")", "}", "]", ";"]);
 function isCompleteDirectValue(tokens, valueIndex, allowLineBoundary = false) {
   const value = tokens[valueIndex];
@@ -10683,7 +10671,7 @@ function isCompleteDirectValue(tokens, valueIndex, allowLineBoundary = false) {
     return true;
   return allowLineBoundary && next.line > value.line;
 }
-function collectConstants(tokens, language) {
+function collectConstants(tokens, language, analysis) {
   const candidates = new Map;
   const record = (name, value) => {
     candidates.set(name, candidates.has(name) ? null : value);
@@ -10709,14 +10697,7 @@ function collectConstants(tokens, language) {
       record(token.value, tokens[index + 2]?.value);
     }
   }
-  const shadowed = functionParameterNames(tokens, language);
-  const assignmentCounts = new Map;
-  for (let index = 0;index < tokens.length - 1; index += 1) {
-    const token = tokens[index];
-    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
-      assignmentCounts.set(token.value, (assignmentCounts.get(token.value) ?? 0) + 1);
-    }
-  }
+  const { parameterNames: shadowed, assignmentCounts } = analysis;
   return new Map([...candidates.entries()].filter((entry) => entry[1] !== null && !shadowed.has(entry[0]) && (assignmentCounts.get(entry[0]) ?? 0) === 1));
 }
 function staticAtom(tokens, valueIndex, constants) {
@@ -10792,92 +10773,92 @@ function resolveTokenValue(tokens, valueIndex, constants, defaultSelectorKind, e
 }
 var npmPrefix = (prefix) => ({ prefix, ecosystem: "npm" });
 var pythonPrefix = (prefix) => ({ prefix, ecosystem: "python" });
-var UNSUPPORTED_INTEGRATION_FRAMEWORKS = Object.freeze([
-  Object.freeze({
+var AI_SDK_NON_PROVIDER_PACKAGES = new Set([
+  "ai",
+  "@ai-sdk/react",
+  "@ai-sdk/rsc",
+  "@ai-sdk/vue",
+  "@ai-sdk/svelte",
+  "@ai-sdk/angular",
+  "@ai-sdk/provider",
+  "@ai-sdk/provider-utils"
+]);
+function npmPackageRoot(specifier) {
+  const segments = specifier.split("/");
+  return specifier.startsWith("@") ? segments.slice(0, 2).join("/") : segments[0];
+}
+var PARTIAL_SUPPORT_CAUSE = "but no published rule for it resolved a model in those files, so the selector shape is one this " + 'manifest does not read yet (for example a gateway model string such as "openai/gpt-5", or a ' + "provider member outside the published set)";
+var NO_SUPPORT_CAUSE = "and this detector manifest publishes no semantic rule for it";
+var UNSUPPORTED_INTEGRATION_FRAMEWORKS = [
+  {
     frameworkId: "vercel-ai-sdk",
     displayName: "The Vercel AI SDK",
-    modulePrefixes: Object.freeze([npmPrefix("ai"), npmPrefix("@ai-sdk")]),
-    semanticSupport: "partial",
+    modulePrefixes: [npmPrefix("ai"), npmPrefix("@ai-sdk")],
     rulePrefix: "source.ts.vercel-ai-sdk."
-  }),
-  Object.freeze({
+  },
+  {
     frameworkId: "langchain",
     displayName: "LangChain",
-    modulePrefixes: Object.freeze([
-      npmPrefix("langchain"),
-      npmPrefix("@langchain"),
-      pythonPrefix("langchain")
-    ]),
-    semanticSupport: "none"
-  }),
-  Object.freeze({
+    modulePrefixes: [npmPrefix("langchain"), npmPrefix("@langchain"), pythonPrefix("langchain")]
+  },
+  {
     frameworkId: "llamaindex",
     displayName: "LlamaIndex",
-    modulePrefixes: Object.freeze([
+    modulePrefixes: [
       npmPrefix("llamaindex"),
       npmPrefix("@llamaindex"),
       pythonPrefix("llama_index")
-    ]),
-    semanticSupport: "none"
-  }),
-  Object.freeze({
+    ]
+  },
+  {
     frameworkId: "litellm",
     displayName: "LiteLLM",
-    modulePrefixes: Object.freeze([npmPrefix("litellm"), pythonPrefix("litellm")]),
-    semanticSupport: "none"
-  }),
-  Object.freeze({
+    modulePrefixes: [npmPrefix("litellm"), pythonPrefix("litellm")]
+  },
+  {
     frameworkId: "google-generative-ai-legacy",
     displayName: "The legacy Google Generative AI SDK",
-    modulePrefixes: Object.freeze([
-      npmPrefix("@google/generative-ai"),
-      pythonPrefix("google.generativeai")
-    ]),
-    semanticSupport: "none"
-  }),
-  Object.freeze({
+    modulePrefixes: [npmPrefix("@google/generative-ai"), pythonPrefix("google.generativeai")]
+  },
+  {
     frameworkId: "vertex-ai-generative-legacy",
     displayName: "The retired Vertex AI generative SDK module",
-    modulePrefixes: Object.freeze([
-      npmPrefix("@google-cloud/vertexai"),
-      pythonPrefix("vertexai")
-    ]),
-    semanticSupport: "none"
-  })
-]);
+    modulePrefixes: [npmPrefix("@google-cloud/vertexai"), pythonPrefix("vertexai")]
+  }
+];
 function unsupportedFrameworkForModule(specifier, language) {
   const ecosystem = language === "javascript" ? "npm" : "python";
+  const suffixes = ecosystem === "npm" ? ["/"] : [".", "_"];
   for (const framework of UNSUPPORTED_INTEGRATION_FRAMEWORKS) {
     for (const { prefix, ecosystem: prefixEcosystem } of framework.modulePrefixes) {
       if (prefixEcosystem !== ecosystem)
         continue;
       if (specifier === prefix)
         return framework;
-      if (ecosystem === "npm" ? specifier.startsWith(`${prefix}/`) : false)
+      if (suffixes.some((suffix) => specifier.startsWith(`${prefix}${suffix}`)))
         return framework;
-      if (ecosystem === "python" && (specifier.startsWith(`${prefix}.`) || specifier.startsWith(`${prefix}_`))) {
-        return framework;
-      }
     }
   }
   return;
 }
 function unsupportedFrameworkImports(specifiers, facts, language) {
-  const facadeById = new Map;
+  const unreadByFramework = new Map;
   for (const specifier of specifiers) {
     const framework = unsupportedFrameworkForModule(specifier, language);
     if (framework === undefined)
       continue;
     const provider = AI_SDK_PROVIDER_BY_MODULE.get(specifier);
-    if (provider !== undefined) {
-      const ruleId = aiSdkRuleId(provider);
-      if (facts.some((fact) => fact.detectorRuleId === ruleId))
-        continue;
+    if (provider !== undefined && facts.some((fact) => fact.detectorRuleId === aiSdkRuleId(provider))) {
+      continue;
     }
-    const facade = framework.semanticSupport === "partial" && provider === undefined && !specifier.startsWith("@");
-    facadeById.set(framework.frameworkId, (facadeById.get(framework.frameworkId) ?? true) && facade);
+    const unread = unreadByFramework.get(framework) ?? [];
+    unread.push(specifier);
+    unreadByFramework.set(framework, unread);
   }
-  return [...facadeById].map(([frameworkId, facade]) => ({ frameworkId, facade }));
+  return [...unreadByFramework].map(([framework, unread]) => ({
+    frameworkId: framework.frameworkId,
+    facade: framework.rulePrefix !== undefined && unread.every((specifier) => AI_SDK_NON_PROVIDER_PACKAGES.has(npmPackageRoot(specifier)))
+  }));
 }
 var CONSTRUCTORS_BY_MODULE = {
   openai: {
@@ -10901,116 +10882,146 @@ var AWS_COMMANDS = new Set([
   "ConverseCommand",
   "ConverseStreamCommand"
 ]);
-var AI_SDK_PROVIDERS = Object.freeze([
-  Object.freeze({
+var AI_SDK_PROVIDERS = [
+  {
     providerId: "openai",
     module: "@ai-sdk/openai",
     integration: "openai",
     platform: "openai",
-    selectorKind: "model-id",
-    instanceNames: Object.freeze(["openai"]),
-    factoryNames: Object.freeze(["createOpenAI"])
-  }),
-  Object.freeze({
+    instanceNames: ["openai"],
+    factoryNames: ["createOpenAI"]
+  },
+  {
     providerId: "azure",
     module: "@ai-sdk/azure",
     integration: "openai",
     platform: "azure",
-    selectorKind: "deployment-name",
-    instanceNames: Object.freeze(["azure"]),
-    factoryNames: Object.freeze(["createAzure"])
-  }),
-  Object.freeze({
+    instanceNames: ["azure"],
+    factoryNames: ["createAzure"]
+  },
+  {
     providerId: "anthropic",
     module: "@ai-sdk/anthropic",
     integration: "anthropic",
     platform: "anthropic",
-    selectorKind: "model-id",
-    instanceNames: Object.freeze(["anthropic"]),
-    factoryNames: Object.freeze(["createAnthropic"])
-  }),
-  Object.freeze({
+    instanceNames: ["anthropic"],
+    factoryNames: ["createAnthropic"]
+  },
+  {
     providerId: "google",
     module: "@ai-sdk/google",
     integration: "google",
     platform: "google",
-    selectorKind: "model-id",
-    instanceNames: Object.freeze(["google"]),
-    factoryNames: Object.freeze(["createGoogle", "createGoogleGenerativeAI"])
-  }),
-  Object.freeze({
+    instanceNames: ["google"],
+    factoryNames: ["createGoogle", "createGoogleGenerativeAI"]
+  },
+  {
     providerId: "google-vertex",
     module: "@ai-sdk/google-vertex",
     integration: "google",
     platform: "google-vertex",
-    selectorKind: "model-id",
-    instanceNames: Object.freeze(["googleVertex", "vertex"]),
-    factoryNames: Object.freeze(["createGoogleVertex", "createVertex"])
-  }),
-  Object.freeze({
+    instanceNames: ["googleVertex", "vertex"],
+    factoryNames: ["createGoogleVertex", "createVertex"]
+  },
+  {
     providerId: "amazon-bedrock",
     module: "@ai-sdk/amazon-bedrock",
     integration: "aws-bedrock",
     platform: "aws-bedrock",
-    selectorKind: "polymorphic",
-    instanceNames: Object.freeze(["amazonBedrock", "bedrock"]),
-    factoryNames: Object.freeze(["createAmazonBedrock"])
-  })
-]);
+    instanceNames: ["amazonBedrock", "bedrock"],
+    factoryNames: ["createAmazonBedrock"]
+  }
+];
+var AI_SDK_MODEL_FAMILIES = [
+  "embedding",
+  "textEmbedding",
+  "image",
+  "video",
+  "speech",
+  "transcription",
+  "reranking"
+];
 var AI_SDK_MODEL_METHODS = new Set([
   "languageModel",
   "chat",
   "messages",
   "responses",
   "completion",
-  "deepseek",
-  "generativeAI",
-  "interactions",
-  "embedding",
-  "embeddingModel",
-  "textEmbedding",
-  "textEmbeddingModel",
-  "image",
-  "imageModel",
-  "video",
-  "videoModel",
-  "speech",
-  "speechModel",
-  "speechTranslationModel",
-  "transcription",
-  "transcriptionModel",
-  "translation",
-  "reranking",
-  "rerankingModel",
-  "experimental_realtime"
+  ...AI_SDK_MODEL_FAMILIES.flatMap((family) => [family, `${family}Model`])
 ]);
 var AI_SDK_PROVIDER_BY_MODULE = new Map(AI_SDK_PROVIDERS.map((provider) => [provider.module, provider]));
 function aiSdkRuleId(provider) {
   return `source.ts.vercel-ai-sdk.${provider.providerId}-model@1`;
 }
 function isBareAssignmentTarget(tokens, index) {
-  if (tokens[index]?.jsx === true)
-    return false;
   const previous = structuralValue(tokens[index - 1]);
   return previous !== "." && previous !== "?.";
 }
-function importsAnyValue(tokens, importIndex, fromIndex) {
-  const open = tokens.findIndex((token, index) => index > importIndex && index < fromIndex && structuralValue(token) === "{");
-  const clauseEnd = open >= 0 ? open : fromIndex;
-  for (let index = importIndex + 1;index < clauseEnd; index += 1) {
+function conflictAwareBindings() {
+  const bindings = new Map;
+  const conflicted = new Set;
+  const setBinding = (binding) => {
+    if (conflicted.has(binding.variable))
+      return;
+    const existing = bindings.get(binding.variable);
+    if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(binding)) {
+      bindings.delete(binding.variable);
+      conflicted.add(binding.variable);
+      return;
+    }
+    bindings.set(binding.variable, binding);
+  };
+  return { bindings, setBinding };
+}
+function assignmentTargetCounts(tokens) {
+  const counts = new Map;
+  for (let index = 0;index < tokens.length - 1; index += 1) {
     const token = tokens[index];
-    if (token?.kind !== "identifier")
+    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
+      counts.set(token.value, (counts.get(token.value) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+function pruneUntrustedBindings(bindings, analysis) {
+  for (const variable of [...bindings.keys()]) {
+    if ((analysis.assignmentCounts.get(variable) ?? 0) > 1 || analysis.parameterNames.has(variable)) {
+      bindings.delete(variable);
+    }
+  }
+}
+var MODULE_CLAUSE_LOOKAHEAD = 80;
+function moduleClauseAfter(tokens, index) {
+  const limit = Math.min(tokens.length, index + MODULE_CLAUSE_LOOKAHEAD);
+  for (let cursor = index + 1;cursor < limit; cursor += 1) {
+    if (structuralValue(tokens[cursor]) === ";" || isIdentifier(tokens[cursor], "import") || isIdentifier(tokens[cursor], "export"))
+      break;
+    if (isIdentifier(tokens[cursor], "from") && tokens[cursor + 1]?.kind === "string") {
+      return { fromIndex: cursor, moduleIndex: cursor + 1 };
+    }
+  }
+  return;
+}
+function importClauseBraces(tokens, importIndex, fromIndex) {
+  for (let open = importIndex + 1;open < fromIndex; open += 1) {
+    if (structuralValue(tokens[open]) !== "{")
       continue;
-    if (token.value !== "type" && token.value !== "as")
+    const close = matchingIndex(tokens, open, "{", "}");
+    return close === null || close >= fromIndex ? undefined : { open, close };
+  }
+  return;
+}
+function importsAnyValue(tokens, importIndex, fromIndex, braces) {
+  for (let index = importIndex + 1;index < (braces?.open ?? fromIndex); index += 1) {
+    const token = tokens[index];
+    if (token?.kind === "identifier" && token.value !== "type")
       return true;
   }
-  if (open < 0)
+  if (braces === undefined)
     return true;
-  const close = matchingIndex(tokens, open, "{", "}");
-  if (close === null || close > fromIndex)
+  if (braces.open + 1 === braces.close)
     return true;
-  let named = 0;
-  for (let index = open + 1;index < close; index += 1) {
+  for (let index = braces.open + 1;index < braces.close; index += 1) {
     const token = tokens[index];
     if (token?.kind !== "identifier")
       continue;
@@ -11018,13 +11029,11 @@ function importsAnyValue(tokens, importIndex, fromIndex) {
       index += 1;
       continue;
     }
-    named += 1;
-    if (tokens[index + 1]?.value === "as")
-      index += 2;
+    return true;
   }
-  return named > 0 || open + 1 === close;
+  return false;
 }
-function importProvenance(tokens, language) {
+function importProvenance(tokens, language, analysis) {
   const constructors = new Map;
   const awsCommands = new Map;
   const googleNamespaces = new Set;
@@ -11083,58 +11092,42 @@ function importProvenance(tokens, language) {
         continue;
       }
       if (isIdentifier(tokens[index], "export") && tokens[index + 1]?.value !== "type") {
-        for (let cursor = index + 1;cursor < Math.min(tokens.length, index + 80); cursor += 1) {
-          if (structuralValue(tokens[cursor]) === ";" || isIdentifier(tokens[cursor], "import") || isIdentifier(tokens[cursor], "export"))
-            break;
-          if (isIdentifier(tokens[cursor], "from") && tokens[cursor + 1]?.kind === "string") {
-            moduleSpecifiers.add(tokens[cursor + 1]?.value);
-            break;
-          }
+        const clause = moduleClauseAfter(tokens, index);
+        if (clause !== undefined) {
+          moduleSpecifiers.add(tokens[clause.moduleIndex]?.value);
         }
       }
       if (isIdentifier(tokens[index], "import")) {
-        let fromIndex = -1;
-        let moduleIndex = -1;
-        for (let cursor = index + 1;cursor < Math.min(tokens.length, index + 80); cursor += 1) {
-          if (structuralValue(tokens[cursor]) === ";" || isIdentifier(tokens[cursor], "import"))
-            break;
-          if (isIdentifier(tokens[cursor], "from") && tokens[cursor + 1]?.kind === "string") {
-            fromIndex = cursor;
-            moduleIndex = cursor + 1;
-            break;
-          }
-        }
-        if (fromIndex < 0 || moduleIndex < 0)
+        const clause = moduleClauseAfter(tokens, index);
+        if (clause === undefined)
           continue;
+        const { fromIndex, moduleIndex } = clause;
         const moduleName2 = tokens[moduleIndex]?.value;
         if (tokens[index + 1]?.value === "type") {
           index = moduleIndex;
           continue;
         }
-        if (importsAnyValue(tokens, index, fromIndex))
+        const braces = importClauseBraces(tokens, index, fromIndex);
+        if (importsAnyValue(tokens, index, fromIndex, braces))
           moduleSpecifiers.add(moduleName2);
         const defaultName = DEFAULT_CONSTRUCTOR_BY_MODULE[moduleName2];
         const first = tokens[index + 1];
         if (defaultName !== undefined && first?.kind === "identifier" && first.value !== "type") {
           addConstructor(moduleName2, defaultName, first.value);
         }
-        const open2 = tokens.findIndex((token, tokenIndex) => tokenIndex > index && tokenIndex < fromIndex && structuralValue(token) === "{");
-        if (open2 >= 0) {
-          const close = matchingIndex(tokens, open2, "{", "}");
-          if (close !== null && close < fromIndex) {
-            for (let cursor = open2 + 1;cursor < close; cursor += 1) {
-              const imported = tokens[cursor];
-              if (imported?.kind !== "identifier")
-                continue;
-              if (imported.value === "type") {
-                cursor += 1;
-                continue;
-              }
-              const local = tokens[cursor + 1]?.value === "as" && tokens[cursor + 2]?.kind === "identifier" ? tokens[cursor + 2]?.value : imported.value;
-              addNamedImport(moduleName2, imported.value, local);
-              if (local !== imported.value)
-                cursor += 2;
+        if (braces !== undefined) {
+          for (let cursor = braces.open + 1;cursor < braces.close; cursor += 1) {
+            const imported = tokens[cursor];
+            if (imported?.kind !== "identifier")
+              continue;
+            if (imported.value === "type") {
+              cursor += 1;
+              continue;
             }
+            const local = tokens[cursor + 1]?.value === "as" && tokens[cursor + 2]?.kind === "identifier" ? tokens[cursor + 2]?.value : imported.value;
+            addNamedImport(moduleName2, imported.value, local);
+            if (local !== imported.value)
+              cursor += 2;
           }
         }
         index = moduleIndex;
@@ -11246,42 +11239,13 @@ function importProvenance(tokens, language) {
     ...aiSdkFactories.keys()
   ]);
   const shadowed = new Set;
-  for (const name of functionParameterNames(tokens, language)) {
+  for (const name of analysis.parameterNames) {
     if (importedNames.has(name))
       shadowed.add(name);
   }
-  const inspectParameters = (open, close) => {
-    let depth = 0;
-    for (let index = open + 1;index < close; index += 1) {
-      const value = structuralValue(tokens[index]);
-      if (["(", "[", "{"].includes(value ?? ""))
-        depth += 1;
-      else if ([")", "]", "}"].includes(value ?? ""))
-        depth = Math.max(0, depth - 1);
-      if (depth === 0 && tokens[index]?.kind === "identifier" && importedNames.has(value ?? "") && (structuralValue(tokens[index - 1]) === "(" || structuralValue(tokens[index - 1]) === ",")) {
-        shadowed.add(value);
-      }
-    }
-  };
   for (let index = 0;index < tokens.length; index += 1) {
     const token = tokens[index];
     const value = token?.value;
-    if (token?.kind === "identifier" && (value === "function" || value === "def") && tokens[index + 1]?.kind === "identifier") {
-      let open = index + 2;
-      while (open < Math.min(tokens.length, index + 12) && structuralValue(tokens[open]) !== "(") {
-        open += 1;
-      }
-      if (structuralValue(tokens[open]) === "(") {
-        const close = matchingIndex(tokens, open, "(", ")");
-        if (close !== null)
-          inspectParameters(open, close);
-      }
-    }
-    if (language === "javascript" && structuralValue(token) === "=>") {
-      if (tokens[index - 1]?.kind === "identifier" && importedNames.has(tokens[index - 1]?.value ?? "")) {
-        shadowed.add(tokens[index - 1]?.value);
-      }
-    }
     if (tokens[index]?.kind === "identifier" && importedNames.has(value ?? "") && tokens[index + 1]?.value === "=" && isBareAssignmentTarget(tokens, index) && !isIdentifier(tokens[index + 2], "require")) {
       shadowed.add(value);
     }
@@ -11461,6 +11425,13 @@ function endpointSignal(tokens) {
   const platform2 = platforms.values().next().value;
   return platform2 === undefined ? { present: true, safe: false } : { present: true, platform: platform2, safe: true };
 }
+function selectorKindForPlatform(platform2) {
+  if (platform2 === "azure")
+    return "deployment-name";
+  if (platform2 === "aws-bedrock")
+    return "polymorphic";
+  return "model-id";
+}
 function resolvedClientPlatform(input) {
   const endpoint = endpointSignal(input.arguments);
   if (!endpoint.safe)
@@ -11483,21 +11454,9 @@ function resolvedClientPlatform(input) {
   }
   return { platformResolution: "ambiguous", endpointSafe: false };
 }
-function clientBindings(tokens, language) {
-  const bindings = new Map;
-  const imports = importProvenance(tokens, language);
-  const conflictedBindings = new Set;
-  const setBinding = (binding) => {
-    if (conflictedBindings.has(binding.variable))
-      return;
-    const existing = bindings.get(binding.variable);
-    if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(binding)) {
-      bindings.delete(binding.variable);
-      conflictedBindings.add(binding.variable);
-      return;
-    }
-    bindings.set(binding.variable, binding);
-  };
+function clientBindings(tokens, language, analysis) {
+  const imports = importProvenance(tokens, language, analysis);
+  const { bindings, setBinding } = conflictAwareBindings();
   const googlePlatform = (arguments_) => {
     const endpoint = endpointSignal(arguments_);
     if (!endpoint.safe)
@@ -11566,12 +11525,11 @@ function clientBindings(tokens, language) {
         arguments: arguments_,
         language
       });
-      const selectorPlatform = resolution.servingPlatform ?? platform2;
       setBinding({
         variable,
         integration: "openai",
         ...resolution,
-        selectorKind: selectorPlatform === "azure" ? "deployment-name" : selectorPlatform === "aws-bedrock" ? "polymorphic" : "model-id"
+        selectorKind: selectorKindForPlatform(resolution.servingPlatform ?? platform2)
       });
     } else if (imported.integration === "anthropic") {
       const resolution = resolvedClientPlatform({
@@ -11643,26 +11601,13 @@ function clientBindings(tokens, language) {
       }
     }
   }
-  const parameterNames = functionParameterNames(tokens, language);
-  const assignmentCounts = new Map;
-  for (let index = 0;index < tokens.length - 1; index += 1) {
-    const token = tokens[index];
-    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
-      assignmentCounts.set(token.value, (assignmentCounts.get(token.value) ?? 0) + 1);
-    }
-  }
-  for (const [variable] of bindings) {
-    const assignments = assignmentCounts.get(variable) ?? 0;
-    if (assignments > 1 || parameterNames.has(variable)) {
-      bindings.delete(variable);
-    }
-  }
+  pruneUntrustedBindings(bindings, analysis);
   return { bindings, imports };
 }
-function shadowedJavascriptEnvironmentGlobals(tokens) {
+function shadowedJavascriptEnvironmentGlobals(tokens, analysis) {
   const candidates = new Set(["process", "Bun", "Deno"]);
   const shadowed = new Set;
-  for (const name of functionParameterNames(tokens, "javascript")) {
+  for (const name of analysis.parameterNames) {
     if (candidates.has(name))
       shadowed.add(name);
   }
@@ -11923,61 +11868,40 @@ function directSemanticLiteralSpan(token, resolved) {
     endOffset: startOffset + literalContent.length
   };
 }
+var ANNOTATION_TOKENS = new Set([".", "<", ">", "|", "&", "[", "]", "?"]);
+var ANNOTATION_SCAN_LIMIT = 12;
 function assignedVariableBefore(tokens, equalsIndex) {
-  let index = equalsIndex - 1;
-  const annotationToken = new Set([".", "<", ">", "|", "&", "[", "]", "?"]);
-  for (let scan = index;scan > 0 && index - scan < 12; scan -= 1) {
+  const start = equalsIndex - 1;
+  let index = start;
+  for (let scan = start;scan > 0 && start - scan < ANNOTATION_SCAN_LIMIT; scan -= 1) {
     const value = structuralValue(tokens[scan]);
     if (value === ":") {
       index = scan - 1;
       break;
     }
-    if (tokens[scan]?.kind === "identifier")
+    if (tokens[scan]?.kind === "identifier" || value !== null && ANNOTATION_TOKENS.has(value)) {
       continue;
-    if (value !== null && annotationToken.has(value))
-      continue;
+    }
     break;
   }
   const token = tokens[index];
-  if (token === undefined || token.kind !== "identifier" || token.jsx === true)
+  if (token?.kind !== "identifier")
     return;
   return isBareAssignmentTarget(tokens, index) ? token.value : undefined;
 }
-function aiSdkFactoryPlatform(provider, arguments_) {
-  const endpoint = endpointSignal(arguments_);
-  if (!endpoint.safe)
-    return { platformResolution: "unknown", endpointSafe: false };
-  if (!endpoint.present || endpoint.platform === provider.platform) {
-    return {
-      servingPlatform: provider.platform,
-      platformResolution: "resolved",
-      endpointSafe: true
-    };
-  }
-  return { platformResolution: "ambiguous", endpointSafe: false };
+function aiSdkFactoryResolution(provider, arguments_) {
+  return resolvedClientPlatform({
+    integration: provider.integration,
+    canonicalName: provider.providerId,
+    defaultPlatform: provider.platform,
+    arguments: arguments_,
+    language: "javascript"
+  }).platformResolution;
 }
-function aiSdkProviderBindings(tokens, imports) {
-  const bindings = new Map;
-  const conflicted = new Set;
-  const setBinding = (binding) => {
-    if (conflicted.has(binding.variable))
-      return;
-    const existing = bindings.get(binding.variable);
-    if (existing !== undefined && JSON.stringify(existing) !== JSON.stringify(binding)) {
-      bindings.delete(binding.variable);
-      conflicted.add(binding.variable);
-      return;
-    }
-    bindings.set(binding.variable, binding);
-  };
+function aiSdkProviderBindings(tokens, imports, analysis) {
+  const { bindings, setBinding } = conflictAwareBindings();
   for (const [variable, provider] of imports.aiSdkInstances) {
-    setBinding({
-      variable,
-      provider,
-      servingPlatform: provider.platform,
-      platformResolution: "resolved",
-      endpointSafe: true
-    });
+    setBinding({ variable, provider, platformResolution: "resolved" });
   }
   for (let index = 0;index < tokens.length; index += 1) {
     if (tokens[index]?.kind !== "identifier")
@@ -11990,45 +11914,24 @@ function aiSdkProviderBindings(tokens, imports) {
     const variable = assignedVariableBefore(tokens, index - 1);
     if (variable === undefined)
       continue;
-    const close = matchingIndex(tokens, index + 1, "(", ")");
-    const arguments_ = close === null ? [] : tokens.slice(index + 2, close);
     setBinding({
       variable,
       provider,
-      ...aiSdkFactoryPlatform(provider, arguments_)
+      platformResolution: aiSdkFactoryResolution(provider, constructorArguments(tokens, index))
     });
   }
-  const parameterNames = functionParameterNames(tokens, "javascript");
-  const assignmentCounts = new Map;
-  for (let index = 0;index < tokens.length - 1; index += 1) {
-    const token = tokens[index];
-    if (token?.kind === "identifier" && tokens[index + 1]?.value === "=") {
-      assignmentCounts.set(token.value, (assignmentCounts.get(token.value) ?? 0) + 1);
-    }
-  }
-  for (const [variable] of bindings) {
-    if ((assignmentCounts.get(variable) ?? 0) > 1 || parameterNames.has(variable)) {
-      bindings.delete(variable);
-    }
-  }
+  pruneUntrustedBindings(bindings, analysis);
   return bindings;
 }
 function opensModelSelector(token) {
-  if (token.kind === "string")
-    return true;
-  if (token.kind === "identifier")
-    return true;
-  return false;
+  return token.kind === "string" || token.kind === "identifier";
 }
 function detectAiSdkModelCalls(input) {
-  const { tokens } = input;
-  const facts = [];
-  const consumed = [];
-  const literalSpans = [];
+  const { tokens, facts, literalSpans } = input;
   if (input.imports.aiSdkInstances.size === 0 && input.imports.aiSdkFactories.size === 0) {
-    return { facts, consumed, literalSpans };
+    return;
   }
-  const bindings = aiSdkProviderBindings(tokens, input.imports);
+  const bindings = aiSdkProviderBindings(tokens, input.imports, input.analysis);
   const occurrenceByAnchor = new Map;
   for (let openIndex = 0;openIndex < tokens.length; openIndex += 1) {
     if (structuralValue(tokens[openIndex]) !== "(")
@@ -12054,7 +11957,7 @@ function detectAiSdkModelCalls(input) {
       binding = {
         variable: tokens[nameIndex]?.value,
         provider,
-        ...aiSdkFactoryPlatform(provider, tokens.slice(factoryOpen + 1, openIndex - 1))
+        platformResolution: aiSdkFactoryResolution(provider, constructorArguments(tokens, factoryOpen - 1))
       };
       anchorChain = [tokens[nameIndex]?.value, "()"];
     }
@@ -12064,16 +11967,17 @@ function detectAiSdkModelCalls(input) {
     const valueToken = tokens[valueIndex];
     if (valueToken === undefined || !opensModelSelector(valueToken))
       continue;
+    const resolvedPlatform = binding.platformResolution === "resolved";
     const clientBinding = {
       variable: binding.variable,
       integration: binding.provider.integration,
-      ...binding.servingPlatform === undefined ? {} : { servingPlatform: binding.servingPlatform },
+      ...resolvedPlatform ? { servingPlatform: binding.provider.platform } : {},
       platformResolution: binding.platformResolution,
-      selectorKind: binding.provider.selectorKind,
-      endpointSafe: binding.endpointSafe
+      selectorKind: selectorKindForPlatform(binding.provider.platform),
+      endpointSafe: resolvedPlatform
     };
     const environmentReference = environmentReferenceAt(tokens, valueIndex, "javascript", input.imports, input.shadowedEnvironmentGlobals);
-    const resolved = guardIntegrationSelector(clientBinding, resolveTokenValue(tokens, valueIndex, input.constants, binding.provider.selectorKind, environmentReference));
+    const resolved = guardIntegrationSelector(clientBinding, resolveTokenValue(tokens, valueIndex, input.constants, clientBinding.selectorKind, environmentReference));
     const ruleId = aiSdkRuleId(binding.provider);
     const anchor = anchorChain.join(".");
     const occurrence = occurrenceByAnchor.get(anchor) ?? 0;
@@ -12093,10 +11997,9 @@ function detectAiSdkModelCalls(input) {
     const literalSpan = directSemanticLiteralSpan(valueToken, resolved);
     if (literalSpan !== undefined)
       literalSpans.push(literalSpan);
-    consumed.push({ fact, binding: clientBinding, resolved });
+    input.recordConsumedEnvironment(fact, clientBinding, resolved);
     assertEvidenceBudget(facts.length);
   }
-  return { facts, consumed, literalSpans };
 }
 function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
   const tokenization = tokenize(source, language, jsx);
@@ -12105,18 +12008,19 @@ function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
       facts: [],
       consumedEnvironmentSelectors: [],
       literalSpans: [],
-      unsupportedFrameworkImports: [],
+      moduleSpecifiers: new Set,
       tokenizationIssue: tokenization.issue
     };
   }
   const tokens = tokenization.tokens;
-  const constants = collectConstants(tokens, language);
-  const analyzedClients = clientBindings(tokens, language);
+  const analysis = analyzeTokens(tokens, language);
+  const constants = collectConstants(tokens, language, analysis);
+  const analyzedClients = clientBindings(tokens, language, analysis);
   const bindings = analyzedClients.bindings;
   const facts = [];
   const consumedEnvironmentSelectors = [];
   const literalSpans = [];
-  const shadowedEnvironmentGlobals = language === "javascript" ? shadowedJavascriptEnvironmentGlobals(tokens) : new Set;
+  const shadowedEnvironmentGlobals = language === "javascript" ? shadowedJavascriptEnvironmentGlobals(tokens, analysis) : new Set;
   const recordConsumedEnvironment = (fact, binding, resolved) => {
     if (resolved.environmentVariable === undefined)
       return;
@@ -12239,27 +12143,25 @@ function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
     }
   }
   if (language === "javascript") {
-    const aiSdk = detectAiSdkModelCalls({
+    detectAiSdkModelCalls({
       tokens,
       constants,
       imports: analyzedClients.imports,
+      analysis,
       path,
       blobOid,
       scope,
-      shadowedEnvironmentGlobals
+      shadowedEnvironmentGlobals,
+      facts,
+      literalSpans,
+      recordConsumedEnvironment
     });
-    facts.push(...aiSdk.facts);
-    literalSpans.push(...aiSdk.literalSpans);
-    for (const entry of aiSdk.consumed) {
-      recordConsumedEnvironment(entry.fact, entry.binding, entry.resolved);
-    }
-    assertEvidenceBudget(facts.length);
   }
   return {
     facts,
     consumedEnvironmentSelectors,
     literalSpans,
-    unsupportedFrameworkImports: unsupportedFrameworkImports(analyzedClients.imports.moduleSpecifiers, facts, language)
+    moduleSpecifiers: analyzedClients.imports.moduleSpecifiers
   };
 }
 function terraformStringAttribute(tokens, valueIndex, blockClose) {
@@ -12782,16 +12684,10 @@ function unsupportedFrameworkDiagnostics(byFramework, facts) {
     if (paths.length === 0)
       continue;
     const sorted = paths.sort(compareText5);
-    const cause = framework.semanticSupport === "partial" ? "but no published rule for it resolved a model in those files, so the selector shape is one this " + 'manifest does not read yet (for example a gateway model string such as "openai/gpt-5", or a ' + "provider member outside the published set)" : "and this detector manifest publishes no semantic rule for it";
-    const preamble = `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${cause}. Model selections made that way were assessed by bounded lexical fallback only, so they ` + "cannot block, are reported only as text matches, and produce nothing at all when the " + "selector is dynamic or the model ID is not literal-scan eligible. Files: ";
-    const sample = [];
-    let budget = UNSUPPORTED_FRAMEWORK_MESSAGE_BUDGET - preamble.length;
-    for (const path of sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS)) {
-      const cost = path.length + (sample.length === 0 ? 0 : 2);
-      if (sample.length > 0 && cost > budget)
-        break;
-      budget -= cost;
-      sample.push(path);
+    const preamble = `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${prefix === undefined ? NO_SUPPORT_CAUSE : PARTIAL_SUPPORT_CAUSE}. Model selections made that way ` + "were assessed by bounded lexical fallback only, so they cannot block, are reported only as text " + "matches, and produce nothing at all when the selector is dynamic or the model ID is not " + "literal-scan eligible. Files: ";
+    let sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
+    while (sample.length > 1 && preamble.length + sample.join(", ").length > UNSUPPORTED_FRAMEWORK_MESSAGE_BUDGET) {
+      sample = sample.slice(0, -1);
     }
     const remaining = sorted.length - sample.length;
     diagnostics.push({
@@ -12868,7 +12764,7 @@ function detectSnapshot(snapshot, feed) {
     let literalSpans = [];
     let tokenizationIssue;
     let semanticLanguage;
-    let frameworkImports = [];
+    let moduleSpecifiers = new Set;
     if (JS_EXTENSIONS.has(extension)) {
       semanticLanguage = "javascript";
       const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "javascript", scope, JSX_EXTENSIONS.has(extension));
@@ -12876,7 +12772,7 @@ function detectSnapshot(snapshot, feed) {
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      frameworkImports = detected.unsupportedFrameworkImports;
+      moduleSpecifiers = detected.moduleSpecifiers;
     } else if (extension === ".py") {
       semanticLanguage = "python";
       const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
@@ -12884,7 +12780,7 @@ function detectSnapshot(snapshot, feed) {
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      frameworkImports = detected.unsupportedFrameworkImports;
+      moduleSpecifiers = detected.moduleSpecifiers;
     } else if (HCL_EXTENSIONS.has(extension)) {
       semanticLanguage = "hcl";
       const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
@@ -12894,7 +12790,9 @@ function detectSnapshot(snapshot, feed) {
     if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
       diagnostics.push(tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue));
     }
-    recordUnsupportedFrameworks(unsupportedFrameworkImportsByFramework, frameworkImports, entry.displayPath);
+    if (semanticLanguage === "javascript" || semanticLanguage === "python") {
+      recordUnsupportedFrameworks(unsupportedFrameworkImportsByFramework, unsupportedFrameworkImports(moduleSpecifiers, semantic, semanticLanguage), entry.displayPath);
+    }
     const lexical = lexicalFacts(source, entry.displayPath, entry.objectId, candidates, automaton, literalSpans);
     evidence.push(...semantic, ...lexical);
     assertEvidenceBudget(evidence.length);
