@@ -5,6 +5,7 @@ import {
 } from "../shared/http.ts";
 import { parseHttpsUrl } from "./input.ts";
 import { deprecationLeadsHorizon, earliestLifecycleDays } from "../shared/status.ts";
+import { servingPlatformLabel } from "../shared/text.ts";
 import type {
   AssessmentReport,
   LifecycleFinding,
@@ -200,8 +201,8 @@ function findingLine(finding: NotifiableFinding): string {
   const replacement = replacementText(finding);
   if (replacement !== null) qualifiers.push(replacement);
   const line = `• *${findingLabel(finding)}* ${slackText(
-    finding.servingPlatform,
-    80,
+    servingPlatformLabel(finding),
+    160,
   )} / ${slackText(finding.modelId, 180)} — ${qualifiers
     .map((value) => slackText(value, 100))
     .join(" · ")}`;

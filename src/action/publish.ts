@@ -9,7 +9,11 @@ import {
   type Log,
 } from "./github.ts";
 import { canonicalSha256, deprecationLeadsHorizon } from "../shared/status.ts";
-import { compact, resultIcon as sharedResultIcon } from "../shared/text.ts";
+import {
+  compact,
+  resultIcon as sharedResultIcon,
+  servingPlatformLabel,
+} from "../shared/text.ts";
 import type { AssessmentReport, LifecycleFinding } from "../shared/types.ts";
 
 const MAX_DETAIL_OUTPUT_BYTES = 120 * 1024;
@@ -82,7 +86,7 @@ function deadlineCell(finding: LifecycleFinding): string {
 
 function findingRow(finding: LifecycleFinding): string {
   const delta = finding.delta === undefined ? "—" : finding.delta;
-  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(finding.servingPlatform)} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadlineCell(finding)} |`;
+  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadlineCell(finding)} |`;
 }
 
 export function renderSummary(
@@ -189,7 +193,7 @@ export function renderSummary(
       ...suppressed.slice(0, 100).map(
         (finding) =>
           `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(
-            compact(finding.servingPlatform, 80),
+            compact(servingPlatformLabel(finding), 300),
           )} — <code>${escapeHtml(compact(finding.suppressedBy, 160))}</code>`,
       ),
       ...(suppressed.length > 100
@@ -233,7 +237,7 @@ function annotationText(finding: LifecycleFinding): string {
     deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined
       ? `deprecation ${finding.deprecationDate} (${finding.daysUntilDeprecation ?? "?"} day(s)), `
       : "";
-  return `${finding.modelId} on ${finding.servingPlatform}: ${deprecation}${deadline}. ${finding.reasons.join(" ")}`;
+  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${deprecation}${deadline}. ${finding.reasons.join(" ")}`;
 }
 
 export function publishAnnotations(report: AssessmentReport, log: Log = console.log): void {

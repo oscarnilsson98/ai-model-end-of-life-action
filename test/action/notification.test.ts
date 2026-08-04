@@ -15,6 +15,7 @@ function finding(overrides: Partial<LifecycleFinding> = {}): LifecycleFinding {
     evidenceIds: ["evidence"],
     modelId: "gpt-old",
     servingPlatform: "openai",
+    servingPlatforms: ["openai"],
     lifecycleMatch: "exact",
     lifecycleStatus: "shutdown-scheduled",
     shutdownDate: "2026-08-20",
@@ -359,6 +360,25 @@ describe("v3 Slack snapshot delivery", () => {
     // A replacement on a different platform keeps the platform prefix.
     expect(text).toContain("→ gpt-5.1");
     expect(text).toContain("→ anthropic/claude-x");
+  });
+
+  test("a collapsed text match names every candidate platform on its line", async () => {
+    const text = await deliveredText(
+      report({
+        result: "advisory",
+        lifecycleFindings: [
+          finding({
+            modelId: "o4-mini",
+            confidence: "low",
+            servingPlatform: "azure",
+            servingPlatforms: ["azure", "openai"],
+          }),
+        ],
+        counts: { ...report().counts, findings: 1, advisory: 1 },
+      }),
+    );
+
+    expect(text).toContain("*ADVISORY (text match)* azure or openai / o4-mini");
   });
 
   test("reconciles the counts line with the listed and withheld findings", async () => {

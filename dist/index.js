@@ -8265,6 +8265,9 @@ function validateRepositoryPattern(value, label) {
 function patterns(value, label) {
   return stringArray(value, label).map((entry, index) => validateRepositoryPattern(entry, `${label}[${index}]`));
 }
+function platformList(value, label) {
+  return stringArray(value, label).map((entry, index) => platform(entry, `${label}[${index}]`)).sort();
+}
 function suppressionPatterns(value, label) {
   const result = patterns(value, label);
   if (result.some((pattern) => !/[^*?/]/u.test(pattern))) {
@@ -8431,6 +8434,7 @@ function defaultPolicy() {
     warnWithinDays: DEFAULT_WARN_WITHIN_DAYS,
     failWithinDays: null,
     allowPartial: false,
+    servingPlatforms: [],
     usageEvidenceFiles: [],
     assertions: [],
     resolutions: [],
@@ -8443,6 +8447,7 @@ function parsePolicyPayload(payload) {
   exactKeys(root, [
     "schemaVersion",
     "policy",
+    "servingPlatforms",
     "usageEvidenceFiles",
     "assertions",
     "resolutions",
@@ -8462,6 +8467,9 @@ function parsePolicyPayload(payload) {
       policy.failWithinDays = integer(source.failWithinDays, "policy.failWithinDays");
     }
     policy.allowPartial = boolean(source.allowPartial, "policy.allowPartial", false);
+  }
+  if (root.servingPlatforms !== undefined) {
+    policy.servingPlatforms = platformList(root.servingPlatforms, "servingPlatforms");
   }
   if (root.usageEvidenceFiles !== undefined) {
     policy.usageEvidenceFiles = patterns(root.usageEvidenceFiles, "usageEvidenceFiles");
@@ -8560,10 +8568,12 @@ function appendUniqueById(base, proposed, identity) {
 }
 function monotonicPolicy(base, proposed) {
   const failWithinDays = base.failWithinDays === null ? proposed.failWithinDays : proposed.failWithinDays === null ? base.failWithinDays : Math.max(base.failWithinDays, proposed.failWithinDays);
+  const servingPlatforms = base.servingPlatforms.length === 0 || proposed.servingPlatforms.length === 0 ? [] : [...new Set([...base.servingPlatforms, ...proposed.servingPlatforms])].sort();
   return {
     warnWithinDays: Math.max(base.warnWithinDays, proposed.warnWithinDays),
     failWithinDays,
     allowPartial: base.allowPartial && proposed.allowPartial,
+    servingPlatforms,
     usageEvidenceFiles: [...new Set([...base.usageEvidenceFiles, ...proposed.usageEvidenceFiles])].sort(),
     assertions: appendUniqueById(base.assertions, proposed.assertions, (entry) => entry.evidenceId),
     resolutions: appendUniqueById(base.resolutions, proposed.resolutions, (entry) => entry.resolutionId),
@@ -8943,6 +8953,7 @@ function lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform) {
     evidenceIds: [fact.evidenceId],
     modelId: pair.modelId,
     servingPlatform: pair.servingPlatform,
+    servingPlatforms: [pair.servingPlatform],
     lifecycleMatch: "exact",
     lifecycleStatus: lifecycle.lifecycleStatus,
     ...lifecycle.announcementDate === null ? {} : { announcementDate: lifecycle.announcementDate },
@@ -8962,6 +8973,50 @@ function lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform) {
     locations: [...fact.locations]
   };
 }
+function mergeReplacementModels(replacements) {
+  return [
+    ...new Map(replacements.map((replacement) => [
+      JSON.stringify([replacement.servingPlatform ?? null, replacement.modelId]),
+      replacement
+    ])).values()
+  ].sort((left, right) => compareText3(left.servingPlatform ?? "", right.servingPlatform ?? "") || compareText3(left.modelId, right.modelId));
+}
+function platformIsProven(fact) {
+  return fact.platformResolution === "resolved" && fact.kind !== "lexical";
+}
+function compareAmbiguousCandidate(left, right) {
+  const leftDays = earliestLifecycleDays(left);
+  const rightDays = earliestLifecycleDays(right);
+  return compareOutcome(right.outcome, left.outcome) || (leftDays === null ? 1 : 0) - (rightDays === null ? 1 : 0) || (leftDays ?? 0) - (rightDays ?? 0) || compareText3(left.servingPlatform, right.servingPlatform) || compareText3(left.semanticKey, right.semanticKey);
+}
+function collapseAmbiguousCandidates(candidates, restrictedTo) {
+  const ordered2 = [...candidates].sort(compareAmbiguousCandidate);
+  const representative = ordered2[0];
+  const servingPlatforms = [
+    ...new Set(ordered2.map((candidate) => candidate.servingPlatform))
+  ].sort(compareText3);
+  const semanticKey = JSON.stringify([
+    "ambiguous-platform",
+    servingPlatforms,
+    representative.semanticKey
+  ]);
+  const reasons = [
+    ...representative.reasons,
+    servingPlatforms.length === 1 ? "Serving platform is ambiguous; this match cannot block." : `Serving platform is ambiguous across ${servingPlatforms.join(", ")}; the most urgent of their lifecycle records is reported and this match cannot block.`,
+    ...restrictedTo.length === 0 ? [] : [`Matching was restricted to the declared serving platform(s): ${restrictedTo.join(", ")}.`]
+  ];
+  return {
+    ...representative,
+    findingId: canonicalSha256("ai-model-eol/lifecycle-finding/v3", semanticKey),
+    semanticKey,
+    servingPlatforms,
+    outcome: ordered2.reduce((strongest, candidate) => strongerOutcome(strongest, candidate.outcome), "none"),
+    feedConflict: ordered2.some((candidate) => candidate.feedConflict),
+    sourceUrls: [...new Set(ordered2.flatMap((candidate) => candidate.sourceUrls))].sort(compareText3),
+    replacementModels: mergeReplacementModels(ordered2.flatMap((candidate) => candidate.replacementModels)),
+    reasons
+  };
+}
 function joinFact(fact, feed, policy, now) {
   if (fact.modelResolution !== "resolved" || fact.modelId === undefined)
     return [];
@@ -8975,18 +9030,23 @@ function joinFact(fact, feed, policy, now) {
   } else if (fact.platformResolution === "ambiguous") {
     pairs = feed.modelPairs.filter((pair) => pair.modelId === fact.modelId);
   }
+  const restrictedTo = policy.servingPlatforms.length > 0 && !platformIsProven(fact) ? policy.servingPlatforms : [];
+  if (restrictedTo.length > 0) {
+    const declared = new Set(restrictedTo);
+    pairs = pairs.filter((pair) => declared.has(pair.servingPlatform));
+  }
   const findings = [];
   for (const pair of pairs) {
     for (const lifecycle of pair.activeLifecycles) {
       const finding = lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform);
       if (!exactPlatform && finding.outcome === "breach")
         finding.outcome = "warning";
-      if (!exactPlatform)
-        finding.reasons.push("Serving platform is ambiguous; this match cannot block.");
       findings.push(finding);
     }
   }
-  return findings;
+  if (exactPlatform || findings.length === 0)
+    return findings;
+  return [collapseAmbiguousCandidates(findings, restrictedTo)];
 }
 function aggregateFindings(findings) {
   const byKey = new Map;
@@ -8996,6 +9056,7 @@ function aggregateFindings(findings) {
       byKey.set(finding.semanticKey, {
         ...finding,
         evidenceIds: [...finding.evidenceIds],
+        servingPlatforms: [...finding.servingPlatforms],
         replacementModels: [...finding.replacementModels],
         sourceUrls: [...finding.sourceUrls],
         reasons: [...finding.reasons],
@@ -9004,16 +9065,17 @@ function aggregateFindings(findings) {
       continue;
     }
     existing.outcome = strongerOutcome(existing.outcome, finding.outcome);
+    existing.servingPlatforms = [
+      ...new Set([...existing.servingPlatforms, ...finding.servingPlatforms])
+    ].sort(compareText3);
     existing.evidenceIds = [...new Set([...existing.evidenceIds, ...finding.evidenceIds])].sort(compareText3);
     existing.sourceUrls = [...new Set([...existing.sourceUrls, ...finding.sourceUrls])].sort(compareText3);
     existing.reasons = [...new Set([...existing.reasons, ...finding.reasons])].sort(compareText3);
     existing.locations = [...existing.locations, ...finding.locations].sort(compareLocation).slice(0, 20);
-    existing.replacementModels = [
-      ...new Map([...existing.replacementModels, ...finding.replacementModels].map((replacement) => [
-        JSON.stringify([replacement.servingPlatform ?? null, replacement.modelId]),
-        replacement
-      ])).values()
-    ].sort((left, right) => compareText3(left.servingPlatform ?? "", right.servingPlatform ?? "") || compareText3(left.modelId, right.modelId));
+    existing.replacementModels = mergeReplacementModels([
+      ...existing.replacementModels,
+      ...finding.replacementModels
+    ]);
     existing.scope = strongestScope(existing.scope, finding.scope);
     existing.environment = strongestEnvironment(existing.environment, finding.environment);
     existing.confidence = strongestConfidence(existing.confidence, finding.confidence);
@@ -9042,7 +9104,7 @@ function applySuppressions(findings, evidenceById, policy, now, diagnostics) {
     for (const suppression of current) {
       const matched = finding.evidenceIds.some((evidenceId) => {
         const fact = evidenceById.get(evidenceId);
-        return fact !== undefined && suppressionMatches(suppression, fact, finding.modelId, finding.servingPlatform);
+        return fact !== undefined && finding.servingPlatforms.some((servingPlatform) => suppressionMatches(suppression, fact, finding.modelId, servingPlatform));
       });
       if (matched) {
         finding.suppressedBy = suppression.suppressionId;
@@ -9061,6 +9123,14 @@ function unresolvedIsAdvisory(fact) {
 }
 function evaluateEvidence(input) {
   const diagnostics = [...input.diagnostics ?? []];
+  if (input.policy.servingPlatforms.length > 0) {
+    diagnostics.push({
+      code: "declared-serving-platforms",
+      message: `Lifecycle matching for lexical and platform-ambiguous evidence is restricted to the declared serving platform(s): ${input.policy.servingPlatforms.join(", ")}.`,
+      path: POLICY_PATH,
+      severity: "notice"
+    });
+  }
   const orderedEvidence = [...input.evidence].sort((left, right) => compareText3(left.evidenceId, right.evidenceId));
   const resolved = applyResolutions(orderedEvidence, input.policy, input.now);
   diagnostics.push(...resolved.diagnostics);
@@ -9441,7 +9511,8 @@ function evaluateComparison(input) {
   const policyChanges = policyDiff(input.baseClaims.policy, input.targetClaims.policy, input.inputs);
   const baseSuppressions = new Set(trustedBasePolicy.suppressions.map((suppression) => JSON.stringify(suppression)));
   const proposedSuppression = proposedTargetPolicy.suppressions.some((suppression) => !baseSuppressions.has(JSON.stringify(suppression)));
-  const attemptedWeakening = proposedTargetPolicy.warnWithinDays < trustedBasePolicy.warnWithinDays || trustedBasePolicy.failWithinDays !== null && (proposedTargetPolicy.failWithinDays === null || proposedTargetPolicy.failWithinDays < trustedBasePolicy.failWithinDays) || !trustedBasePolicy.allowPartial && proposedTargetPolicy.allowPartial || proposedSuppression;
+  const proposedPlatformNarrowing = proposedTargetPolicy.servingPlatforms.length > 0 && (trustedBasePolicy.servingPlatforms.length === 0 || !trustedBasePolicy.servingPlatforms.every((servingPlatform) => proposedTargetPolicy.servingPlatforms.includes(servingPlatform)));
+  const attemptedWeakening = proposedTargetPolicy.warnWithinDays < trustedBasePolicy.warnWithinDays || trustedBasePolicy.failWithinDays !== null && (proposedTargetPolicy.failWithinDays === null || proposedTargetPolicy.failWithinDays < trustedBasePolicy.failWithinDays) || !trustedBasePolicy.allowPartial && proposedTargetPolicy.allowPartial || proposedSuppression || proposedPlatformNarrowing;
   let result = delta.result;
   if (result === "no-actionable-risk" && (claimDiagnostics.length > 0 || attemptedWeakening)) {
     result = "advisory";
@@ -13842,6 +13913,31 @@ function parseActionInputs(environment) {
   return result;
 }
 
+// src/shared/text.ts
+var BIDI_CONTROL_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+var CONTROL_OR_WHITESPACE_PATTERN = /[\u0000-\u001f\u007f-\u009f\s]+/g;
+function compact(value, maximum) {
+  if (!Number.isSafeInteger(maximum) || maximum < 1) {
+    throw new Error("Text compaction maximum must be a positive safe integer.");
+  }
+  const singleLine = value.replace(BIDI_CONTROL_PATTERN, "").replace(CONTROL_OR_WHITESPACE_PATTERN, " ").trim();
+  const codePoints = [...singleLine];
+  if (codePoints.length <= maximum)
+    return singleLine;
+  return `${codePoints.slice(0, maximum - 1).join("")}…`;
+}
+function servingPlatformLabel(finding) {
+  const platforms = finding.servingPlatforms.length === 0 ? [finding.servingPlatform] : finding.servingPlatforms;
+  return platforms.join(" or ");
+}
+function resultIcon(result, scanStatus) {
+  if (result === "blocking" || result === "unknown")
+    return "❌";
+  if (result === "advisory" || scanStatus === "partial")
+    return "⚠️";
+  return "✅";
+}
+
 // src/action/notification.ts
 var MAX_SLACK_TEXT_BYTES = 12000;
 var MAX_ACTIONABLE_FINDINGS = 10;
@@ -13852,19 +13948,19 @@ var REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 var OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 var RUN_ID_PATTERN = /^[0-9]{1,20}$/;
 var SAFE_LINK_PATTERN = /^https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]{1,2000}$/;
-var BIDI_CONTROL_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+var BIDI_CONTROL_PATTERN2 = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 function compareText7(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-function compact(value, maximum) {
-  const singleLine = value.replace(BIDI_CONTROL_PATTERN, "").replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim();
+function compact2(value, maximum) {
+  const singleLine = value.replace(BIDI_CONTROL_PATTERN2, "").replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim();
   const codePoints = [...singleLine];
   if (codePoints.length <= maximum)
     return singleLine;
   return `${codePoints.slice(0, maximum - 1).join("")}…`;
 }
 function slackText(value, maximum) {
-  return compact(value, maximum).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/@/g, "@​").replace(/\*/g, "∗").replace(/_/g, "＿").replace(/~/g, "∼").replace(/`/g, "ˋ");
+  return compact2(value, maximum).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/@/g, "@​").replace(/\*/g, "∗").replace(/_/g, "＿").replace(/~/g, "∼").replace(/`/g, "ˋ");
 }
 function boundedSlackText(value) {
   if (Buffer.byteLength(value, "utf8") <= MAX_SLACK_TEXT_BYTES)
@@ -13976,7 +14072,7 @@ function findingLine(finding) {
   const replacement = replacementText(finding);
   if (replacement !== null)
     qualifiers.push(replacement);
-  const line = `• *${findingLabel(finding)}* ${slackText(finding.servingPlatform, 80)} / ${slackText(finding.modelId, 180)} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;
+  const line = `• *${findingLabel(finding)}* ${slackText(servingPlatformLabel(finding), 160)} / ${slackText(finding.modelId, 180)} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;
   const source = safeLink(finding.sourceUrls[0]);
   return source === null ? line : `${line} · ${slackLink(source, "source")}`;
 }
@@ -14001,14 +14097,14 @@ function workflowRunUrl() {
   return safeLink(`${origin}/${repository}/actions/runs/${runId}`);
 }
 function reportFileHint(path) {
-  const normalized = compact(path, 1024);
+  const normalized = compact2(path, 1024);
   if (normalized === "")
     return null;
   const components = normalized.split(/[\\/]/);
   const basename = components.at(-1)?.trim();
   return basename ? slackText(basename, 180) : null;
 }
-function resultIcon(report) {
+function resultIcon2(report) {
   if (report.result === "blocking" || report.result === "unknown")
     return "❌";
   if (report.result === "advisory" || report.scanStatus === "partial")
@@ -14020,7 +14116,7 @@ function renderSlackSnapshot(report) {
   const { listed, withheld } = partitionFindings(report);
   const externalSources = report.evidenceSources.filter((source) => source.kind !== "repository");
   const lines = [
-    `${resultIcon(report)} *AI model lifecycle snapshot*`,
+    `${resultIcon2(report)} *AI model lifecycle snapshot*`,
     `*Result:* ${report.result} · *Scan:* ${report.scanStatus} · *Evidence:* ${report.evidenceHealth}`,
     `*Counts:* ${report.counts.blocking} blocking · ${report.counts.advisory} advisory · ${report.counts.unresolved} unresolved`
   ];
@@ -14094,29 +14190,6 @@ async function deliverSlackNotification(options) {
 // src/action/publish.ts
 var import_node_fs3 = require("node:fs");
 var import_node_path2 = require("node:path");
-
-// src/shared/text.ts
-var BIDI_CONTROL_PATTERN2 = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-var CONTROL_OR_WHITESPACE_PATTERN = /[\u0000-\u001f\u007f-\u009f\s]+/g;
-function compact2(value, maximum) {
-  if (!Number.isSafeInteger(maximum) || maximum < 1) {
-    throw new Error("Text compaction maximum must be a positive safe integer.");
-  }
-  const singleLine = value.replace(BIDI_CONTROL_PATTERN2, "").replace(CONTROL_OR_WHITESPACE_PATTERN, " ").trim();
-  const codePoints = [...singleLine];
-  if (codePoints.length <= maximum)
-    return singleLine;
-  return `${codePoints.slice(0, maximum - 1).join("")}…`;
-}
-function resultIcon2(result, scanStatus) {
-  if (result === "blocking" || result === "unknown")
-    return "❌";
-  if (result === "advisory" || scanStatus === "partial")
-    return "⚠️";
-  return "✅";
-}
-
-// src/action/publish.ts
 var MAX_DETAIL_OUTPUT_BYTES = 120 * 1024;
 var MAX_TOTAL_OUTPUT_BYTES = 700 * 1024;
 var MAX_REPORT_BYTES = 25 * 1024 * 1024;
@@ -14125,7 +14198,7 @@ function escapeHtml(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/#/g, "&#35;").replace(/\\/g, "&#92;").replace(/\|/g, "&#124;").replace(/`/g, "&#96;").replace(/\[/g, "&#91;").replace(/\]/g, "&#93;").replace(/!/g, "&#33;").replace(/\(/g, "&#40;").replace(/\)/g, "&#41;").replace(/\*/g, "&#42;").replace(/_/g, "&#95;").replace(/~/g, "&#126;").replace(/@/g, "&#64;").replace(/:/g, "&#58;").replace(/\./g, "&#46;").replace(/[\r\n]+/g, "<br>");
 }
 function resultIcon3(report) {
-  return resultIcon2(report.result, report.scanStatus);
+  return resultIcon(report.result, report.scanStatus);
 }
 function deliveryLine(report, options = {}) {
   if (options.notificationPending) {
@@ -14136,9 +14209,9 @@ function deliveryLine(report, options = {}) {
   if (report.notificationStatus === "sent")
     return "Delivery: GitHub Actions summary + Slack snapshot";
   if (report.notificationStatus === "failed") {
-    return `Delivery: GitHub Actions summary; Slack failed (${escapeHtml(compact2(report.notificationReason, 300))})`;
+    return `Delivery: GitHub Actions summary; Slack failed (${escapeHtml(compact(report.notificationReason, 300))})`;
   }
-  return `Delivery: GitHub Actions summary; Slack skipped (${escapeHtml(compact2(report.notificationReason, 300))})`;
+  return `Delivery: GitHub Actions summary; Slack skipped (${escapeHtml(compact(report.notificationReason, 300))})`;
 }
 function deadlineCell(finding) {
   if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
@@ -14148,13 +14221,13 @@ function deadlineCell(finding) {
 }
 function findingRow(finding) {
   const delta = finding.delta === undefined ? "—" : finding.delta;
-  return `| <code>${escapeHtml(compact2(finding.modelId, 160))}</code> | ${escapeHtml(finding.servingPlatform)} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadlineCell(finding)} |`;
+  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadlineCell(finding)} |`;
 }
 function renderSummary(report, options = {}) {
   const actionable = report.lifecycleFindings.filter((finding) => finding.outcome === "breach" || finding.outcome === "warning");
   const visibleSources = report.evidenceSources.slice(0, 20);
   const hiddenSourceCount = report.evidenceSources.length - visibleSources.length;
-  const sourceText = report.evidenceSources.length === 1 ? "repository only" : `${visibleSources.map((source) => `${compact2(source.id, 180)} (${source.kind}, ${source.health})`).join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
+  const sourceText = report.evidenceSources.length === 1 ? "repository only" : `${visibleSources.map((source) => `${compact(source.id, 180)} (${source.kind}, ${source.health})`).join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
   const lines = [
     "## AI model lifecycle",
     "",
@@ -14180,32 +14253,32 @@ function renderSummary(report, options = {}) {
   if (report.unresolvedReferences.length > 0) {
     lines.push("### Conditional and unresolved evidence", "", ...report.unresolvedReferences.slice(0, 50).map((fact) => {
       const location = fact.locations[0];
-      return `- <code>${escapeHtml(compact2(fact.rawValue, 180))}</code> — ${escapeHtml(compact2(fact.detectorRuleId, 240))} · ${fact.modelResolution}/${fact.platformResolution}${location === undefined ? "" : ` · <code>${escapeHtml(compact2(location.path, 300))}</code>`}`;
+      return `- <code>${escapeHtml(compact(fact.rawValue, 180))}</code> — ${escapeHtml(compact(fact.detectorRuleId, 240))} · ${fact.modelResolution}/${fact.platformResolution}${location === undefined ? "" : ` · <code>${escapeHtml(compact(location.path, 300))}</code>`}`;
     }), "");
   }
   const external = report.evidenceSources.filter((source) => source.kind !== "repository");
   if (external.length > 0) {
-    lines.push("### External evidence health", "", ...external.slice(0, 50).map((source) => `- ${escapeHtml(compact2(source.id, 180))}: **${source.health}**`), ...external.length > 50 ? [`- ${external.length - 50} additional source(s) are in the JSON report.`] : [], "");
+    lines.push("### External evidence health", "", ...external.slice(0, 50).map((source) => `- ${escapeHtml(compact(source.id, 180))}: **${source.health}**`), ...external.length > 50 ? [`- ${external.length - 50} additional source(s) are in the JSON report.`] : [], "");
   }
   if (report.policyDiff.length > 0) {
-    lines.push("### Policy and evidence changes", "", ...report.policyDiff.slice(0, 100).map((change) => `- ${escapeHtml(compact2(change, 500))}`), "");
+    lines.push("### Policy and evidence changes", "", ...report.policyDiff.slice(0, 100).map((change) => `- ${escapeHtml(compact(change, 500))}`), "");
   }
   const suppressed = report.lifecycleFindings.filter((finding) => finding.suppressedBy !== undefined);
   if (suppressed.length > 0) {
-    lines.push("### Active suppressions", "", ...suppressed.slice(0, 100).map((finding) => `- <code>${escapeHtml(compact2(finding.modelId, 160))}</code> on ${escapeHtml(compact2(finding.servingPlatform, 80))} — <code>${escapeHtml(compact2(finding.suppressedBy, 160))}</code>`), ...suppressed.length > 100 ? [`- ${suppressed.length - 100} additional suppressed finding(s) are in the JSON report.`] : [], "");
+    lines.push("### Active suppressions", "", ...suppressed.slice(0, 100).map((finding) => `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(compact(servingPlatformLabel(finding), 300))} — <code>${escapeHtml(compact(finding.suppressedBy, 160))}</code>`), ...suppressed.length > 100 ? [`- ${suppressed.length - 100} additional suppressed finding(s) are in the JSON report.`] : [], "");
   }
   if (report.diagnostics.length > 0) {
-    lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...report.diagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact2(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact2(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact2(diagnostic.message, 800))}`), "", "</details>", "");
+    lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...report.diagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact(diagnostic.message, 800))}`), "", "</details>", "");
   }
   const feedFreshness = report.feed.generatedAt === "" || report.feed.ageDays === null ? "unavailable" : `${escapeHtml(report.feed.generatedAt)} (${report.feed.ageDays}d old)`;
-  lines.push(`Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code> · generated ${feedFreshness}`, `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact2(report.reportPath, 500))}</code>`, "");
+  lines.push(`Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code> · generated ${feedFreshness}`, `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact(report.reportPath, 500))}</code>`, "");
   return lines.join(`
 `);
 }
 function annotationText(finding) {
   const deadline = finding.shutdownDate === undefined ? "shutdown date not announced" : `shutdown ${finding.shutdownDate} (${finding.daysUntilShutdown ?? "?"} day(s))`;
   const deprecation = deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined ? `deprecation ${finding.deprecationDate} (${finding.daysUntilDeprecation ?? "?"} day(s)), ` : "";
-  return `${finding.modelId} on ${finding.servingPlatform}: ${deprecation}${deadline}. ${finding.reasons.join(" ")}`;
+  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${deprecation}${deadline}. ${finding.reasons.join(" ")}`;
 }
 function publishAnnotations(report, log = console.log) {
   const actionable = report.lifecycleFindings.filter((finding) => (finding.outcome === "breach" || finding.outcome === "warning") && finding.delta !== "unchanged" && finding.delta !== "resolved");
@@ -14215,9 +14288,9 @@ function publishAnnotations(report, log = console.log) {
       break;
     const location = finding.locations[0];
     if (location === undefined || Buffer.byteLength(location.path, "utf8") > 1024) {
-      emitCommand(finding.outcome === "breach" ? "error" : "warning", compact2(annotationText(finding), 2000), log);
+      emitCommand(finding.outcome === "breach" ? "error" : "warning", compact(annotationText(finding), 2000), log);
     } else {
-      emitAnnotation(finding.outcome === "breach" ? "error" : "warning", compact2(annotationText(finding), 2000), {
+      emitAnnotation(finding.outcome === "breach" ? "error" : "warning", compact(annotationText(finding), 2000), {
         title: "AI model lifecycle",
         file: location.path,
         line: location.line,
@@ -14329,7 +14402,7 @@ function publishNotificationSummary(report, environment) {
   appendSummary(environment.GITHUB_STEP_SUMMARY, [
     "## Notification delivery",
     "",
-    `Slack: **${report.notificationStatus}** · ${escapeHtml(compact2(report.notificationReason, 800))}`,
+    `Slack: **${report.notificationStatus}** · ${escapeHtml(compact(report.notificationReason, 800))}`,
     ""
   ].join(`
 `));
@@ -14849,7 +14922,7 @@ class ActionRunError extends Error {
 }
 function safeMessage(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return compact2(message, 2000);
+  return compact(message, 2000);
 }
 function reportPath(environment2, requested) {
   if (requested !== undefined)
@@ -14937,10 +15010,17 @@ function applyFeedCoverage(detection, feed) {
 function applyFeedFreshnessCoverage(scanStatus, freshness) {
   return freshness.stale ? "partial" : scanStatus;
 }
-function reportEvidenceSources(evaluation, inspections, effectiveDocuments) {
+function reportEvidenceSources(evaluation, inspections, policy, effectiveDocuments) {
   const result = [
     { id: "repository", kind: "repository", health: "current" }
   ];
+  if (policy.servingPlatforms.length > 0) {
+    result.push({
+      id: `declared-serving-platforms: ${policy.servingPlatforms.join(", ")}`,
+      kind: "repository",
+      health: "current"
+    });
+  }
   const manual = evaluation.evidence.filter((fact) => fact.origin === "manual-claim");
   if (manual.length > 0) {
     result.push({
@@ -15106,7 +15186,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           diagnostics: diagnostic.evaluation.diagnostics,
           policyDiff: targetClaims2.policy.valid ? [] : ["Target policy/configuration is invalid and non-authoritative."],
           feed: feedIdentity(feed, freshness),
-          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
           reportPath: localReportPath
         }),
         policy: diagnostic.policy,
@@ -15145,7 +15225,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
               ...feedDiagnostics(feed, freshness)
             ],
             feed: feedIdentity(feed, freshness),
-            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
             reportPath: localReportPath
           }),
           policy: diagnostic.policy,
@@ -15165,7 +15245,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           evaluation: diagnostic.evaluation,
           diagnostics: diagnostic.evaluation.diagnostics,
           feed: feedIdentity(feed, freshness),
-          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
           reportPath: localReportPath
         }),
         policy: diagnostic.policy,
@@ -15215,7 +15295,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
             evaluation: diagnostic.evaluation,
             diagnostics: diagnostic.evaluation.diagnostics,
             feed: feedIdentity(feed, freshness),
-            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
             reportPath: localReportPath
           }),
           policy: diagnostic.policy,
@@ -15276,7 +15356,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
         diagnostics,
         policyDiff: comparison.policyDiff,
         feed: feedIdentity(feed, freshness),
-        evidenceSources: reportEvidenceSources(comparison.evaluation, [targetClaims], monotonicEvidenceSourceDocuments(baseClaims, targetClaims)),
+        evidenceSources: reportEvidenceSources(comparison.evaluation, [targetClaims], comparison.policy, monotonicEvidenceSourceDocuments(baseClaims, targetClaims)),
         reportPath: localReportPath
       }),
       policy: comparison.policy,

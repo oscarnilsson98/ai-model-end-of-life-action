@@ -581,13 +581,22 @@ export function evaluateComparison(input: {
   const proposedSuppression = proposedTargetPolicy.suppressions.some(
     (suppression) => !baseSuppressions.has(JSON.stringify(suppression)),
   );
+  // An undeclared platform set matches every platform, so declaring one — or
+  // dropping a platform the base declared — proposes narrower lifecycle matching.
+  const proposedPlatformNarrowing =
+    proposedTargetPolicy.servingPlatforms.length > 0 &&
+    (trustedBasePolicy.servingPlatforms.length === 0 ||
+      !trustedBasePolicy.servingPlatforms.every((servingPlatform) =>
+        proposedTargetPolicy.servingPlatforms.includes(servingPlatform),
+      ));
   const attemptedWeakening =
     proposedTargetPolicy.warnWithinDays < trustedBasePolicy.warnWithinDays ||
     (trustedBasePolicy.failWithinDays !== null &&
       (proposedTargetPolicy.failWithinDays === null ||
         proposedTargetPolicy.failWithinDays < trustedBasePolicy.failWithinDays)) ||
     (!trustedBasePolicy.allowPartial && proposedTargetPolicy.allowPartial) ||
-    proposedSuppression;
+    proposedSuppression ||
+    proposedPlatformNarrowing;
   let result = delta.result;
   if (
     result === "no-actionable-risk" &&
