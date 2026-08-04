@@ -160,8 +160,15 @@ describe("published v3 JSON Schemas", () => {
     expect(required(definition(document, "evidenceFact"))).toContain("policyEligible");
     expect(required(definition(document, "lifecycleFinding"))).toContain("feedConflict");
     expect(required(definition(document, "lifecycleFinding"))).toContain("servingPlatforms");
-    const findingPlatforms = (definition(document, "lifecycleFinding").properties as JsonSchema)
-      .servingPlatforms as JsonSchema;
+    // The finding definition is additionalProperties:false, so every emitted lifecycle
+    // day-count must be declared or real reports stop validating.
+    const findingProperties = definition(document, "lifecycleFinding").properties as Record<
+      string,
+      JsonSchema
+    >;
+    expect(findingProperties.daysUntilDeprecation).toEqual({ type: "integer" });
+    expect(findingProperties.deprecationDate).toBeDefined();
+    const findingPlatforms = findingProperties.servingPlatforms as JsonSchema;
     expect(findingPlatforms.minItems).toBe(1);
     expect(findingPlatforms.uniqueItems).toBe(true);
   });

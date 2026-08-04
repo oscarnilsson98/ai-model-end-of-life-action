@@ -117,6 +117,8 @@ export type LifecycleFinding = {
   deprecationDate?: string;
   shutdownDate?: string;
   daysUntilShutdown: number | null;
+  /** Present exactly when `deprecationDate` is. Signed, like `daysUntilShutdown`. */
+  daysUntilDeprecation?: number;
   replacementModels: Array<{ modelId: string; servingPlatform?: string }>;
   sourceUrls: string[];
   feedConflict: boolean;

@@ -8,7 +8,7 @@ import {
   type Environment,
   type Log,
 } from "./github.ts";
-import { canonicalSha256 } from "../shared/status.ts";
+import { canonicalSha256, deprecationLeadsHorizon } from "../shared/status.ts";
 import {
   compact,
   resultIcon as sharedResultIcon,
@@ -70,13 +70,23 @@ function deliveryLine(
   return `Delivery: GitHub Actions summary; Slack skipped (${escapeHtml(compact(report.notificationReason, 300))})`;
 }
 
+/**
+ * The nearest published transition, which is the date the warning horizon measured. A
+ * model already past its deprecation date is actionable even when its shutdown is far
+ * out, so the row must name which date it is reporting.
+ */
+function deadlineCell(finding: LifecycleFinding): string {
+  if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
+    return `deprecation ${escapeHtml(finding.deprecationDate)} (${finding.daysUntilDeprecation ?? "?"}d)`;
+  }
+  return finding.shutdownDate === undefined
+    ? "Not announced"
+    : `shutdown ${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
+}
+
 function findingRow(finding: LifecycleFinding): string {
-  const deadline =
-    finding.shutdownDate === undefined
-      ? "Not announced"
-      : `${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
   const delta = finding.delta === undefined ? "—" : finding.delta;
-  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadline} |`;
+  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadlineCell(finding)} |`;
 }
 
 export function renderSummary(
@@ -130,7 +140,7 @@ export function renderSummary(
     lines.push(
       "### Actionable lifecycle findings",
       "",
-      "| Model | Serving platform | Outcome | Change | Shutdown |",
+      "| Model | Serving platform | Outcome | Change | Next lifecycle date |",
       "| --- | --- | --- | --- | --- |",
       ...actionable.slice(0, 100).map(findingRow),
       "",
@@ -219,7 +229,11 @@ function annotationText(finding: LifecycleFinding): string {
     finding.shutdownDate === undefined
       ? "shutdown date not announced"
       : `shutdown ${finding.shutdownDate} (${finding.daysUntilShutdown ?? "?"} day(s))`;
-  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${deadline}. ${finding.reasons.join(" ")}`;
+  const deprecation =
+    deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined
+      ? `deprecation ${finding.deprecationDate} (${finding.daysUntilDeprecation ?? "?"} day(s)), `
+      : "";
+  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${deprecation}${deadline}. ${finding.reasons.join(" ")}`;
 }
 
 export function publishAnnotations(report: AssessmentReport, log: Log = console.log): void {

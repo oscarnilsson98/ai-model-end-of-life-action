@@ -59,6 +59,8 @@ policy:
 
 Setting `failWithinDays` turns enforcement on. The built-in 180-day warning horizon and fail-closed handling for partial coverage remain in effect unless the policy explicitly overrides them.
 
+Warnings and failures measure different dates. The warning horizon opens at the earliest published lifecycle date, so a model whose deprecation date has already passed is advisory even when its shutdown is a year out — some providers stop serving at the deprecation date. Enforcement stays keyed to the shutdown date, so an early deprecation warns loudly without failing the job. See [lifecycle date precedence](docs/v3-product-contract.md#lifecycle-date-precedence).
+
 Only resolved deployment evidence, or resolved application evidence established as production, can block. Ordinary SDK calls remain advisory because source code alone does not prove where it is deployed. If a known application path is production, add this top-level `scopeRules` section to the same policy file, using the relevant stable rule ID from [the detector contract](docs/v3-detector-contract.md):
 
 ```yaml
@@ -201,8 +203,8 @@ All inputs are optional.
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `warn-within-days` | Checked-in policy, otherwise `180` | Warning horizon in UTC calendar days. |
-| `fail-within-days` | Unset | Enables enforcement for definite eligible evidence inside the horizon. |
+| `warn-within-days` | Checked-in policy, otherwise `180` | Warning horizon in UTC calendar days, measured against the earliest published lifecycle date — the deprecation date when the provider published one, otherwise the shutdown date. |
+| `fail-within-days` | Unset | Enables enforcement for definite eligible evidence inside the horizon. Measured against the shutdown date only. |
 | `allow-partial` | Checked-in policy, otherwise `false` | Permits enforced partial scans to succeed unless they contain a definite breach. |
 | `slack-webhook` | Unset | HTTPS Slack incoming webhook used only for commit targets on `schedule`, `workflow_dispatch`, or `push`; every other event is skipped. |
 | `notification-failure-mode` | `fail` | `fail` or `warn` when configured delivery fails. |
