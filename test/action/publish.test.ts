@@ -6,7 +6,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { publishCoreOutputs, renderSummary } from "../../src/action/publish.ts";
+import {
+  publishAnnotations,
+  publishCoreOutputs,
+  renderSummary,
+} from "../../src/action/publish.ts";
 import type { AssessmentReport } from "../../src/shared/types.ts";
 
 function cleanReport(): AssessmentReport {
@@ -53,6 +57,8 @@ function cleanReport(): AssessmentReport {
       normalizedFeedSha256: "b".repeat(64),
       activeRecordsSha256: "c".repeat(64),
       feedAdapterManifestSha256: "d".repeat(64),
+      generatedAt: "2026-08-02T00:00:00Z",
+      ageDays: 0,
     },
     detectorManifestSha256: "e".repeat(64),
     scanFingerprint: "f".repeat(64),
@@ -86,12 +92,128 @@ test("unknown results never render a clean outcome", () => {
       normalizedFeedSha256: "0".repeat(64),
       activeRecordsSha256: "0".repeat(64),
       feedAdapterManifestSha256: "0".repeat(64),
+      generatedAt: "",
+      ageDays: null,
     },
     notificationReason: "assessment failed",
   };
   const summary = renderSummary(report);
   expect(summary).toContain("A trustworthy lifecycle result could not be produced");
   expect(summary).not.toContain("No actionable lifecycle risk found");
+});
+
+test("one collapsed finding annotates once and names every candidate platform", () => {
+  const report = cleanReport();
+  report.lifecycleFindings = [
+    {
+      findingId: "finding",
+      semanticKey: "semantic",
+      evidenceIds: ["evidence"],
+      modelId: "o4-mini",
+      servingPlatform: "azure",
+      servingPlatforms: ["azure", "openai"],
+      lifecycleMatch: "exact",
+      lifecycleStatus: "shutdown-scheduled",
+      shutdownDate: "2026-10-16",
+      daysUntilShutdown: 74,
+      replacementModels: [],
+      sourceUrls: [],
+      feedConflict: false,
+      outcome: "warning",
+      reasons: ["Serving platform is ambiguous across azure, openai."],
+      scope: "application",
+      environment: "unknown",
+      confidence: "low",
+      selectorKind: "model-id",
+      locations: [{ path: "packages/ai-client/src/models.ts", line: 23, column: 10 }],
+    },
+  ];
+
+  const lines: string[] = [];
+  publishAnnotations(report, (line: string) => lines.push(line));
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("o4-mini on azure or openai: shutdown 2026-10-16 (74 day(s))");
+  expect(renderSummary(report)).toContain("azure or openai");
+
+  // A suppression may name any covered platform, so the suppression list must not
+  // attribute the suppression to the reported record's platform alone.
+  const suppressed = cleanReport();
+  suppressed.lifecycleFindings = [
+    { ...report.lifecycleFindings[0]!, outcome: "none", suppressedBy: "registry-listing" },
+  ];
+  const suppressionLine = renderSummary(suppressed)
+    .split("\n")
+    .find((line) => line.includes("registry-listing"));
+  expect(suppressionLine).toContain("azure or openai");
+});
+
+test("the summary names the deprecation date when it is the nearer deadline", () => {
+  const report = cleanReport();
+  report.result = "advisory";
+  report.lifecycleFindings = [
+    {
+      findingId: "finding",
+      semanticKey: "semantic",
+      evidenceIds: ["evidence"],
+      modelId: "gpt-old",
+      servingPlatform: "openai",
+      servingPlatforms: ["openai"],
+      lifecycleMatch: "exact",
+      lifecycleStatus: "shutdown-scheduled",
+      deprecationDate: "2026-06-01",
+      shutdownDate: "2027-06-01",
+      daysUntilShutdown: 303,
+      daysUntilDeprecation: -62,
+      replacementModels: [],
+      sourceUrls: [],
+      feedConflict: false,
+      outcome: "warning",
+      reasons: ["Deprecation was 62 UTC calendar day(s) ago; shutdown is 303 UTC calendar day(s) away."],
+      scope: "application",
+      environment: "production",
+      confidence: "high",
+      selectorKind: "model-id",
+      locations: [{ path: "src/chat.ts", line: 1, column: 1 }],
+    },
+  ];
+
+  const summary = renderSummary(report);
+  // A bare "2027-06-01 (303d)" next to a warning reads as a false alarm.
+  expect(summary).toContain("deprecation 2026-06-01 (-62d)");
+  expect(summary).not.toContain("(303d)");
+});
+
+test("the summary keeps naming the shutdown date when it is the nearer deadline", () => {
+  const report = cleanReport();
+  report.result = "advisory";
+  report.lifecycleFindings = [
+    {
+      findingId: "finding",
+      semanticKey: "semantic",
+      evidenceIds: ["evidence"],
+      modelId: "gpt-old",
+      servingPlatform: "openai",
+      servingPlatforms: ["openai"],
+      lifecycleMatch: "exact",
+      lifecycleStatus: "shutdown-scheduled",
+      deprecationDate: "2026-08-20",
+      shutdownDate: "2026-08-20",
+      daysUntilShutdown: 18,
+      daysUntilDeprecation: 18,
+      replacementModels: [],
+      sourceUrls: [],
+      feedConflict: false,
+      outcome: "warning",
+      reasons: ["Shutdown is 18 UTC calendar day(s) away."],
+      scope: "application",
+      environment: "production",
+      confidence: "high",
+      selectorKind: "model-id",
+      locations: [{ path: "src/chat.ts", line: 1, column: 1 }],
+    },
+  ];
+
+  expect(renderSummary(report)).toContain("shutdown 2026-08-20 (18d)");
 });
 
 test("active suppressions stay visible in the summary", () => {
@@ -103,6 +225,7 @@ test("active suppressions stay visible in the summary", () => {
       evidenceIds: ["evidence"],
       modelId: "gpt-old",
       servingPlatform: "openai",
+      servingPlatforms: ["openai"],
       lifecycleMatch: "exact",
       lifecycleStatus: "shutdown-scheduled",
       shutdownDate: "2026-08-20",
@@ -143,6 +266,7 @@ test("repository text cannot inject HTML, Markdown links, tables, mentions, or a
       evidenceIds: ["evidence"],
       modelId: attack,
       servingPlatform: "openai",
+      servingPlatforms: ["openai"],
       lifecycleMatch: "exact",
       lifecycleStatus: "shutdown-scheduled",
       shutdownDate: "2026-08-20",

@@ -25,6 +25,20 @@ export function compact(value: string, maximum: number): string {
 }
 
 /**
+ * Render the serving platform(s) one finding covers. A collapsed unproven-platform
+ * finding names every candidate so the reader is never told a single platform was
+ * established when it was not.
+ */
+export function servingPlatformLabel(
+  finding: Readonly<{ servingPlatform: string; servingPlatforms: readonly string[] }>,
+): string {
+  const platforms = finding.servingPlatforms.length === 0
+    ? [finding.servingPlatform]
+    : finding.servingPlatforms;
+  return platforms.join(" or ");
+}
+
+/**
  * Shared status icon for summaries, notifications, and logs. The optional scan
  * status downgrades an otherwise clean result to a warning when coverage was
  * only partial.

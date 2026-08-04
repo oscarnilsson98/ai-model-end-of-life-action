@@ -292,6 +292,7 @@
         "evidenceIds",
         "modelId",
         "servingPlatform",
+        "servingPlatforms",
         "lifecycleMatch",
         "lifecycleStatus",
         "daysUntilShutdown",
@@ -315,6 +316,12 @@
         },
         "modelId": { "type": "string" },
         "servingPlatform": { "type": "string" },
+        "servingPlatforms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        },
         "lifecycleMatch": { "enum": ["exact", "provider-alias", "none"] },
         "lifecycleStatus": { "enum": ["deprecated", "shutdown-scheduled", "retired"] },
         "announcementDate": { "$ref": "#/$defs/date" },
@@ -326,6 +333,7 @@
             { "type": "null" }
           ]
         },
+        "daysUntilDeprecation": { "type": "integer" },
         "replacementModels": {
           "type": "array",
           "items": { "$ref": "#/$defs/replacementModel" }
@@ -426,13 +434,22 @@
         "sourceFeedSha256",
         "normalizedFeedSha256",
         "activeRecordsSha256",
-        "feedAdapterManifestSha256"
+        "feedAdapterManifestSha256",
+        "generatedAt",
+        "ageDays"
       ],
       "properties": {
         "sourceFeedSha256": { "$ref": "#/$defs/sha256" },
         "normalizedFeedSha256": { "$ref": "#/$defs/sha256" },
         "activeRecordsSha256": { "$ref": "#/$defs/sha256" },
-        "feedAdapterManifestSha256": { "$ref": "#/$defs/sha256" }
+        "feedAdapterManifestSha256": { "$ref": "#/$defs/sha256" },
+        "generatedAt": {
+          "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "const": "" }]
+        },
+        "ageDays": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
       }
     }
   },

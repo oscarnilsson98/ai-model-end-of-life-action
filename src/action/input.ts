@@ -1,5 +1,5 @@
 import { getInput, type Environment } from "./github.ts";
-import { MAX_POLICY_DAYS } from "../shared/limits.ts";
+import { DEFAULT_MAX_FEED_AGE_DAYS, MAX_POLICY_DAYS } from "../shared/limits.ts";
 import type { ActionInputs } from "../shared/types.ts";
 
 function preview(value: string | undefined): string {
@@ -62,6 +62,7 @@ export function parseActionInputs(environment: Environment): ActionInputs {
   const rawWarn = getInput("warn-within-days", environment);
   const rawFail = getInput("fail-within-days", environment);
   const rawAllowPartial = getInput("allow-partial", environment);
+  const rawMaxFeedAge = getInput("max-feed-age-days", environment);
   const slackWebhook = getInput("slack-webhook", environment);
   const rawNotificationFailure = getInput("notification-failure-mode", environment);
 
@@ -75,6 +76,12 @@ export function parseActionInputs(environment: Environment): ActionInputs {
     rawAllowPartial === undefined || rawAllowPartial === ""
       ? null
       : parseBoolean(rawAllowPartial, "allow-partial", false);
+  // Unlike the policy overrides this one is guarded by default: an absent input keeps the
+  // built-in horizon, and only an explicitly emptied input turns the guard off.
+  const maxFeedAgeDays =
+    rawMaxFeedAge === undefined
+      ? DEFAULT_MAX_FEED_AGE_DAYS
+      : parseOptionalInteger(rawMaxFeedAge, "max-feed-age-days", { max: MAX_POLICY_DAYS });
   const notificationFailureMode = rawNotificationFailure?.toLowerCase() || "fail";
   if (notificationFailureMode !== "fail" && notificationFailureMode !== "warn") {
     throw new Error(
@@ -86,6 +93,7 @@ export function parseActionInputs(environment: Environment): ActionInputs {
     warnWithinDays,
     failWithinDays,
     allowPartial,
+    maxFeedAgeDays,
     notificationFailureMode,
   };
   if (slackWebhook) result.slackWebhook = parseHttpsUrl(slackWebhook, "slack-webhook");

@@ -8,8 +8,12 @@ import {
   type Environment,
   type Log,
 } from "./github.ts";
-import { canonicalSha256 } from "../shared/status.ts";
-import { compact, resultIcon as sharedResultIcon } from "../shared/text.ts";
+import { canonicalSha256, deprecationLeadsHorizon } from "../shared/status.ts";
+import {
+  compact,
+  resultIcon as sharedResultIcon,
+  servingPlatformLabel,
+} from "../shared/text.ts";
 import type { AssessmentReport, LifecycleFinding } from "../shared/types.ts";
 
 const MAX_DETAIL_OUTPUT_BYTES = 120 * 1024;
@@ -66,13 +70,23 @@ function deliveryLine(
   return `Delivery: GitHub Actions summary; Slack skipped (${escapeHtml(compact(report.notificationReason, 300))})`;
 }
 
+/**
+ * The nearest published transition, which is the date the warning horizon measured. A
+ * model already past its deprecation date is actionable even when its shutdown is far
+ * out, so the row must name which date it is reporting.
+ */
+function deadlineCell(finding: LifecycleFinding): string {
+  if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
+    return `deprecation ${escapeHtml(finding.deprecationDate)} (${finding.daysUntilDeprecation ?? "?"}d)`;
+  }
+  return finding.shutdownDate === undefined
+    ? "Not announced"
+    : `shutdown ${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
+}
+
 function findingRow(finding: LifecycleFinding): string {
-  const deadline =
-    finding.shutdownDate === undefined
-      ? "Not announced"
-      : `${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
   const delta = finding.delta === undefined ? "—" : finding.delta;
-  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(finding.servingPlatform)} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadline} |`;
+  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadlineCell(finding)} |`;
 }
 
 export function renderSummary(
@@ -126,7 +140,7 @@ export function renderSummary(
     lines.push(
       "### Actionable lifecycle findings",
       "",
-      "| Model | Serving platform | Outcome | Change | Shutdown |",
+      "| Model | Serving platform | Outcome | Change | Next lifecycle date |",
       "| --- | --- | --- | --- | --- |",
       ...actionable.slice(0, 100).map(findingRow),
       "",
@@ -179,7 +193,7 @@ export function renderSummary(
       ...suppressed.slice(0, 100).map(
         (finding) =>
           `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(
-            compact(finding.servingPlatform, 80),
+            compact(servingPlatformLabel(finding), 300),
           )} — <code>${escapeHtml(compact(finding.suppressedBy, 160))}</code>`,
       ),
       ...(suppressed.length > 100
@@ -202,8 +216,12 @@ export function renderSummary(
       "",
     );
   }
+  const feedFreshness =
+    report.feed.generatedAt === "" || report.feed.ageDays === null
+      ? "unavailable"
+      : `${escapeHtml(report.feed.generatedAt)} (${report.feed.ageDays}d old)`;
   lines.push(
-    `Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code>`,
+    `Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code> · generated ${feedFreshness}`,
     `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact(report.reportPath, 500))}</code>`,
     "",
   );
@@ -215,7 +233,11 @@ function annotationText(finding: LifecycleFinding): string {
     finding.shutdownDate === undefined
       ? "shutdown date not announced"
       : `shutdown ${finding.shutdownDate} (${finding.daysUntilShutdown ?? "?"} day(s))`;
-  return `${finding.modelId} on ${finding.servingPlatform}: ${deadline}. ${finding.reasons.join(" ")}`;
+  const deprecation =
+    deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined
+      ? `deprecation ${finding.deprecationDate} (${finding.daysUntilDeprecation ?? "?"} day(s)), `
+      : "";
+  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${deprecation}${deadline}. ${finding.reasons.join(" ")}`;
 }
 
 export function publishAnnotations(report: AssessmentReport, log: Log = console.log): void {
@@ -328,6 +350,8 @@ export function publishCoreOutputs(report: AssessmentReport, environment: Enviro
     "normalized-feed-sha256": report.feed.normalizedFeedSha256,
     "active-records-sha256": report.feed.activeRecordsSha256,
     "feed-adapter-manifest-sha256": report.feed.feedAdapterManifestSha256,
+    "feed-generated-at": report.feed.generatedAt,
+    "feed-age-days": report.feed.ageDays === null ? "" : String(report.feed.ageDays),
     "detector-manifest-sha256": report.detectorManifestSha256,
     "evidence-fingerprint": evidenceFingerprint,
     "finding-fingerprint": findingFingerprint,

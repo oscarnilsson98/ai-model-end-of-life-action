@@ -44,6 +44,13 @@ const SOURCE_EXTENSIONS = new Set([
   ".sh",
 ]);
 const JS_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"]);
+/**
+ * Extensions where `<` in a value position opens a JSX element. `.ts`, `.mts`,
+ * and `.cts` are excluded deliberately: `tsc` rejects JSX in those files, while
+ * the `<Type>value` assertion form is legal there, so JSX lexing would
+ * desynchronize valid TypeScript instead of recovering it.
+ */
+const JSX_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".tsx"]);
 const HCL_EXTENSIONS = new Set([".tf", ".hcl"]);
 const IDENTIFIER_CHARACTER = /^[\p{L}\p{N}\p{M}._:/-]$/u;
 const DIRECT_POLICY_RULES = new Set(
@@ -198,24 +205,270 @@ const REGEX_PRECEDING_KEYWORDS = new Set([
   "await",
 ]);
 
+/** Whether `token` ends a value, which makes a following `/` a division. */
+function valueEndingToken(token: Token | undefined): boolean {
+  if (token === undefined) return false;
+  if (token.kind === "string") return true;
+  if (token.kind === "identifier") return !REGEX_PRECEDING_KEYWORDS.has(token.value);
+  // Digits tokenize as punctuation here, so a trailing digit ends a value.
+  if (/^[0-9]$/u.test(token.value)) return true;
+  return token.value === ")" || token.value === "]" || token.value === "}" ||
+    token.value === "++" || token.value === "--";
+}
+
 /**
  * Decide whether `/` opens a regex literal, using the previous significant
  * token: after a value (identifier, literal, `)`, `]`) it is division.
  */
 function regexLiteralAllowed(tokens: readonly Token[]): boolean {
-  const previous = tokens[tokens.length - 1];
-  if (previous === undefined) return true;
-  if (previous.kind === "string") return false;
-  if (previous.kind === "identifier") return REGEX_PRECEDING_KEYWORDS.has(previous.value);
-  // Digits tokenize as punctuation here, so a trailing digit means division.
-  if (/^[0-9]$/u.test(previous.value)) return false;
-  return previous.value !== ")" && previous.value !== "]" && previous.value !== "}" &&
-    previous.value !== "++" && previous.value !== "--";
+  let index = tokens.length - 1;
+  // A TypeScript non-null assertion is postfix, so `filters[0]! / 100` divides,
+  // while the prefix `!` of `!/ready/.test(state)` precedes a regex literal.
+  if (structuralValue(tokens[index]) === "!" && valueEndingToken(tokens[index - 1])) {
+    index -= 1;
+  }
+  return !valueEndingToken(tokens[index]);
 }
+
+/** Bounded opening-tag lookahead used to tell JSX from a type-parameter list. */
+const JSX_TAG_LOOKAHEAD_CHARACTERS = 4_096;
+const JSX_NAME_START = /[A-Za-z_$]/u;
+const JSX_NAME_CHARACTER = /[A-Za-z0-9_$.:-]/u;
+
+/** End of a quoted JSX attribute value, or -1 within the bounded lookahead. */
+function jsxQuotedEnd(source: string, index: number, limit: number): number {
+  const quote = source[index];
+  for (let scan = index + 1; scan < limit; scan += 1) {
+    if (source[scan] === quote) return scan + 1;
+  }
+  return -1;
+}
+
+/**
+ * Characters that end a value, so a following `/` divides rather than opens a
+ * regex literal. Mirrors the token-level rule in `valueEndingToken`, including
+ * the `}` that closes an object literal or an arrow body.
+ */
+const JSX_VALUE_ENDING_CHARACTER = /[\p{L}\p{N}_$)\]}]/u;
+
+/** Stands in for the value a stepped-over literal produced. */
+const JSX_STEPPED_OVER_VALUE = "0";
+
+/**
+ * End of the string, template, comment, or regular-expression literal starting
+ * at `index`, or `index` itself when none starts there. A construct that does
+ * not terminate inside the bounded lookahead — and a `/` that turns out not to
+ * open a regex literal — also yield `index`, so this scan can only ever improve
+ * on plain character counting, never abandon a tag the naive count would have
+ * found. `previous` is the last significant character before `index`, which is
+ * what separates a regex literal from a division. Escapes are honoured because
+ * this reads JavaScript inside an attribute expression, unlike the attribute
+ * text `jsxQuotedEnd` reads.
+ */
+function jsxOpaqueEnd(
+  source: string,
+  index: number,
+  limit: number,
+  previous: string,
+): number {
+  const character = source[index] as string;
+  if (character === '"' || character === "'") {
+    for (let scan = index + 1; scan < limit; scan += 1) {
+      const inner = source[scan];
+      if (inner === "\\") scan += 1;
+      else if (inner === "\n") break; // a quoted string cannot span a line
+      else if (inner === character) return scan + 1;
+    }
+    return index;
+  }
+  if (character === "`") {
+    let substitutions = 0;
+    for (let scan = index + 1; scan < limit; scan += 1) {
+      const inner = source[scan];
+      if (inner === "\\") scan += 1;
+      else if (inner === "$" && source[scan + 1] === "{") {
+        substitutions += 1;
+        scan += 1;
+      } else if (inner === "}" && substitutions > 0) substitutions -= 1;
+      else if (inner === "`" && substitutions === 0) return scan + 1;
+    }
+    return index;
+  }
+  if (character !== "/") return index;
+  if (source[index + 1] === "*") {
+    const closed = source.indexOf("*/", index + 2);
+    return closed < 0 || closed + 2 > limit ? index : closed + 2;
+  }
+  if (source[index + 1] === "/") {
+    const newline = source.indexOf("\n", index + 2);
+    return newline < 0 || newline >= limit ? index : newline + 1;
+  }
+  if (JSX_VALUE_ENDING_CHARACTER.test(previous)) return index; // a division
+  let characterClass = false;
+  for (let scan = index + 1; scan < limit; scan += 1) {
+    const inner = source[scan];
+    if (inner === "\\") scan += 1;
+    else if (inner === "\n") break; // a regex literal cannot span a line
+    else if (inner === "[") characterClass = true;
+    else if (inner === "]") characterClass = false;
+    else if (inner === "/" && !characterClass) return scan + 1;
+  }
+  return index;
+}
+
+/**
+ * End of a balanced `open`/`close` run starting at `index`, or -1 within the
+ * bounded lookahead. Strings, templates, comments, and regex literals are
+ * stepped over rather than counted: a brace inside one is not a delimiter, and
+ * counting raw characters would end `code={"if (ready) {"}` early and make the
+ * lookahead miss a real tag — losing every semantic fact in the file.
+ */
+function jsxBalancedEnd(
+  source: string,
+  index: number,
+  limit: number,
+  open: string,
+  close: string,
+): number {
+  let depth = 0;
+  let previous = "";
+  for (let scan = index; scan < limit; scan += 1) {
+    const character = source[scan] as string;
+    const opaque = jsxOpaqueEnd(source, scan, limit, previous);
+    if (opaque > scan) {
+      const comment = character === "/" &&
+        (source[scan + 1] === "/" || source[scan + 1] === "*");
+      // A comment yields no value; a string, template, or regex literal does.
+      if (!comment) previous = JSX_STEPPED_OVER_VALUE;
+      scan = opaque - 1;
+      continue;
+    }
+    if (character === open) depth += 1;
+    else if (character === close) {
+      depth -= 1;
+      if (depth === 0) return scan + 1;
+    }
+    if (!/\s/u.test(character)) previous = character;
+  }
+  return -1;
+}
+
+/** End of a `{…}` JSX attribute value or spread, or -1 within the lookahead. */
+function jsxBracedEnd(source: string, index: number, limit: number): number {
+  return jsxBalancedEnd(source, index, limit, "{", "}");
+}
+
+/**
+ * End of a `<…>` type-argument list on a JSX element such as
+ * `<Tooltip<Datum> render={…} />`, or -1 within the lookahead.
+ */
+function jsxAngleEnd(source: string, index: number, limit: number): number {
+  return jsxBalancedEnd(source, index, limit, "<", ">");
+}
+
+/**
+ * Whether `<` at `offset` begins something shaped like a JSX opening tag. The
+ * scan is bounded and exists to reject TypeScript type-parameter lists, which
+ * are legal in `.tsx` at exactly the same value positions: `<T,>(value) => …`
+ * stops at the comma and `<T extends Props>(value) => …` stops at `extends`.
+ */
+function looksLikeJsxTag(source: string, offset: number): boolean {
+  const limit = Math.min(source.length, offset + JSX_TAG_LOOKAHEAD_CHARACTERS);
+  let index = offset + 1;
+  const first = source[index];
+  if (first === undefined) return false;
+  if (first === ">") return true; // `<>` fragment
+  if (!JSX_NAME_START.test(first)) return false;
+  while (index < limit && JSX_NAME_CHARACTER.test(source[index] as string)) index += 1;
+  while (index < limit) {
+    const character = source[index] as string;
+    if (/\s/u.test(character)) {
+      index += 1;
+      continue;
+    }
+    if (character === ">") return true;
+    if (character === "/" && source[index + 1] === ">") return true;
+    if (character === "/" && source[index + 1] === "*") {
+      const closed = source.indexOf("*/", index + 2);
+      if (closed < 0 || closed + 2 > limit) return false;
+      index = closed + 2;
+      continue;
+    }
+    if (character === "/" && source[index + 1] === "/") {
+      const newline = source.indexOf("\n", index + 2);
+      if (newline < 0 || newline >= limit) return false;
+      index = newline + 1;
+      continue;
+    }
+    if (character === "=") {
+      index += 1;
+      continue;
+    }
+    if (character === "{") {
+      index = jsxBracedEnd(source, index, limit);
+      if (index < 0) return false;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      index = jsxQuotedEnd(source, index, limit);
+      if (index < 0) return false;
+      continue;
+    }
+    if (character === "<") {
+      index = jsxAngleEnd(source, index, limit);
+      if (index < 0) return false;
+      continue;
+    }
+    if (JSX_NAME_START.test(character)) {
+      const nameStart = index;
+      while (index < limit && JSX_NAME_CHARACTER.test(source[index] as string)) index += 1;
+      if (source.slice(nameStart, index) === "extends") return false;
+      continue;
+    }
+    return false; // `,`, `(`, `:` — a type-parameter list, not a tag
+  }
+  return false; // the tag never closed inside the bounded lookahead
+}
+
+/**
+ * Whether `<` at `offset` opens a JSX element. JSX shares the value-position
+ * requirement of a regex literal, so `a < b`, `useState<string>()`, and
+ * `new Map<string, number>()` all keep `<` as an operator. Two positions accept
+ * an element but never a regex: `export default <App />`, and a statement that
+ * follows a block, as in `}` then `<svg …></svg>;`.
+ */
+function jsxElementAllowed(
+  tokens: readonly Token[],
+  source: string,
+  offset: number,
+): boolean {
+  const previous = tokens[tokens.length - 1];
+  const valuePosition = regexLiteralAllowed(tokens) ||
+    structuralValue(previous) === "}" ||
+    isIdentifier(previous, "default");
+  return valuePosition && looksLikeJsxTag(source, offset);
+}
+
+/**
+ * Lexer state above module code. A JSX element suspends expression lexing until
+ * its closing tag, and each `{…}` container inside one resumes it. `angleDepth`
+ * tracks a type-argument list such as `<Tooltip<Datum> render={…} />`, whose
+ * `>` closes the list rather than the opening tag.
+ */
+type LexerFrame =
+  | {
+    kind: "jsx";
+    mode: "tag" | "children" | "closing";
+    angleDepth: number;
+    line: number;
+    column: number;
+  }
+  | { kind: "jsx-expression"; braceDepth: number; line: number; column: number };
 
 function tokenize(
   source: string,
   language: "javascript" | "python" | "hcl",
+  jsx = false,
 ): TokenizationResult {
   const tokens: Token[] = [];
   let issue: TokenizationIssue | undefined;
@@ -225,6 +478,7 @@ function tokenize(
   let offset = 0;
   let line = 1;
   let column = 1;
+  const frames: LexerFrame[] = [];
   const advance = (character: string): void => {
     offset += character.length;
     if (character === "\n") {
@@ -233,6 +487,40 @@ function tokenize(
     } else {
       column += [...character].length;
     }
+  };
+  const emitPunctuation = (value: string): void => {
+    const tokenStart = offset;
+    const tokenLine = line;
+    const tokenColumn = column;
+    for (const part of value) advance(part);
+    tokens.push({
+      kind: "punctuation",
+      value,
+      raw: value,
+      offset: tokenStart,
+      line: tokenLine,
+      column: tokenColumn,
+      static: true,
+    });
+  };
+  /** Emit a JSX element, attribute, or closing-tag name as one identifier. */
+  const emitJsxName = (): void => {
+    const tokenStart = offset;
+    const tokenLine = line;
+    const tokenColumn = column;
+    while (offset < source.length && JSX_NAME_CHARACTER.test(source[offset] as string)) {
+      advance(source[offset] as string);
+    }
+    const raw = source.slice(tokenStart, offset);
+    tokens.push({
+      kind: "identifier",
+      value: raw,
+      raw,
+      offset: tokenStart,
+      line: tokenLine,
+      column: tokenColumn,
+      static: true,
+    });
   };
   const consumeJavascriptTemplate = (): { closed: boolean; dynamic: boolean } => {
     type TemplateFrame = {
@@ -424,8 +712,119 @@ function tokenize(
     const startColumn = column;
     const character = source[offset] as string;
     const next = source[offset + 1];
+    const frame = frames.at(-1);
+    if (frame?.kind === "jsx" && frame.mode === "children") {
+      if (character === "<" && next === "/") {
+        emitPunctuation("<");
+        emitPunctuation("/");
+        frame.mode = "closing";
+        continue;
+      }
+      if (character === "<" && looksLikeJsxTag(source, offset)) {
+        emitPunctuation("<");
+        frames.push({
+          kind: "jsx",
+          mode: "tag",
+          angleDepth: 0,
+          line: startLine,
+          column: startColumn,
+        });
+        continue;
+      }
+      if (character === "{") {
+        emitPunctuation("{");
+        frames.push({
+          kind: "jsx-expression",
+          braceDepth: 0,
+          line: startLine,
+          column: startColumn,
+        });
+        continue;
+      }
+      // Element children are text. An apostrophe in `<p>It's ready</p>`, the
+      // slash in a URL, and a stray `<` in `<p>3 < 4</p>` must not open a
+      // string, a regex literal, or a nested element here.
+      advance(character);
+      continue;
+    }
+    if (frame?.kind === "jsx" && frame.mode === "closing") {
+      if (character === ">") {
+        emitPunctuation(">");
+        frames.pop();
+        continue;
+      }
+      if (JSX_NAME_START.test(character)) {
+        emitJsxName();
+        continue;
+      }
+      advance(character);
+      continue;
+    }
+    // Attribute values and comments inside an opening tag are lexed by the
+    // shared string and comment branches below; everything else is JSX syntax.
+    if (
+      frame?.kind === "jsx" && frame.mode === "tag" &&
+      character !== "'" && character !== '"' &&
+      !(character === "/" && (next === "/" || next === "*"))
+    ) {
+      if (character === "/" && next === ">") {
+        emitPunctuation("/");
+        emitPunctuation(">");
+        frames.pop();
+        continue;
+      }
+      if (character === "<") {
+        emitPunctuation("<");
+        frame.angleDepth += 1;
+        continue;
+      }
+      if (character === ">") {
+        emitPunctuation(">");
+        if (frame.angleDepth > 0) frame.angleDepth -= 1;
+        else frame.mode = "children";
+        continue;
+      }
+      if (character === "{") {
+        emitPunctuation("{");
+        frames.push({
+          kind: "jsx-expression",
+          braceDepth: 0,
+          line: startLine,
+          column: startColumn,
+        });
+        continue;
+      }
+      if (/\s/u.test(character)) {
+        advance(character);
+        continue;
+      }
+      if (JSX_NAME_START.test(character)) {
+        emitJsxName();
+        continue;
+      }
+      emitPunctuation(character);
+      continue;
+    }
+    if (frame?.kind === "jsx-expression") {
+      if (character === "{") frame.braceDepth += 1;
+      else if (character === "}") {
+        if (frame.braceDepth === 0) {
+          emitPunctuation("}");
+          frames.pop();
+          continue;
+        }
+        frame.braceDepth -= 1;
+      }
+    }
     if (/\s/u.test(character)) {
       advance(character);
+      continue;
+    }
+    // A leading `#!` line is not JavaScript. Without skipping it the `/` in
+    // `#!/usr/bin/env node` opens a regex literal that swallows the newline and
+    // desynchronizes every later string boundary in the file.
+    if (language === "javascript" && start === 0 && character === "#" && next === "!") {
+      while (offset < source.length && source[offset] !== "\n") advance(source[offset] as string);
       continue;
     }
     if (
@@ -523,10 +922,14 @@ function tokenize(
       continue;
     }
     if (character === "'" || character === '"') {
+      // A JSX attribute value is text, not a JavaScript string: it may span
+      // lines, as an SVG `values="0 0 0\n0 0 0"` matrix does, and a backslash
+      // in it is literal rather than an escape.
+      const jsxAttribute = frame?.kind === "jsx" && frame.mode === "tag";
       const triple =
         language === "python" && source.slice(offset, offset + 3) === character.repeat(3);
       const quoteLength = triple ? 3 : 1;
-      const multiline = triple;
+      const multiline = triple || jsxAttribute;
       for (let count = 0; count < quoteLength; count += 1) advance(character);
       let escaped = false;
       let dynamic = false;
@@ -555,7 +958,7 @@ function tokenize(
         }
         advance(current);
         if (escaped) escaped = false;
-        else if (current === "\\") escaped = true;
+        else if (current === "\\" && !jsxAttribute) escaped = true;
       }
       const raw = source.slice(start, offset);
       const decoded = decodeStringContent(raw, quoteLength, closed);
@@ -600,6 +1003,17 @@ function tokenize(
       });
       continue;
     }
+    if (jsx && character === "<" && jsxElementAllowed(tokens, source, offset)) {
+      emitPunctuation("<");
+      frames.push({
+        kind: "jsx",
+        mode: "tag",
+        angleDepth: 0,
+        line: startLine,
+        column: startColumn,
+      });
+      continue;
+    }
     const pair = source.slice(offset, offset + 2);
     const punctuation = [
       "??",
@@ -635,6 +1049,14 @@ function tokenize(
       line: startLine,
       column: startColumn,
       static: true,
+    });
+  }
+  const unterminatedFrame = frames.at(-1);
+  if (unterminatedFrame !== undefined) {
+    reportIssue({
+      kind: "mismatched-delimiter",
+      line: unterminatedFrame.line,
+      column: unterminatedFrame.column,
     });
   }
   if (issue === undefined) {
@@ -2571,6 +2993,7 @@ function detectSdkCalls(
   blobOid: string,
   language: "javascript" | "python",
   scope: EvidenceScope,
+  jsx = false,
 ): {
   facts: EvidenceFact[];
   consumedEnvironmentSelectors: ConsumedEnvironmentSelector[];
@@ -2578,7 +3001,7 @@ function detectSdkCalls(
   unsupportedFrameworkIds: string[];
   tokenizationIssue?: TokenizationIssue;
 } {
-  const tokenization = tokenize(source, language);
+  const tokenization = tokenize(source, language, jsx);
   if (tokenization.issue !== undefined) {
     // The import parse cannot be trusted after a tokenization failure, and that
     // file already reports incomplete semantic coverage on its own.
@@ -3439,6 +3862,12 @@ const MAX_DIAGNOSTIC_SAMPLE_PATHS = 5;
  * One notice per framework rather than one per file: this reports a property of
  * the repository's integration choice, not a defect in each file. Notices keep
  * declared coverage `complete`, so enforcement still cannot fail closed on it.
+ *
+ * The code carries the framework id because `aggregateDiagnostics` groups by
+ * code and severity. A shared code would collapse every framework into one
+ * entry, hiding all but the first behind a file count that is really a framework
+ * count. The registry bounds this at one code per known framework, so it cannot
+ * become the unbounded list that aggregation exists to prevent.
  */
 function unsupportedFrameworkDiagnostics(
   byFramework: ReadonlyMap<string, ReadonlySet<string>>,
@@ -3456,7 +3885,7 @@ function unsupportedFrameworkDiagnostics(
         "provider member outside the published set)"
       : "and this detector manifest publishes no semantic rule for it";
     diagnostics.push({
-      code: "unsupported-integration-import@1",
+      code: `unsupported-integration-import.${framework.frameworkId}@1`,
       message:
         `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` +
         `${cause}. Model selections made that way were assessed by bounded lexical fallback only, so they ` +
@@ -3467,6 +3896,47 @@ function unsupportedFrameworkDiagnostics(
     });
   }
   return diagnostics;
+}
+
+/** Paths listed inside an aggregated diagnostic message. */
+const AGGREGATED_DIAGNOSTIC_PATH_SAMPLE = 10;
+
+/**
+ * Collapse repeated diagnostic codes into one entry per code and severity. A
+ * large repository can report the same detector code for hundreds of files, and
+ * an unbounded list of near-identical entries buries every other diagnostic.
+ * The count and a bounded path sample stay in the message so the published
+ * report contract is unchanged; the first entry is kept verbatim as the
+ * representative detail. Insertion order is preserved so the report stays
+ * byte-stable for its fingerprint.
+ */
+function aggregateDiagnostics(
+  diagnostics: readonly CoverageDiagnostic[],
+): CoverageDiagnostic[] {
+  const groups = new Map<string, CoverageDiagnostic[]>();
+  for (const diagnostic of diagnostics) {
+    const key = JSON.stringify([diagnostic.code, diagnostic.severity]);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [diagnostic]);
+    else group.push(diagnostic);
+  }
+  return [...groups.values()].map((group) => {
+    const first = group[0] as CoverageDiagnostic;
+    if (group.length === 1) return first;
+    const paths = group
+      .map((diagnostic) => diagnostic.path)
+      .filter((path): path is string => path !== undefined);
+    const sample = paths.slice(0, AGGREGATED_DIAGNOSTIC_PATH_SAMPLE);
+    return {
+      code: first.code,
+      message: `${group.length} files reported this diagnostic; the first is representative: ${first.message}${
+        sample.length === 0
+          ? ""
+          : ` Sampled paths (${sample.length} of ${paths.length}): ${sample.join(", ")}.`
+      }`,
+      severity: first.severity,
+    };
+  });
 }
 
 function isClaimDocument(path: string): boolean {
@@ -3523,6 +3993,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
         entry.objectId,
         "javascript",
         scope,
+        JSX_EXTENSIONS.has(extension),
       );
       semantic = detected.facts;
       literalSpans = detected.literalSpans;
@@ -3629,7 +4100,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
   evidence.sort((left, right) => compareText(left.evidenceId, right.evidenceId));
   return {
     evidence,
-    diagnostics,
+    diagnostics: aggregateDiagnostics(diagnostics),
     scanStatus: partial ? "partial" : "complete",
   };
 }

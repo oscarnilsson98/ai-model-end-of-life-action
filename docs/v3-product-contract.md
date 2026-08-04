@@ -109,7 +109,8 @@ For an assessment with a trustworthy policy outcome, result precedence is:
 - a configured evidence source, assertion, or resolution is review-overdue, stale, or expired;
 - a configured evidence source explicitly declares partial coverage;
 - target evidence was assessed but required trusted PR base data or comparison history was unavailable;
-- a configured resolution source could not be applied safely.
+- a configured resolution source could not be applied safely;
+- the upstream lifecycle feed's `generatedAt` is older than the effective `max-feed-age-days` horizon.
 
 An unsupported file format is diagnostic only unless the file was classified as likely model-bearing input for a published detector. An intentionally dynamic selector is an unresolved evidence fact; it does not by itself make the scanner operationally partial.
 
@@ -138,6 +139,8 @@ Enforcement is enabled when the effective trusted policy sets `fail-within-days`
 Lexical-only, model-dynamic, platform-ambiguous, documentation, example, and test evidence MUST NOT produce `blocking` in v3.0. Platform-ambiguous evidence never blocks in v3.0, even if every currently known feed record is within the failure window, because feed platforms do not prove a closed set of possible serving platforms.
 
 Lexical evidence scoped to application/deployment source may produce a clearly labelled `advisory` when its exact typed model ID is inside the warning horizon, but it is never policy eligible. Lexical evidence in unknown, documentation, example, fixture, test, or generated scope produces `notice` only. High/medium-confidence semantic application or deployment evidence with a dynamic model, ambiguous platform, or lifecycle-feed conflict may also produce `advisory`. Repetition changes counts and locations, never outcome severity.
+
+One occurrence whose serving platform the evidence did not establish MUST produce one finding, however many feed providers publish that model ID. Such matches are collapsed into a single finding that carries every candidate platform in `servingPlatforms`, the most severe of their lifecycle outcomes, and the dates of the most urgent candidate record — nearest measured lifecycle date first, undated last, by the same [date precedence](#lifecycle-date-precedence) the warning horizon uses. `servingPlatform` remains the platform of that reported record, and the union of candidate source URLs and replacement models stays in the finding. Human-facing text names every candidate platform, so a collapsed finding never reads as an established platform. Alert volume therefore follows repository evidence, not feed breadth. Platform-resolved semantic evidence is unaffected and keeps one finding per exact pair and active lifecycle signature.
 
 Every run also emits one `exit-reason`: `none | assessment-failed | trusted-base-unavailable | policy-breach | partial-disallowed | notification-failed`. When several conditions apply, precedence is `assessment-failed` > `trusted-base-unavailable` > `policy-breach` > `partial-disallowed` > `notification-failed` > `none`. Required outputs and the job summary are written before optional notification delivery and before the final process exit.
 
@@ -210,11 +213,25 @@ A finding is eligible for `blocking` only when all of the following hold:
 
 The v3.0 provider-alias registry is empty, so v3.0 blocking lifecycle joins are exact in practice.
 
-Advisory eligibility is intentionally broader: within the warning horizon, resolved or conditional semantic evidence in application/deployment scope is advisory even when environment is unknown; current repository-supplied claims are advisory unless they meet every blocking condition; and application/deployment lexical evidence may be advisory as defined above. Protected/unknown-scope lexical evidence and findings outside the warning horizon are notices only. Undated deprecations with joined evidence are advisory.
+Advisory eligibility is intentionally broader: within the warning horizon, resolved or conditional semantic evidence in application/deployment scope is advisory even when environment is unknown; current repository-supplied claims are advisory unless they meet every blocking condition; and application/deployment lexical evidence may be advisory as defined above. Protected/unknown-scope lexical evidence and findings outside the warning horizon are notices only. Undated deprecations with joined evidence are advisory, as are models already inside their published deprecation date — see [Lifecycle date precedence](#lifecycle-date-precedence).
 
 The default warning horizon is 180 UTC calendar days. Findings beyond the warning horizon remain in the bounded report but do not produce annotations unless policy says otherwise.
 
-The action captures one `evaluatedAt` UTC instant before evaluation and derives one UTC calendar date from it. Feed lifecycle dates are ISO `YYYY-MM-DD` dates. `daysUntilShutdown` is the signed calendar-day difference `shutdownDate - evaluatedDate`: shutdown today is `0`, a past shutdown is negative, and a shutdown exactly at the configured horizon is included. Base, target, summary, notification, and fingerprints use the same instant.
+### Lifecycle date precedence
+
+A feed record may publish an `announcementDate`, a `deprecationDate`, and a `shutdownDate`, and the feed contract requires them to be non-decreasing in that order. They are not interchangeable, and each has exactly one job:
+
+| Date | Meaning | Effect on outcome |
+| --- | --- | --- |
+| `announcementDate` | When the deprecation was made public | None. It is reported for provenance only. It is in the past for essentially every record, so measuring a horizon against it would make every joined finding actionable and the horizon meaningless. |
+| `deprecationDate` | When the provider stops supporting the model | **Opens the warning horizon.** Some providers stop serving here rather than at the shutdown date. |
+| `shutdownDate` | When the provider stops serving the model | Opens the warning horizon, and is the only date that opens the **failure** horizon. |
+
+The warning horizon therefore measures the **earliest published transition**: `min(deprecationDate, shutdownDate)`, which given the required ordering is `deprecationDate` whenever one is published. A model whose deprecation date has passed or is near is advisory even when its shutdown is hundreds of days out. A record with no published `shutdownDate` has no measurable end and stays inside the warning horizon at any distance, which is why undated deprecations with joined evidence are advisory.
+
+`failWithinDays` deliberately keeps measuring `shutdownDate` alone. Failing a job is the irreversible direction, and enforcement is contracted against the date the model actually stops being served. A deprecation inside the failure horizon warns; it does not block.
+
+The action captures one `evaluatedAt` UTC instant before evaluation and derives one UTC calendar date from it. Feed lifecycle dates are ISO `YYYY-MM-DD` dates. `daysUntilShutdown` is the signed calendar-day difference `shutdownDate - evaluatedDate`: shutdown today is `0`, a past shutdown is negative, and a shutdown exactly at the configured horizon is included. `daysUntilDeprecation` is the same signed difference against `deprecationDate` and is present in a finding exactly when `deprecationDate` is. Base, target, summary, notification, and fingerprints use the same instant.
 
 “Trusted” means authoritative for this action invocation: valid evidence or policy read from the base Git tree on a pull request/merge group, or from the evaluated target tree on a non-PR run. A target-only PR addition may contribute evidence because that can only strengthen its own result, but it never gains authority to suppress or weaken base policy. Trust does not mean that the repository-supplied claim was independently verified.
 
@@ -371,10 +388,13 @@ V3.0 has no `models`, `models-file`, `usage-evidence`, repository-path, or langu
 | `warn-within-days` | `180` | Trusted | May only increase the warning horizon |
 | `fail-within-days` | Unset | Trusted | May enable enforcement or increase the failure horizon; cannot weaken base policy |
 | `allow-partial` | `false` | Trusted | `true` is ignored unless already allowed by base policy |
+| `max-feed-age-days` | `30` | Trusted | Not target-controlled: it measures the shared feed snapshot, not the target tree |
 | `slack-webhook` | Unset | Used only for commit targets when the event name is exactly `schedule`, `workflow_dispatch`, or `push` | Delivery is always skipped on PR/merge-group events |
 | `notification-failure-mode` | `fail` | Trusted | Ignored when delivery is skipped |
 
-Day inputs are bounded non-negative integers. A larger horizon is stricter. `I` in the PR equations contains only explicitly supplied, nonempty action inputs. Effective defaults live in `P0`; `action.yml` MUST NOT materialize policy defaults into otherwise omitted inputs. Therefore an omitted `warn-within-days` or `allow-partial` never overrides trusted file configuration. Configuration-file fields use camelCase (`warnWithinDays`, `failWithinDays`, `allowPartial`); action inputs use the kebab-case names above. There is no custom feed URL in v3.0: all runs use the release's reviewed default feed contract so a PR cannot redirect lifecycle authority.
+Day inputs are bounded non-negative integers. A larger horizon is stricter. `I` in the PR equations contains only explicitly supplied, nonempty action inputs. Effective defaults live in `P0`; `action.yml` MUST NOT materialize policy defaults into otherwise omitted inputs. Therefore an omitted `warn-within-days` or `allow-partial` never overrides trusted file configuration.
+
+`max-feed-age-days` is deliberately not one of those zero-input policy overrides, and is not a checked-in policy field. It is a run-level guard over the single feed snapshot that both comparison sides share, so it can never hide a target-specific regression, and `action.yml` MUST materialize its default so that an omitted input leaves the guard armed. Only an explicitly emptied input disables it. Configuration-file fields use camelCase (`warnWithinDays`, `failWithinDays`, `allowPartial`); action inputs use the kebab-case names above. There is no custom feed URL in v3.0: all runs use the release's reviewed default feed contract so a PR cannot redirect lifecycle authority.
 
 ## Optional checked-in policy and evidence
 
@@ -391,6 +411,10 @@ policy:
   warnWithinDays: 180
   failWithinDays: 30
   allowPartial: false
+
+servingPlatforms:
+  - openai
+  - google
 
 assertions:
   - evidenceId: remote-prod-chat
@@ -439,6 +463,8 @@ suppressions:
     createdAt: 2026-08-02T08:00:00Z
     expiresAt: 2026-11-01T08:00:00Z
 ```
+
+`servingPlatforms` declares the canonical serving platforms this repository actually uses. It restricts lifecycle matching for evidence whose platform the evidence itself did not establish — every lexical match and every `platformResolution: ambiguous` fact — so records published only for undeclared platforms are excluded from matching rather than merely merged into one finding. It never filters platform-resolved semantic evidence, external evidence, or assertions, so a declaration can never hide a finding that could have blocked. An effective declaration is reported as an evidence source and as a `declared-serving-platforms` notice, and each restricted finding records the restriction in its reasons. Omitting the field means undeclared, which matches every platform; on pull requests and merge groups an undeclared base keeps the target undeclared, and two declarations combine as their union, so head configuration can never narrow what the base matched. A head declaration that would narrow base matching is reported as an ignored weakening, exactly like a head suppression.
 
 Assertions add repository-supplied claims about runtime-only facts. They MUST NOT be described as verified, observed, confirmed, or authoritative unless a separately validated external source provides that provenance. Assertions cannot assert absence.
 
@@ -557,6 +583,14 @@ Invalid trusted base/default-branch evidence fails the assessment. Invalid targe
 The single normative feed schema, launch platform registry, source-provider mapping, duplicate/conflict behavior, and alias ownership rules are defined in [v3-detector-contract.md](v3-detector-contract.md). Only records explicitly typed `model` enter model detection or lifecycle joins. V3 MUST NOT use a token-shaped regular expression to distinguish models from features, APIs, prompts, tools, or products.
 
 An untyped default feed is a v3 release blocker unless a reviewed, versioned adapter carries an exact registry of reviewed source pairs and classifications. The adapter MUST verify the registry's pinned count and digest and MUST strictly parse every raw row before deciding whether the pair is reviewed. Received pairs outside the registry MUST NOT enter normalized feed records or lifecycle authority; their counts and a bounded preview MUST remain visible in diagnostics. Reviewed pairs absent from the source MUST likewise be reported. An addition, removal, or rename makes `scan-status: partial`: warning-only evaluation succeeds, while enforcement fails closed unless `allowPartial: true` explicitly permits partial coverage. A later action release is required before an added pair can gain model or non-model authority.
+
+### Upstream freshness
+
+A frozen upstream is indistinguishable from a healthy one at the row level: every document stays well formed, every lookup still resolves, and the run reports a permanent all-clear while newly announced shutdowns never arrive. The feed's own age is therefore normative coverage information, not a nicety.
+
+Every run MUST measure the feed envelope's `generatedAt` against the effective `max-feed-age-days` horizon. Beyond the horizon the run MUST emit a bounded `feed-stale` diagnostic and MUST make `scan-status: partial`, which carries the standard consequences: warning-only evaluation succeeds with a visible signal, enforcement fails closed unless `allowPartial: true`. Feed age MUST NOT by itself change `result`, since staleness is a coverage property rather than a lifecycle finding, and MUST NOT degrade `comparison-status`, since both comparison sides share one feed snapshot.
+
+`generatedAt` is the only freshness signal both feed paths carry: a typed producer states it directly, and the reviewed adapter derives it from the newest reviewed `scraped_at`. The stale diagnostic MUST state the production instant and the configured horizon rather than the elapsed day count, so that a persistent outage yields a stable `scan-fingerprint` instead of churning daily. The measured age and instant MUST be published as `feed-age-days` and `feed-generated-at`, and MUST be empty when the feed never loaded — a feed that fails to load is already `unknown + failed` and needs no separate freshness claim.
 
 Duplicate source pairs, malformed rows, unknown fields or providers, invalid adapter metadata, and typed-feed schema failures produce `unknown + failed`. A source from which quarantine leaves no reviewed records also fails the non-empty feed contract. A syntactically valid but detector-unsupported platform in an already typed feed remains visible as unsupported, nonblocking evidence; it does not invalidate an otherwise valid feed.
 

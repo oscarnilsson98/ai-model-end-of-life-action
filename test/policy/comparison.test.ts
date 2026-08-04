@@ -166,6 +166,7 @@ const noInputs = {
   warnWithinDays: null,
   failWithinDays: null,
   allowPartial: null,
+  maxFeedAgeDays: null,
   notificationFailureMode: "fail" as const,
 };
 
@@ -213,6 +214,35 @@ describe("monotonic PR evaluation", () => {
     });
     expect(result.result).toBe("blocking");
     expect(result.policyDiff.join(" ")).toMatch(/weakening/i);
+  });
+
+  test("ignores a head attempt to narrow the declared serving platforms", () => {
+    const declared = (...platforms: string[]) =>
+      `schemaVersion: 1\nservingPlatforms:\n${platforms.map((entry) => `  - ${entry}\n`).join("")}`;
+    const added = evaluateComparison({
+      baseDetection: detection([]),
+      targetDetection: detection([]),
+      baseClaims: claims(`schemaVersion: 1\n`),
+      targetClaims: claims(declared("openai")),
+      feed,
+      inputs: noInputs,
+      now: NOW,
+    });
+    expect(added.policy.servingPlatforms).toEqual([]);
+    expect(added.result).toBe("advisory");
+    expect(added.policyDiff.join(" ")).toMatch(/weakening/i);
+
+    const broadened = evaluateComparison({
+      baseDetection: detection([]),
+      targetDetection: detection([]),
+      baseClaims: claims(declared("openai")),
+      targetClaims: claims(declared("azure", "openai")),
+      feed,
+      inputs: noInputs,
+      now: NOW,
+    });
+    expect(broadened.policy.servingPlatforms).toEqual(["azure", "openai"]);
+    expect(broadened.policyDiff.join(" ")).not.toMatch(/weakening/i);
   });
 
   test("reports a same-count target suppression replacement as a weakening attempt", () => {

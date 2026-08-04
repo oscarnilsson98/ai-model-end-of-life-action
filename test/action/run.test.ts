@@ -56,6 +56,67 @@ const FEED: LoadedV3Feed = loadV3FeedJson(
   }),
 );
 
+const SHARED_MODEL_FEED: LoadedV3Feed = loadV3FeedJson(
+  JSON.stringify({
+    schemaVersion: 3,
+    adapter: { id: "fixture", version: "1", sourceSha256: "e".repeat(64) },
+    generatedAt: "2026-08-02T00:00:00Z",
+    records: [
+      {
+        recordId: "azure-shared-mini",
+        servingPlatform: "azure",
+        primarySourceUrl: "https://example.com/azure/shared-mini",
+        supersedesRecordIds: [],
+        recordKind: "model",
+        modelId: "shared-mini",
+        literalScanEligible: true,
+        lifecycleStatus: "shutdown-scheduled",
+        shutdownDate: "2026-10-16",
+        replacementModels: [],
+      },
+      {
+        recordId: "openai-shared-mini",
+        servingPlatform: "openai",
+        primarySourceUrl: "https://example.com/openai/shared-mini",
+        supersedesRecordIds: [],
+        recordKind: "model",
+        modelId: "shared-mini",
+        literalScanEligible: true,
+        lifecycleStatus: "shutdown-scheduled",
+        shutdownDate: "2026-10-23",
+        replacementModels: [],
+      },
+    ],
+  }),
+);
+/** Same feed contents, produced at an arbitrary earlier instant. */
+function feedGeneratedAt(generatedAt: string): LoadedV3Feed {
+  return loadV3FeedJson(
+    JSON.stringify({
+      schemaVersion: 3,
+      adapter: { id: "fixture", version: "1", sourceSha256: "d".repeat(64) },
+      generatedAt,
+      records: [
+        {
+          recordId: "openai-gpt-old",
+          servingPlatform: "openai",
+          primarySourceUrl: "https://example.com/openai/gpt-old",
+          supersedesRecordIds: [],
+          recordKind: "model",
+          modelId: "gpt-old",
+          literalScanEligible: true,
+          lifecycleStatus: "shutdown-scheduled",
+          shutdownDate: "2026-08-20",
+          replacementModels: [],
+        },
+      ],
+    }),
+  );
+}
+
+/** Frozen 62 days before NOW: well past the 30-day default horizon. */
+const STALE_FEED: LoadedV3Feed = feedGeneratedAt("2026-06-01T00:00:00Z");
+
 const PARTIAL_FEED: LoadedV3Feed = {
   ...FEED,
   index: {
@@ -188,7 +249,7 @@ export default function Page() {
 }
 `;
 
-/** A snapshot whose only source blob is JSX that no published tokenizer accepts. */
+/** A snapshot whose only source blob is a JSX component. */
 function jsxSnapshot(treeObjectId: string): GitTreeSnapshot {
   const entries = [entry("app/page.tsx", JSX_SOURCE, 2)];
   const assessedBytes = entries.reduce(
@@ -231,6 +292,27 @@ function evidence(evidenceId = "repository:model:gpt-old"): EvidenceFact {
     platformResolution: "resolved",
     policyEligible: true,
     locations: [{ path: "src/chat.ts", line: 1, column: 1 }],
+    resolutionTrace: [],
+  };
+}
+
+function lexicalEvidence(): EvidenceFact {
+  return {
+    evidenceId: "repository:lexical:shared-mini",
+    origin: "repository",
+    kind: "lexical",
+    confidence: "low",
+    scope: "application",
+    environment: "unknown",
+    detectorRuleId: "fallback.text.lifecycle-id@1",
+    detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
+    rawValue: "shared-mini",
+    modelId: "shared-mini",
+    modelResolution: "resolved",
+    selectorKind: "model-id",
+    platformResolution: "ambiguous",
+    policyEligible: false,
+    locations: [{ path: "packages/ai-client/src/models.ts", line: 23, column: 10 }],
     resolutionTrace: [],
   };
 }
@@ -398,6 +480,45 @@ describe("v3 production orchestration", () => {
     expect(readFileSync(fixture.summaryPath, "utf8")).toContain("**blocking**");
   });
 
+  test("annotates one model ID once and reports the declared serving platforms", async () => {
+    const fixture = fixtureEnvironment();
+    const annotations: string[] = [];
+    const report = await run(
+      dependencies(fixture, {
+        loadFeed: async () => SHARED_MODEL_FEED,
+        detect: () => detection([lexicalEvidence()]),
+        log: (line: string) => annotations.push(line),
+      }),
+    );
+
+    expect(report.lifecycleFindings).toHaveLength(1);
+    expect(report.lifecycleFindings[0]?.servingPlatforms).toEqual(["azure", "openai"]);
+    expect(report.lifecycleFindings[0]?.shutdownDate).toBe("2026-10-16");
+    expect(annotations.filter((line) => line.startsWith("::warning"))).toHaveLength(1);
+
+    const declaredFixture = fixtureEnvironment();
+    const declared = await run(
+      dependencies(declaredFixture, {
+        loadFeed: async () => SHARED_MODEL_FEED,
+        detect: () => detection([lexicalEvidence()]),
+        readSnapshot: (_repositoryPath, treeish) =>
+          snapshot(treeish, { policy: "schemaVersion: 1\nservingPlatforms:\n  - openai\n" }),
+      }),
+    );
+
+    expect(declared.evidenceSources).toContainEqual({
+      id: "declared-serving-platforms: openai",
+      kind: "repository",
+      health: "current",
+    });
+    expect(declared.lifecycleFindings).toHaveLength(1);
+    expect(declared.lifecycleFindings[0]?.servingPlatforms).toEqual(["openai"]);
+    expect(declared.lifecycleFindings[0]?.shutdownDate).toBe("2026-10-23");
+    expect(readFileSync(declaredFixture.summaryPath, "utf8")).toContain(
+      "declared-serving-platforms",
+    );
+  });
+
   test("does not fail an unrelated PR for unchanged base debt", async () => {
     const fixture = fixtureEnvironment({ GITHUB_EVENT_NAME: "pull_request" });
     const report = await run(
@@ -548,17 +669,15 @@ describe("v3 production orchestration", () => {
       }),
     );
 
-    // The tokenizer cannot accept JSX, so the semantic pass is discarded on every
-    // run. The lexical fallback still assessed the blob, so coverage stays complete
-    // and enforcement remains usable without buying `allow-partial: true`.
+    // The tokenizer lexes JSX, so the semantic pass survives and no fidelity
+    // diagnostic is raised at all. Enforcement remains usable without buying
+    // `allow-partial: true`.
     expect(report).toMatchObject({
       scanStatus: "complete",
       exitReason: "none",
     });
-    expect(report.diagnostics).toContainEqual(expect.objectContaining({
+    expect(report.diagnostics).not.toContainEqual(expect.objectContaining({
       code: "semantic-tokenization-incomplete@1",
-      path: "app/page.tsx",
-      severity: "notice",
     }));
     expect(
       report.evidenceFacts.some((fact) => fact.kind === "lexical" && fact.modelId === "gpt-old"),
@@ -611,6 +730,175 @@ describe("v3 production orchestration", () => {
         "No unreviewed row was normalized into lifecycle authority",
       );
     }
+  });
+
+  test("degrades coverage when the upstream feed stopped updating", async () => {
+    const fixture = fixtureEnvironment();
+    const report = await run(dependencies(fixture, { loadFeed: async () => STALE_FEED }));
+    expect(report).toMatchObject({
+      // Warning-only runs stay green, but the all-clear is no longer presented as complete.
+      result: "no-actionable-risk",
+      scanStatus: "partial",
+      exitReason: "none",
+    });
+    expect(report.diagnostics).toEqual([
+      expect.objectContaining({ code: "feed-stale", severity: "partial" }),
+    ]);
+    expect(report.diagnostics[0]?.message).toContain("2026-06-01T00:00:00Z");
+    expect(report.diagnostics[0]?.message).toContain("30 day(s)");
+    expect(report.feed).toMatchObject({ generatedAt: "2026-06-01T00:00:00Z", ageDays: 62 });
+    expect(readFileSync(fixture.summaryPath, "utf8")).toContain(
+      "A feed that stopped updating reports a permanent all-clear",
+    );
+  });
+
+  test("fails an enforced run closed on a stale feed unless partial is allowed", async () => {
+    const enforced = fixtureEnvironment({ "INPUT_FAIL-WITHIN-DAYS": "30" });
+    const failed = await rejectedReport(
+      run(dependencies(enforced, { loadFeed: async () => STALE_FEED })),
+    );
+    expect(failed).toMatchObject({
+      scanStatus: "partial",
+      exitReason: "partial-disallowed",
+    });
+
+    const permitted = fixtureEnvironment({
+      "INPUT_FAIL-WITHIN-DAYS": "30",
+      "INPUT_ALLOW-PARTIAL": "true",
+    });
+    const tolerated = await run(
+      dependencies(permitted, { loadFeed: async () => STALE_FEED }),
+    );
+    expect(tolerated).toMatchObject({ scanStatus: "partial", exitReason: "none" });
+  });
+
+  test("honours a configured feed-age horizon in both directions", async () => {
+    const cases = [
+      { horizon: "90", scanStatus: "complete", stale: false },
+      { horizon: "61", scanStatus: "partial", stale: true },
+      { horizon: "62", scanStatus: "complete", stale: false },
+      // An emptied input disables the guard outright, matching the v1 escape hatch.
+      { horizon: "", scanStatus: "complete", stale: false },
+      { horizon: "0", scanStatus: "partial", stale: true },
+    ] as const;
+
+    for (const testCase of cases) {
+      const fixture = fixtureEnvironment({ "INPUT_MAX-FEED-AGE-DAYS": testCase.horizon });
+      const report = await run(dependencies(fixture, { loadFeed: async () => STALE_FEED }));
+      expect(report.scanStatus).toBe(testCase.scanStatus);
+      expect(
+        report.diagnostics.some((diagnostic) => diagnostic.code === "feed-stale"),
+      ).toBe(testCase.stale);
+    }
+  });
+
+  test("never lets a stale feed weaken a comparison", async () => {
+    // Staleness measures the one feed snapshot both sides share, so it must degrade the
+    // run's declared coverage without touching per-side extraction. Routing it through
+    // detection instead would make the comparison partial, reclassify this genuinely new
+    // breach as `comparison-unknown`, and downgrade it to a warning: a stale upstream
+    // would then turn an enforced failure into a green advisory.
+    const policy = "schemaVersion: 1\npolicy:\n  failWithinDays: 30\n  allowPartial: true\n";
+    const comparison = (feed: LoadedV3Feed): RunDependencies => ({
+      resolveEvent: () => comparisonEvent("available"),
+      loadFeed: async () => feed,
+      readSnapshot: (_repositoryPath, treeish) => snapshot(treeish, { policy }),
+      detect: (inspected) =>
+        detection(inspected.treeObjectId === BASE ? [] : [evidence()]),
+    });
+
+    const fresh = await rejectedReport(
+      run(
+        dependencies(
+          fixtureEnvironment({ GITHUB_EVENT_NAME: "pull_request" }),
+          comparison(FEED),
+        ),
+      ),
+    );
+    const stale = await rejectedReport(
+      run(
+        dependencies(
+          fixtureEnvironment({ GITHUB_EVENT_NAME: "pull_request" }),
+          comparison(STALE_FEED),
+        ),
+      ),
+    );
+
+    for (const report of [fresh, stale]) {
+      expect(report).toMatchObject({
+        result: "blocking",
+        comparisonStatus: "available",
+        baselineScanStatus: "complete",
+        targetScanStatus: "complete",
+        exitReason: "policy-breach",
+      });
+      expect(report.lifecycleFindings[0]).toMatchObject({
+        delta: "new",
+        outcome: "breach",
+      });
+    }
+    expect(fresh.scanStatus).toBe("complete");
+    expect(stale.scanStatus).toBe("partial");
+    expect(stale.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "feed-stale", severity: "partial" }),
+    );
+  });
+
+  test("fails an enforced comparison closed on a stale feed", async () => {
+    const fixture = fixtureEnvironment({
+      GITHUB_EVENT_NAME: "pull_request",
+      "INPUT_FAIL-WITHIN-DAYS": "30",
+    });
+    const report = await rejectedReport(
+      run(
+        dependencies(fixture, {
+          resolveEvent: () => comparisonEvent("available"),
+          loadFeed: async () => STALE_FEED,
+        }),
+      ),
+    );
+    expect(report).toMatchObject({
+      result: "no-actionable-risk",
+      scanStatus: "partial",
+      comparisonStatus: "available",
+      exitReason: "partial-disallowed",
+    });
+  });
+
+  test("publishes feed freshness as an output consumers can alert on", async () => {
+    const fresh = fixtureEnvironment();
+    await run(dependencies(fresh));
+    expect(outputs(fresh.outputPath)).toMatchObject({
+      "feed-generated-at": "2026-08-02T00:00:00Z",
+      "feed-age-days": "0",
+      "scan-status": "complete",
+    });
+
+    const stale = fixtureEnvironment();
+    await run(dependencies(stale, { loadFeed: async () => STALE_FEED }));
+    expect(outputs(stale.outputPath)).toMatchObject({
+      "feed-generated-at": "2026-06-01T00:00:00Z",
+      "feed-age-days": "62",
+      "scan-status": "partial",
+    });
+  });
+
+  test("leaves feed freshness outputs empty when the feed never loaded", async () => {
+    const fixture = fixtureEnvironment();
+    await rejectedReport(
+      run(
+        dependencies(fixture, {
+          loadFeed: async () => {
+            throw new Error("fixture feed unavailable");
+          },
+        }),
+      ),
+    );
+    expect(outputs(fixture.outputPath)).toMatchObject({
+      "feed-generated-at": "",
+      "feed-age-days": "",
+      "scan-status": "failed",
+    });
   });
 
   test("publishes unknown plus failed when the feed cannot be loaded", async () => {

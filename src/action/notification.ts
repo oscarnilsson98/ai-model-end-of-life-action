@@ -4,6 +4,8 @@ import {
   type FetchLike,
 } from "../shared/http.ts";
 import { parseHttpsUrl } from "./input.ts";
+import { deprecationLeadsHorizon, earliestLifecycleDays } from "../shared/status.ts";
+import { servingPlatformLabel } from "../shared/text.ts";
 import type {
   AssessmentReport,
   LifecycleFinding,
@@ -119,8 +121,8 @@ function partitionFindings(report: AssessmentReport): {
       // Verified evidence outranks a bare text match so the bounded view never buries it.
       const tierDifference = Number(isTextMatch(left)) - Number(isTextMatch(right));
       if (tierDifference !== 0) return tierDifference;
-      const leftDays = left.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
-      const rightDays = right.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
+      const leftDays = earliestLifecycleDays(left) ?? Number.POSITIVE_INFINITY;
+      const rightDays = earliestLifecycleDays(right) ?? Number.POSITIVE_INFINITY;
       if (leftDays !== rightDays) return leftDays - rightDays;
       const platformDifference = compareText(left.servingPlatform, right.servingPlatform);
       return platformDifference !== 0
@@ -133,13 +135,18 @@ function partitionFindings(report: AssessmentReport): {
   };
 }
 
+function dateText(label: string, date: string, days: number | null | undefined): string {
+  if (days === null || days === undefined || !Number.isSafeInteger(days)) {
+    return `${label} ${date}`;
+  }
+  if (days < 0) return `${label} ${date} (${Math.abs(days)}d overdue)`;
+  if (days === 0) return `${label} ${date} (today)`;
+  return `${label} ${date} (${days}d)`;
+}
+
 function deadlineText(finding: LifecycleFinding): string {
   if (finding.shutdownDate === undefined) return "shutdown date not announced";
-  const days = finding.daysUntilShutdown;
-  if (days === null || !Number.isSafeInteger(days)) return `shutdown ${finding.shutdownDate}`;
-  if (days < 0) return `shutdown ${finding.shutdownDate} (${Math.abs(days)}d overdue)`;
-  if (days === 0) return `shutdown ${finding.shutdownDate} (today)`;
-  return `shutdown ${finding.shutdownDate} (${days}d)`;
+  return dateText("shutdown", finding.shutdownDate, finding.daysUntilShutdown);
 }
 
 /** Report-owned URLs become links only when they cannot alter the surrounding mrkdwn. */
@@ -178,7 +185,15 @@ function findingLabel(finding: NotifiableFinding): string {
 }
 
 function findingLine(finding: NotifiableFinding): string {
-  const qualifiers: string[] = [deadlineText(finding)];
+  const qualifiers: string[] = [];
+  // Name the deprecation whenever it is the nearer date, so an advisory driven by a
+  // deprecation is not read as a false alarm against a distant shutdown.
+  if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
+    qualifiers.push(
+      dateText("deprecation", finding.deprecationDate, finding.daysUntilDeprecation),
+    );
+  }
+  qualifiers.push(deadlineText(finding));
   if (finding.delta !== undefined && finding.delta !== "unchanged") {
     qualifiers.push(finding.delta);
   }
@@ -186,8 +201,8 @@ function findingLine(finding: NotifiableFinding): string {
   const replacement = replacementText(finding);
   if (replacement !== null) qualifiers.push(replacement);
   const line = `• *${findingLabel(finding)}* ${slackText(
-    finding.servingPlatform,
-    80,
+    servingPlatformLabel(finding),
+    160,
   )} / ${slackText(finding.modelId, 180)} — ${qualifiers
     .map((value) => slackText(value, 100))
     .join(" · ")}`;

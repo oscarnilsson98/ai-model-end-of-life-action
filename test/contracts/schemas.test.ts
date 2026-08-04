@@ -83,6 +83,10 @@ describe("published v3 JSON Schemas", () => {
       "reviewAfter",
       "expiresAt",
     ]);
+    const servingPlatforms = (document.properties as JsonSchema).servingPlatforms as JsonSchema;
+    expect(servingPlatforms.items).toEqual({ $ref: "#/$defs/canonicalPlatform" });
+    expect(servingPlatforms.minItems).toBe(1);
+    expect(servingPlatforms.uniqueItems).toBe(true);
     expect(required(definition(document, "suppression"))).toContain("target");
     const suppressionTarget = (definition(document, "suppression").properties as JsonSchema)
       .target as JsonSchema;
@@ -155,5 +159,30 @@ describe("published v3 JSON Schemas", () => {
     expect(targetParents?.maxItems).toBe(2);
     expect(required(definition(document, "evidenceFact"))).toContain("policyEligible");
     expect(required(definition(document, "lifecycleFinding"))).toContain("feedConflict");
+    expect(required(definition(document, "lifecycleFinding"))).toContain("servingPlatforms");
+    // The finding definition is additionalProperties:false, so every emitted lifecycle
+    // day-count must be declared or real reports stop validating.
+    const findingProperties = definition(document, "lifecycleFinding").properties as Record<
+      string,
+      JsonSchema
+    >;
+    expect(findingProperties.daysUntilDeprecation).toEqual({ type: "integer" });
+    expect(findingProperties.deprecationDate).toBeDefined();
+    const findingPlatforms = findingProperties.servingPlatforms as JsonSchema;
+    expect(findingPlatforms.minItems).toBe(1);
+    expect(findingPlatforms.uniqueItems).toBe(true);
+  });
+
+  test("assessment report schema publishes upstream feed freshness", async () => {
+    const document = await schema("assessment-report.schema.json");
+    const feed = definition(document, "feedIdentity");
+    expect(required(feed)).toEqual(expect.arrayContaining(["generatedAt", "ageDays"]));
+    const properties = feed.properties as Record<string, JsonSchema>;
+    // An unavailable feed still has to serialize, so both admit the empty/null form.
+    expect(properties.generatedAt?.oneOf).toEqual(
+      expect.arrayContaining([{ const: "" }]),
+    );
+    expect(properties.ageDays?.type).toEqual(["integer", "null"]);
+    expect(properties.ageDays?.minimum).toBe(0);
   });
 });

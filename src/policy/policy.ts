@@ -177,6 +177,12 @@ function patterns(value: unknown, label: string): string[] {
   );
 }
 
+function platformList(value: unknown, label: string): string[] {
+  return stringArray(value, label)
+    .map((entry, index) => platform(entry, `${label}[${index}]`))
+    .sort();
+}
+
 function suppressionPatterns(value: unknown, label: string): string[] {
   const result = patterns(value, label);
   if (result.some((pattern) => !/[^*?/]/u.test(pattern))) {
@@ -377,6 +383,7 @@ export function defaultPolicy(): Policy {
     warnWithinDays: DEFAULT_WARN_WITHIN_DAYS,
     failWithinDays: null,
     allowPartial: false,
+    servingPlatforms: [],
     usageEvidenceFiles: [],
     assertions: [],
     resolutions: [],
@@ -392,6 +399,7 @@ export function parsePolicyPayload(payload: unknown): Policy {
     [
       "schemaVersion",
       "policy",
+      "servingPlatforms",
       "usageEvidenceFiles",
       "assertions",
       "resolutions",
@@ -412,6 +420,9 @@ export function parsePolicyPayload(payload: unknown): Policy {
       policy.failWithinDays = integer(source.failWithinDays, "policy.failWithinDays");
     }
     policy.allowPartial = boolean(source.allowPartial, "policy.allowPartial", false);
+  }
+  if (root.servingPlatforms !== undefined) {
+    policy.servingPlatforms = platformList(root.servingPlatforms, "servingPlatforms");
   }
   if (root.usageEvidenceFiles !== undefined) {
     policy.usageEvidenceFiles = patterns(root.usageEvidenceFiles, "usageEvidenceFiles");
@@ -528,10 +539,17 @@ export function monotonicPolicy(base: Policy, proposed: Policy): Policy {
       : proposed.failWithinDays === null
         ? base.failWithinDays
         : Math.max(base.failWithinDays, proposed.failWithinDays);
+  // An undeclared platform set matches every platform, so it stays undeclared: a
+  // head declaration must never narrow lifecycle matching the base performed.
+  const servingPlatforms =
+    base.servingPlatforms.length === 0 || proposed.servingPlatforms.length === 0
+      ? []
+      : [...new Set([...base.servingPlatforms, ...proposed.servingPlatforms])].sort();
   return {
     warnWithinDays: Math.max(base.warnWithinDays, proposed.warnWithinDays),
     failWithinDays,
     allowPartial: base.allowPartial && proposed.allowPartial,
+    servingPlatforms,
     usageEvidenceFiles: [...new Set([...base.usageEvidenceFiles, ...proposed.usageEvidenceFiles])].sort(),
     assertions: appendUniqueById(base.assertions, proposed.assertions, (entry) => entry.evidenceId),
     resolutions: appendUniqueById(base.resolutions, proposed.resolutions, (entry) => entry.resolutionId),

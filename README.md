@@ -59,6 +59,8 @@ policy:
 
 Setting `failWithinDays` turns enforcement on. The built-in 180-day warning horizon and fail-closed handling for partial coverage remain in effect unless the policy explicitly overrides them.
 
+Warnings and failures measure different dates. The warning horizon opens at the earliest published lifecycle date, so a model whose deprecation date has already passed is advisory even when its shutdown is a year out — some providers stop serving at the deprecation date. Enforcement stays keyed to the shutdown date, so an early deprecation warns loudly without failing the job. See [lifecycle date precedence](docs/v3-product-contract.md#lifecycle-date-precedence).
+
 Only resolved deployment evidence, or resolved application evidence established as production, can block. Ordinary SDK calls remain advisory because source code alone does not prove where it is deployed. If a known application path is production, add this top-level `scopeRules` section to the same policy file, using the relevant stable rule ID from [the detector contract](docs/v3-detector-contract.md):
 
 ```yaml
@@ -105,9 +107,22 @@ Other tracked UTF-8 files are checked for exact eligible model IDs from the life
 
 For the Vercel AI SDK, a provider call is read wherever it appears — `generateText({ model: openai("gpt-5") })`, a `const model = openai(id)` held for later, or a middleware wrapper — because the provider call itself is what selects the model. The provider package pins the serving platform, so these resolve and can block on the same terms as the official SDKs. `azure(...)` names a deployment and `bedrock(...)` is polymorphic, so both need a trusted resolution before they block, exactly as their official-SDK counterparts do.
 
-The supported parsers do not accept every construct in the languages they cover; JSX and TSX element syntax is the most common gap. Such a file falls back to the same text-only matching an unsupported language gets, and a notice names it. Because the file is still assessed, `scan-status` stays `complete` — a repository is never pushed into partial coverage, and so into `allowPartial: true`, by a parser gap. A model selected inside a JSX file is reached by text matching only, whichever SDK it uses.
+The supported parsers do not accept every construct in the languages they cover; JSX and TSX element syntax is the most common gap. Such a file falls back to the same text-only matching an unsupported language gets, and a notice names it. Because the file is still assessed, `scan-status` stays `complete` — a repository is never pushed into partial coverage, and so into `allowPartial: true`, by a parser gap.
 
-Integrations that still route model selection through their own abstraction — LangChain, LlamaIndex, LiteLLM, the legacy Google generative SDKs, and AI SDK shapes outside the published rules such as a `"openai/gpt-5"` gateway string — are reported as an `unsupported-integration-import@1` notice naming the framework and the files that import it, so a run cannot look clean while your real call sites went unread. Coverage stays `complete` and enforcement is unaffected; the notice exists because model choices made that way reach the assessment only as low-confidence text matches, which are named in Slack as text matches but can never block.
+Integrations that still route model selection through their own abstraction — LangChain, LlamaIndex, LiteLLM, the legacy Google generative SDKs, and AI SDK shapes outside the published rules such as a `"openai/gpt-5"` gateway string — are reported as an `unsupported-integration-import.<framework>@1` notice naming the framework and the files that import it, so a run cannot look clean while your real call sites went unread. Coverage stays `complete` and enforcement is unaffected; the notice exists because model choices made that way reach the assessment only as low-confidence text matches, which are named in Slack as text matches but can never block.
+
+A text match does not say which provider serves the model, so one occurrence of a model ID that several providers publish is reported once — as a single finding naming every candidate platform and the earliest of their shutdown dates — not once per provider. If the repository only uses some platforms, declare them and the rest stop matching text at all:
+
+```yaml
+# .github/ai-model-lifecycle.yml
+schemaVersion: 1
+
+servingPlatforms:
+  - openai
+  - google
+```
+
+The declaration applies only where the evidence itself did not establish a platform, so it never hides a finding that could block. It is reported as an evidence source in the job summary and report.
 
 Static evidence has limits. Remote databases, secrets, provider consoles, external deployment repositories, and runtime routers are outside it. A clean result means only that no actionable lifecycle risk was found in the evidence actually assessed. [Checked-in claims](#optional-runtime-only-claims) can represent known runtime-only facts; they do not prove complete coverage.
 
@@ -131,6 +146,7 @@ Which combinations pass and which fail:
 | Partial scan without enforcement | Succeeds with a warning |
 | Definite policy breach | Fails |
 | Partial scan with enforcement and `allowPartial: false` | Fails closed |
+| Upstream feed older than `max-feed-age-days` | Partial: succeeds with a warning, or fails closed under enforcement |
 | Feed, trusted schema, target snapshot, resource-budget, or internal failure | Fails with `unknown + failed` |
 | Required PR base unavailable | Fails with `unknown + partial` |
 
@@ -193,9 +209,10 @@ All inputs are optional.
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `warn-within-days` | Checked-in policy, otherwise `180` | Warning horizon in UTC calendar days. |
-| `fail-within-days` | Unset | Enables enforcement for definite eligible evidence inside the horizon. |
+| `warn-within-days` | Checked-in policy, otherwise `180` | Warning horizon in UTC calendar days, measured against the earliest published lifecycle date — the deprecation date when the provider published one, otherwise the shutdown date. |
+| `fail-within-days` | Unset | Enables enforcement for definite eligible evidence inside the horizon. Measured against the shutdown date only. |
 | `allow-partial` | Checked-in policy, otherwise `false` | Permits enforced partial scans to succeed unless they contain a definite breach. |
+| `max-feed-age-days` | `30` | Upstream freshness horizon. An older lifecycle feed makes `scan-status` partial. Set to `""` to disable. |
 | `slack-webhook` | Unset | HTTPS Slack incoming webhook used only for commit targets on `schedule`, `workflow_dispatch`, or `push`; every other event is skipped. |
 | `notification-failure-mode` | `fail` | `fail` or `warn` when configured delivery fails. |
 
@@ -213,6 +230,7 @@ All outputs are strings; JSON values are serialized strings.
 | `exit-reason` | Highest-precedence reason for the final process exit. |
 | `target-kind` | Exact Git target selection used by the action. |
 | `evidence-health` | Worst checked-in claim freshness state. |
+| `feed-generated-at`, `feed-age-days` | When upstream produced the lifecycle feed, and how many whole days ago. Both are empty when the feed was unavailable. |
 | `report-path` | Runner-local path to the complete JSON report. |
 | `output-truncated` | Whether large detail outputs were compacted. |
 | `notification-status`, `notification-reason` | Independent Slack delivery result. |
@@ -285,6 +303,14 @@ The current public upstream feed is not typed. The action wraps it with a releas
 The adapter carries the exact reviewed source-pair registry. It strictly validates every upstream row, but only reviewed pairs enter the normalized lifecycle feed. New source rows are quarantined as unclassified diagnostics rather than guessed from identifier shape; missing reviewed pairs are also reported. An addition, removal, or rename therefore makes `scan-status: partial`: warning-only runs stay green with a visible diagnostic, while enforcement fails closed unless `allowPartial: true` is set. A later action release must review a new pair before it can gain model or non-model authority.
 
 Malformed rows, duplicate pairs, unknown fields or providers, invalid adapter metadata, and schema failures still produce `unknown + failed`. If no reviewed records remain after quarantine, the non-empty feed contract also fails.
+
+### Upstream freshness
+
+A feed that stops updating does not fail: it keeps serving a well-formed document that answers every lookup with a permanent all-clear. Nothing downstream can distinguish that from genuinely having no deprecations, so the action measures the feed itself.
+
+Each run compares the feed's production instant against `max-feed-age-days` (default 30). Beyond that horizon the run emits a `feed-stale` diagnostic and sets `scan-status: partial` — warning-only runs stay green with a visible signal, while enforced runs fail closed under the existing `allowPartial` rules. Set `max-feed-age-days: ""` to disable the guard, for example when pinning a deliberately frozen mirror.
+
+The instant is the feed's `generatedAt`: a typed producer states it directly, and the reviewed adapter derives it from the newest reviewed `scraped_at` in the untyped upstream feed. Both are published every run as `feed-generated-at` and `feed-age-days`, so an external monitor can alert on upstream silence directly instead of inferring it.
 
 Every run publishes the exact source, normalized feed, active-record, adapter-manifest, and detector-manifest identities.
 

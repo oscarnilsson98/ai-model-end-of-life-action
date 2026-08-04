@@ -7298,6 +7298,14 @@ function isRfc3339UtcInstant(value) {
     return false;
   return isDateOnly(`${match[1]}-${match[2]}-${match[3]}`);
 }
+var MILLISECONDS_PER_DAY = 86400000;
+function feedAgeInDays(generatedAt, nowMs) {
+  const generatedMs = Date.parse(generatedAt);
+  if (!Number.isFinite(generatedMs)) {
+    throw new Error(`Cannot measure feed age from generatedAt ${JSON.stringify(generatedAt)}.`);
+  }
+  return Math.max(0, Math.floor((nowMs - generatedMs) / MILLISECONDS_PER_DAY));
+}
 function dateField(object, field, path) {
   const value = optionalText(object, field, path, 10);
   if (value !== undefined && !isDateOnly(value)) {
@@ -7874,6 +7882,19 @@ function chooseExitReason(...reasons) {
   }
   return result;
 }
+function daysUntilEarliestLifecycleDate(daysUntilShutdown, daysUntilDeprecation) {
+  if (daysUntilShutdown === null)
+    return null;
+  return daysUntilDeprecation === null || daysUntilDeprecation === undefined ? daysUntilShutdown : Math.min(daysUntilDeprecation, daysUntilShutdown);
+}
+function earliestLifecycleDays(finding) {
+  return daysUntilEarliestLifecycleDate(finding.daysUntilShutdown, finding.daysUntilDeprecation);
+}
+function deprecationLeadsHorizon(finding) {
+  if (finding.deprecationDate === undefined)
+    return false;
+  return finding.daysUntilShutdown === null || (finding.daysUntilDeprecation ?? 0) < finding.daysUntilShutdown;
+}
 function resultFromFindings(findings) {
   let result = "no-actionable-risk";
   for (const finding of findings) {
@@ -7952,7 +7973,7 @@ function alertFingerprint(findings) {
 }
 
 // src/detection/manifest.ts
-var DETECTOR_MANIFEST_VERSION = "3.0.0-3";
+var DETECTOR_MANIFEST_VERSION = "3.0.0-4";
 var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
@@ -8182,6 +8203,7 @@ var DETECTOR_MANIFEST_SHA256 = canonicalSha256("ai-model-eol/detector-manifest/v
 
 // src/shared/limits.ts
 var MAX_POLICY_DAYS = 36500;
+var DEFAULT_MAX_FEED_AGE_DAYS = 30;
 
 // src/policy/policy.ts
 var POLICY_PATH = ".github/ai-model-lifecycle.yml";
@@ -8320,6 +8342,9 @@ function validateRepositoryPattern(value, label) {
 }
 function patterns(value, label) {
   return stringArray(value, label).map((entry, index) => validateRepositoryPattern(entry, `${label}[${index}]`));
+}
+function platformList(value, label) {
+  return stringArray(value, label).map((entry, index) => platform(entry, `${label}[${index}]`)).sort();
 }
 function suppressionPatterns(value, label) {
   const result = patterns(value, label);
@@ -8487,6 +8512,7 @@ function defaultPolicy() {
     warnWithinDays: DEFAULT_WARN_WITHIN_DAYS,
     failWithinDays: null,
     allowPartial: false,
+    servingPlatforms: [],
     usageEvidenceFiles: [],
     assertions: [],
     resolutions: [],
@@ -8499,6 +8525,7 @@ function parsePolicyPayload(payload) {
   exactKeys(root, [
     "schemaVersion",
     "policy",
+    "servingPlatforms",
     "usageEvidenceFiles",
     "assertions",
     "resolutions",
@@ -8518,6 +8545,9 @@ function parsePolicyPayload(payload) {
       policy.failWithinDays = integer(source.failWithinDays, "policy.failWithinDays");
     }
     policy.allowPartial = boolean(source.allowPartial, "policy.allowPartial", false);
+  }
+  if (root.servingPlatforms !== undefined) {
+    policy.servingPlatforms = platformList(root.servingPlatforms, "servingPlatforms");
   }
   if (root.usageEvidenceFiles !== undefined) {
     policy.usageEvidenceFiles = patterns(root.usageEvidenceFiles, "usageEvidenceFiles");
@@ -8616,10 +8646,12 @@ function appendUniqueById(base, proposed, identity) {
 }
 function monotonicPolicy(base, proposed) {
   const failWithinDays = base.failWithinDays === null ? proposed.failWithinDays : proposed.failWithinDays === null ? base.failWithinDays : Math.max(base.failWithinDays, proposed.failWithinDays);
+  const servingPlatforms = base.servingPlatforms.length === 0 || proposed.servingPlatforms.length === 0 ? [] : [...new Set([...base.servingPlatforms, ...proposed.servingPlatforms])].sort();
   return {
     warnWithinDays: Math.max(base.warnWithinDays, proposed.warnWithinDays),
     failWithinDays,
     allowPartial: base.allowPartial && proposed.allowPartial,
+    servingPlatforms,
     usageEvidenceFiles: [...new Set([...base.usageEvidenceFiles, ...proposed.usageEvidenceFiles])].sort(),
     assertions: appendUniqueById(base.assertions, proposed.assertions, (entry) => entry.evidenceId),
     resolutions: appendUniqueById(base.resolutions, proposed.resolutions, (entry) => entry.resolutionId),
@@ -8911,13 +8943,31 @@ function suppressionMatches(suppression, fact, modelId2, servingPlatform) {
   }
   return target.modelId === modelId2 && target.servingPlatform === servingPlatform && target.detectorRuleIds.includes(fact.detectorRuleId) && pathsForFact(fact).some((path) => target.paths.some((pattern) => matchRepositoryPattern(pattern, path)));
 }
+function dayPhrase(subject, days) {
+  if (days < 0)
+    return `${subject} was ${Math.abs(days)} UTC calendar day(s) ago`;
+  if (days === 0)
+    return `${subject} is today`;
+  return `${subject} is ${days} UTC calendar day(s) away`;
+}
+function horizonReason(daysUntilShutdown, daysUntilDeprecation) {
+  if (daysUntilShutdown === null) {
+    return daysUntilDeprecation === null ? "The joined lifecycle record has no published shutdown date." : `The joined lifecycle record has no published shutdown date; ${dayPhrase("deprecation", daysUntilDeprecation)}.`;
+  }
+  if (daysUntilDeprecation === null || daysUntilDeprecation >= daysUntilShutdown) {
+    return `${dayPhrase("Shutdown", daysUntilShutdown)}.`;
+  }
+  return `${dayPhrase("Deprecation", daysUntilDeprecation)}; ${dayPhrase("shutdown", daysUntilShutdown)}.`;
+}
 function policyOutcome(input) {
   const { fact, pair, lifecycle, policy, exactPlatform } = input;
   const daysUntilShutdown = lifecycle.shutdownDate === null ? null : calendarDaysUntil(lifecycle.shutdownDate, input.now);
+  const daysUntilDeprecation = lifecycle.deprecationDate === null ? null : calendarDaysUntil(lifecycle.deprecationDate, input.now);
   const reasons = [];
   const scopeEligible = fact.scope === "application" || fact.scope === "deployment";
   const protectedOrUnknown = fact.scope === "documentation" || fact.scope === "test" || fact.scope === "example" || fact.scope === "unknown";
-  const insideWarning = daysUntilShutdown === null || daysUntilShutdown <= policy.warnWithinDays;
+  const daysUntilLifecycle = daysUntilEarliestLifecycleDate(daysUntilShutdown, daysUntilDeprecation);
+  const insideWarning = daysUntilLifecycle === null || daysUntilLifecycle <= policy.warnWithinDays;
   let outcome = "none";
   if (insideWarning) {
     if (fact.kind === "lexical") {
@@ -8925,7 +8975,7 @@ function policyOutcome(input) {
       reasons.push(scopeEligible ? "Exact typed-feed ID appears in application/deployment text; lexical evidence cannot block." : "Exact typed-feed ID appears only in protected or unknown-scope text.");
     } else if (scopeEligible || fact.origin !== "repository") {
       outcome = "warning";
-      reasons.push(lifecycle.shutdownDate === null ? "The joined lifecycle record has no published shutdown date." : `Shutdown is ${daysUntilShutdown} UTC calendar day(s) away.`);
+      reasons.push(horizonReason(daysUntilShutdown, daysUntilDeprecation));
     } else if (protectedOrUnknown) {
       outcome = "notice";
       reasons.push("Evidence is outside an actionable application/deployment scope.");
@@ -8944,7 +8994,7 @@ function policyOutcome(input) {
     outcome = "breach";
     reasons.push(`Definite evidence breaches failWithinDays=${policy.failWithinDays}.`);
   }
-  return { outcome, daysUntilShutdown, reasons };
+  return { outcome, daysUntilShutdown, daysUntilDeprecation, reasons };
 }
 function strongestScope(left, right) {
   const rank = {
@@ -8987,12 +9037,14 @@ function lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform) {
     evidenceIds: [fact.evidenceId],
     modelId: pair.modelId,
     servingPlatform: pair.servingPlatform,
+    servingPlatforms: [pair.servingPlatform],
     lifecycleMatch: "exact",
     lifecycleStatus: lifecycle.lifecycleStatus,
     ...lifecycle.announcementDate === null ? {} : { announcementDate: lifecycle.announcementDate },
     ...lifecycle.deprecationDate === null ? {} : { deprecationDate: lifecycle.deprecationDate },
     ...lifecycle.shutdownDate === null ? {} : { shutdownDate: lifecycle.shutdownDate },
     daysUntilShutdown: evaluated.daysUntilShutdown,
+    ...evaluated.daysUntilDeprecation === null ? {} : { daysUntilDeprecation: evaluated.daysUntilDeprecation },
     replacementModels: lifecycle.provenance.flatMap((entry) => [...entry.replacementModels]),
     sourceUrls: [...lifecycle.primarySourceUrls],
     feedConflict: pair.conflict,
@@ -9003,6 +9055,50 @@ function lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform) {
     confidence: fact.confidence,
     selectorKind: fact.selectorKind,
     locations: [...fact.locations]
+  };
+}
+function mergeReplacementModels(replacements) {
+  return [
+    ...new Map(replacements.map((replacement) => [
+      JSON.stringify([replacement.servingPlatform ?? null, replacement.modelId]),
+      replacement
+    ])).values()
+  ].sort((left, right) => compareText3(left.servingPlatform ?? "", right.servingPlatform ?? "") || compareText3(left.modelId, right.modelId));
+}
+function platformIsProven(fact) {
+  return fact.platformResolution === "resolved" && fact.kind !== "lexical";
+}
+function compareAmbiguousCandidate(left, right) {
+  const leftDays = earliestLifecycleDays(left);
+  const rightDays = earliestLifecycleDays(right);
+  return compareOutcome(right.outcome, left.outcome) || (leftDays === null ? 1 : 0) - (rightDays === null ? 1 : 0) || (leftDays ?? 0) - (rightDays ?? 0) || compareText3(left.servingPlatform, right.servingPlatform) || compareText3(left.semanticKey, right.semanticKey);
+}
+function collapseAmbiguousCandidates(candidates, restrictedTo) {
+  const ordered2 = [...candidates].sort(compareAmbiguousCandidate);
+  const representative = ordered2[0];
+  const servingPlatforms = [
+    ...new Set(ordered2.map((candidate) => candidate.servingPlatform))
+  ].sort(compareText3);
+  const semanticKey = JSON.stringify([
+    "ambiguous-platform",
+    servingPlatforms,
+    representative.semanticKey
+  ]);
+  const reasons = [
+    ...representative.reasons,
+    servingPlatforms.length === 1 ? "Serving platform is ambiguous; this match cannot block." : `Serving platform is ambiguous across ${servingPlatforms.join(", ")}; the most urgent of their lifecycle records is reported and this match cannot block.`,
+    ...restrictedTo.length === 0 ? [] : [`Matching was restricted to the declared serving platform(s): ${restrictedTo.join(", ")}.`]
+  ];
+  return {
+    ...representative,
+    findingId: canonicalSha256("ai-model-eol/lifecycle-finding/v3", semanticKey),
+    semanticKey,
+    servingPlatforms,
+    outcome: ordered2.reduce((strongest, candidate) => strongerOutcome(strongest, candidate.outcome), "none"),
+    feedConflict: ordered2.some((candidate) => candidate.feedConflict),
+    sourceUrls: [...new Set(ordered2.flatMap((candidate) => candidate.sourceUrls))].sort(compareText3),
+    replacementModels: mergeReplacementModels(ordered2.flatMap((candidate) => candidate.replacementModels)),
+    reasons
   };
 }
 function joinFact(fact, feed, policy, now) {
@@ -9018,18 +9114,23 @@ function joinFact(fact, feed, policy, now) {
   } else if (fact.platformResolution === "ambiguous") {
     pairs = feed.modelPairs.filter((pair) => pair.modelId === fact.modelId);
   }
+  const restrictedTo = policy.servingPlatforms.length > 0 && !platformIsProven(fact) ? policy.servingPlatforms : [];
+  if (restrictedTo.length > 0) {
+    const declared = new Set(restrictedTo);
+    pairs = pairs.filter((pair) => declared.has(pair.servingPlatform));
+  }
   const findings = [];
   for (const pair of pairs) {
     for (const lifecycle of pair.activeLifecycles) {
       const finding = lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform);
       if (!exactPlatform && finding.outcome === "breach")
         finding.outcome = "warning";
-      if (!exactPlatform)
-        finding.reasons.push("Serving platform is ambiguous; this match cannot block.");
       findings.push(finding);
     }
   }
-  return findings;
+  if (exactPlatform || findings.length === 0)
+    return findings;
+  return [collapseAmbiguousCandidates(findings, restrictedTo)];
 }
 function aggregateFindings(findings) {
   const byKey = new Map;
@@ -9039,6 +9140,7 @@ function aggregateFindings(findings) {
       byKey.set(finding.semanticKey, {
         ...finding,
         evidenceIds: [...finding.evidenceIds],
+        servingPlatforms: [...finding.servingPlatforms],
         replacementModels: [...finding.replacementModels],
         sourceUrls: [...finding.sourceUrls],
         reasons: [...finding.reasons],
@@ -9047,16 +9149,17 @@ function aggregateFindings(findings) {
       continue;
     }
     existing.outcome = strongerOutcome(existing.outcome, finding.outcome);
+    existing.servingPlatforms = [
+      ...new Set([...existing.servingPlatforms, ...finding.servingPlatforms])
+    ].sort(compareText3);
     existing.evidenceIds = [...new Set([...existing.evidenceIds, ...finding.evidenceIds])].sort(compareText3);
     existing.sourceUrls = [...new Set([...existing.sourceUrls, ...finding.sourceUrls])].sort(compareText3);
     existing.reasons = [...new Set([...existing.reasons, ...finding.reasons])].sort(compareText3);
     existing.locations = [...existing.locations, ...finding.locations].sort(compareLocation).slice(0, 20);
-    existing.replacementModels = [
-      ...new Map([...existing.replacementModels, ...finding.replacementModels].map((replacement) => [
-        JSON.stringify([replacement.servingPlatform ?? null, replacement.modelId]),
-        replacement
-      ])).values()
-    ].sort((left, right) => compareText3(left.servingPlatform ?? "", right.servingPlatform ?? "") || compareText3(left.modelId, right.modelId));
+    existing.replacementModels = mergeReplacementModels([
+      ...existing.replacementModels,
+      ...finding.replacementModels
+    ]);
     existing.scope = strongestScope(existing.scope, finding.scope);
     existing.environment = strongestEnvironment(existing.environment, finding.environment);
     existing.confidence = strongestConfidence(existing.confidence, finding.confidence);
@@ -9064,8 +9167,8 @@ function aggregateFindings(findings) {
       delete existing.suppressedBy;
   }
   return [...byKey.values()].sort((left, right) => {
-    const daysLeft = left.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
-    const daysRight = right.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
+    const daysLeft = earliestLifecycleDays(left) ?? Number.MAX_SAFE_INTEGER;
+    const daysRight = earliestLifecycleDays(right) ?? Number.MAX_SAFE_INTEGER;
     return daysLeft - daysRight || compareText3(left.semanticKey, right.semanticKey);
   });
 }
@@ -9085,7 +9188,7 @@ function applySuppressions(findings, evidenceById, policy, now, diagnostics) {
     for (const suppression of current) {
       const matched = finding.evidenceIds.some((evidenceId) => {
         const fact = evidenceById.get(evidenceId);
-        return fact !== undefined && suppressionMatches(suppression, fact, finding.modelId, finding.servingPlatform);
+        return fact !== undefined && finding.servingPlatforms.some((servingPlatform) => suppressionMatches(suppression, fact, finding.modelId, servingPlatform));
       });
       if (matched) {
         finding.suppressedBy = suppression.suppressionId;
@@ -9104,6 +9207,14 @@ function unresolvedIsAdvisory(fact) {
 }
 function evaluateEvidence(input) {
   const diagnostics = [...input.diagnostics ?? []];
+  if (input.policy.servingPlatforms.length > 0) {
+    diagnostics.push({
+      code: "declared-serving-platforms",
+      message: `Lifecycle matching for lexical and platform-ambiguous evidence is restricted to the declared serving platform(s): ${input.policy.servingPlatforms.join(", ")}.`,
+      path: POLICY_PATH,
+      severity: "notice"
+    });
+  }
   const orderedEvidence = [...input.evidence].sort((left, right) => compareText3(left.evidenceId, right.evidenceId));
   const resolved = applyResolutions(orderedEvidence, input.policy, input.now);
   diagnostics.push(...resolved.diagnostics);
@@ -9484,7 +9595,8 @@ function evaluateComparison(input) {
   const policyChanges = policyDiff(input.baseClaims.policy, input.targetClaims.policy, input.inputs);
   const baseSuppressions = new Set(trustedBasePolicy.suppressions.map((suppression) => JSON.stringify(suppression)));
   const proposedSuppression = proposedTargetPolicy.suppressions.some((suppression) => !baseSuppressions.has(JSON.stringify(suppression)));
-  const attemptedWeakening = proposedTargetPolicy.warnWithinDays < trustedBasePolicy.warnWithinDays || trustedBasePolicy.failWithinDays !== null && (proposedTargetPolicy.failWithinDays === null || proposedTargetPolicy.failWithinDays < trustedBasePolicy.failWithinDays) || !trustedBasePolicy.allowPartial && proposedTargetPolicy.allowPartial || proposedSuppression;
+  const proposedPlatformNarrowing = proposedTargetPolicy.servingPlatforms.length > 0 && (trustedBasePolicy.servingPlatforms.length === 0 || !trustedBasePolicy.servingPlatforms.every((servingPlatform) => proposedTargetPolicy.servingPlatforms.includes(servingPlatform)));
+  const attemptedWeakening = proposedTargetPolicy.warnWithinDays < trustedBasePolicy.warnWithinDays || trustedBasePolicy.failWithinDays !== null && (proposedTargetPolicy.failWithinDays === null || proposedTargetPolicy.failWithinDays < trustedBasePolicy.failWithinDays) || !trustedBasePolicy.allowPartial && proposedTargetPolicy.allowPartial || proposedSuppression || proposedPlatformNarrowing;
   let result = delta.result;
   if (result === "no-actionable-risk" && (claimDiagnostics.length > 0 || attemptedWeakening)) {
     result = "advisory";
@@ -9547,6 +9659,7 @@ var SOURCE_EXTENSIONS = new Set([
   ".sh"
 ]);
 var JS_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"]);
+var JSX_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".tsx"]);
 var HCL_EXTENSIONS = new Set([".tf", ".hcl"]);
 var IDENTIFIER_CHARACTER = /^[\p{L}\p{N}\p{M}._:/-]$/u;
 var DIRECT_POLICY_RULES = new Set(DETECTOR_RULES.filter((rule) => rule.policyEligible).map((rule) => rule.ruleId));
@@ -9609,19 +9722,206 @@ var REGEX_PRECEDING_KEYWORDS = new Set([
   "yield",
   "await"
 ]);
-function regexLiteralAllowed(tokens) {
-  const previous = tokens[tokens.length - 1];
-  if (previous === undefined)
+function valueEndingToken(token) {
+  if (token === undefined)
+    return false;
+  if (token.kind === "string")
     return true;
-  if (previous.kind === "string")
-    return false;
-  if (previous.kind === "identifier")
-    return REGEX_PRECEDING_KEYWORDS.has(previous.value);
-  if (/^[0-9]$/u.test(previous.value))
-    return false;
-  return previous.value !== ")" && previous.value !== "]" && previous.value !== "}" && previous.value !== "++" && previous.value !== "--";
+  if (token.kind === "identifier")
+    return !REGEX_PRECEDING_KEYWORDS.has(token.value);
+  if (/^[0-9]$/u.test(token.value))
+    return true;
+  return token.value === ")" || token.value === "]" || token.value === "}" || token.value === "++" || token.value === "--";
 }
-function tokenize(source, language) {
+function regexLiteralAllowed(tokens) {
+  let index = tokens.length - 1;
+  if (structuralValue(tokens[index]) === "!" && valueEndingToken(tokens[index - 1])) {
+    index -= 1;
+  }
+  return !valueEndingToken(tokens[index]);
+}
+var JSX_TAG_LOOKAHEAD_CHARACTERS = 4096;
+var JSX_NAME_START = /[A-Za-z_$]/u;
+var JSX_NAME_CHARACTER = /[A-Za-z0-9_$.:-]/u;
+function jsxQuotedEnd(source, index, limit) {
+  const quote = source[index];
+  for (let scan = index + 1;scan < limit; scan += 1) {
+    if (source[scan] === quote)
+      return scan + 1;
+  }
+  return -1;
+}
+var JSX_VALUE_ENDING_CHARACTER = /[\p{L}\p{N}_$)\]}]/u;
+var JSX_STEPPED_OVER_VALUE = "0";
+function jsxOpaqueEnd(source, index, limit, previous) {
+  const character = source[index];
+  if (character === '"' || character === "'") {
+    for (let scan = index + 1;scan < limit; scan += 1) {
+      const inner = source[scan];
+      if (inner === "\\")
+        scan += 1;
+      else if (inner === `
+`)
+        break;
+      else if (inner === character)
+        return scan + 1;
+    }
+    return index;
+  }
+  if (character === "`") {
+    let substitutions = 0;
+    for (let scan = index + 1;scan < limit; scan += 1) {
+      const inner = source[scan];
+      if (inner === "\\")
+        scan += 1;
+      else if (inner === "$" && source[scan + 1] === "{") {
+        substitutions += 1;
+        scan += 1;
+      } else if (inner === "}" && substitutions > 0)
+        substitutions -= 1;
+      else if (inner === "`" && substitutions === 0)
+        return scan + 1;
+    }
+    return index;
+  }
+  if (character !== "/")
+    return index;
+  if (source[index + 1] === "*") {
+    const closed = source.indexOf("*/", index + 2);
+    return closed < 0 || closed + 2 > limit ? index : closed + 2;
+  }
+  if (source[index + 1] === "/") {
+    const newline = source.indexOf(`
+`, index + 2);
+    return newline < 0 || newline >= limit ? index : newline + 1;
+  }
+  if (JSX_VALUE_ENDING_CHARACTER.test(previous))
+    return index;
+  let characterClass = false;
+  for (let scan = index + 1;scan < limit; scan += 1) {
+    const inner = source[scan];
+    if (inner === "\\")
+      scan += 1;
+    else if (inner === `
+`)
+      break;
+    else if (inner === "[")
+      characterClass = true;
+    else if (inner === "]")
+      characterClass = false;
+    else if (inner === "/" && !characterClass)
+      return scan + 1;
+  }
+  return index;
+}
+function jsxBalancedEnd(source, index, limit, open, close) {
+  let depth = 0;
+  let previous = "";
+  for (let scan = index;scan < limit; scan += 1) {
+    const character = source[scan];
+    const opaque = jsxOpaqueEnd(source, scan, limit, previous);
+    if (opaque > scan) {
+      const comment = character === "/" && (source[scan + 1] === "/" || source[scan + 1] === "*");
+      if (!comment)
+        previous = JSX_STEPPED_OVER_VALUE;
+      scan = opaque - 1;
+      continue;
+    }
+    if (character === open)
+      depth += 1;
+    else if (character === close) {
+      depth -= 1;
+      if (depth === 0)
+        return scan + 1;
+    }
+    if (!/\s/u.test(character))
+      previous = character;
+  }
+  return -1;
+}
+function jsxBracedEnd(source, index, limit) {
+  return jsxBalancedEnd(source, index, limit, "{", "}");
+}
+function jsxAngleEnd(source, index, limit) {
+  return jsxBalancedEnd(source, index, limit, "<", ">");
+}
+function looksLikeJsxTag(source, offset) {
+  const limit = Math.min(source.length, offset + JSX_TAG_LOOKAHEAD_CHARACTERS);
+  let index = offset + 1;
+  const first = source[index];
+  if (first === undefined)
+    return false;
+  if (first === ">")
+    return true;
+  if (!JSX_NAME_START.test(first))
+    return false;
+  while (index < limit && JSX_NAME_CHARACTER.test(source[index]))
+    index += 1;
+  while (index < limit) {
+    const character = source[index];
+    if (/\s/u.test(character)) {
+      index += 1;
+      continue;
+    }
+    if (character === ">")
+      return true;
+    if (character === "/" && source[index + 1] === ">")
+      return true;
+    if (character === "/" && source[index + 1] === "*") {
+      const closed = source.indexOf("*/", index + 2);
+      if (closed < 0 || closed + 2 > limit)
+        return false;
+      index = closed + 2;
+      continue;
+    }
+    if (character === "/" && source[index + 1] === "/") {
+      const newline = source.indexOf(`
+`, index + 2);
+      if (newline < 0 || newline >= limit)
+        return false;
+      index = newline + 1;
+      continue;
+    }
+    if (character === "=") {
+      index += 1;
+      continue;
+    }
+    if (character === "{") {
+      index = jsxBracedEnd(source, index, limit);
+      if (index < 0)
+        return false;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      index = jsxQuotedEnd(source, index, limit);
+      if (index < 0)
+        return false;
+      continue;
+    }
+    if (character === "<") {
+      index = jsxAngleEnd(source, index, limit);
+      if (index < 0)
+        return false;
+      continue;
+    }
+    if (JSX_NAME_START.test(character)) {
+      const nameStart = index;
+      while (index < limit && JSX_NAME_CHARACTER.test(source[index]))
+        index += 1;
+      if (source.slice(nameStart, index) === "extends")
+        return false;
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+function jsxElementAllowed(tokens, source, offset) {
+  const previous = tokens[tokens.length - 1];
+  const valuePosition = regexLiteralAllowed(tokens) || structuralValue(previous) === "}" || isIdentifier(previous, "default");
+  return valuePosition && looksLikeJsxTag(source, offset);
+}
+function tokenize(source, language, jsx = false) {
   const tokens = [];
   let issue;
   const reportIssue = (candidate) => {
@@ -9630,6 +9930,7 @@ function tokenize(source, language) {
   let offset = 0;
   let line = 1;
   let column = 1;
+  const frames = [];
   const advance = (character) => {
     offset += character.length;
     if (character === `
@@ -9640,8 +9941,42 @@ function tokenize(source, language) {
       column += [...character].length;
     }
   };
+  const emitPunctuation = (value) => {
+    const tokenStart = offset;
+    const tokenLine = line;
+    const tokenColumn = column;
+    for (const part of value)
+      advance(part);
+    tokens.push({
+      kind: "punctuation",
+      value,
+      raw: value,
+      offset: tokenStart,
+      line: tokenLine,
+      column: tokenColumn,
+      static: true
+    });
+  };
+  const emitJsxName = () => {
+    const tokenStart = offset;
+    const tokenLine = line;
+    const tokenColumn = column;
+    while (offset < source.length && JSX_NAME_CHARACTER.test(source[offset])) {
+      advance(source[offset]);
+    }
+    const raw = source.slice(tokenStart, offset);
+    tokens.push({
+      kind: "identifier",
+      value: raw,
+      raw,
+      offset: tokenStart,
+      line: tokenLine,
+      column: tokenColumn,
+      static: true
+    });
+  };
   const consumeJavascriptTemplate = () => {
-    const frames = [{ mode: "text", braceDepth: 0, regexAllowed: true }];
+    const frames2 = [{ mode: "text", braceDepth: 0, regexAllowed: true }];
     let dynamic = false;
     const consumeQuotedExpressionString = (quote) => {
       advance(quote);
@@ -9692,7 +10027,7 @@ function tokenize(source, language) {
     };
     advance("`");
     while (offset < source.length) {
-      const frame = frames.at(-1);
+      const frame = frames2.at(-1);
       const current = source[offset];
       const next = source[offset + 1];
       if (frame.mode === "text") {
@@ -9704,10 +10039,10 @@ function tokenize(source, language) {
         }
         if (current === "`") {
           advance(current);
-          frames.pop();
-          if (frames.length === 0)
+          frames2.pop();
+          if (frames2.length === 0)
             return { closed: true, dynamic };
-          const parent = frames.at(-1);
+          const parent = frames2.at(-1);
           if (parent !== undefined)
             parent.regexAllowed = false;
           continue;
@@ -9735,7 +10070,7 @@ function tokenize(source, language) {
         continue;
       }
       if (current === "`") {
-        frames.push({ mode: "text", braceDepth: 0, regexAllowed: true });
+        frames2.push({ mode: "text", braceDepth: 0, regexAllowed: true });
         advance(current);
         continue;
       }
@@ -9836,8 +10171,112 @@ function tokenize(source, language) {
     const startColumn = column;
     const character = source[offset];
     const next = source[offset + 1];
+    const frame = frames.at(-1);
+    if (frame?.kind === "jsx" && frame.mode === "children") {
+      if (character === "<" && next === "/") {
+        emitPunctuation("<");
+        emitPunctuation("/");
+        frame.mode = "closing";
+        continue;
+      }
+      if (character === "<" && looksLikeJsxTag(source, offset)) {
+        emitPunctuation("<");
+        frames.push({
+          kind: "jsx",
+          mode: "tag",
+          angleDepth: 0,
+          line: startLine,
+          column: startColumn
+        });
+        continue;
+      }
+      if (character === "{") {
+        emitPunctuation("{");
+        frames.push({
+          kind: "jsx-expression",
+          braceDepth: 0,
+          line: startLine,
+          column: startColumn
+        });
+        continue;
+      }
+      advance(character);
+      continue;
+    }
+    if (frame?.kind === "jsx" && frame.mode === "closing") {
+      if (character === ">") {
+        emitPunctuation(">");
+        frames.pop();
+        continue;
+      }
+      if (JSX_NAME_START.test(character)) {
+        emitJsxName();
+        continue;
+      }
+      advance(character);
+      continue;
+    }
+    if (frame?.kind === "jsx" && frame.mode === "tag" && character !== "'" && character !== '"' && !(character === "/" && (next === "/" || next === "*"))) {
+      if (character === "/" && next === ">") {
+        emitPunctuation("/");
+        emitPunctuation(">");
+        frames.pop();
+        continue;
+      }
+      if (character === "<") {
+        emitPunctuation("<");
+        frame.angleDepth += 1;
+        continue;
+      }
+      if (character === ">") {
+        emitPunctuation(">");
+        if (frame.angleDepth > 0)
+          frame.angleDepth -= 1;
+        else
+          frame.mode = "children";
+        continue;
+      }
+      if (character === "{") {
+        emitPunctuation("{");
+        frames.push({
+          kind: "jsx-expression",
+          braceDepth: 0,
+          line: startLine,
+          column: startColumn
+        });
+        continue;
+      }
+      if (/\s/u.test(character)) {
+        advance(character);
+        continue;
+      }
+      if (JSX_NAME_START.test(character)) {
+        emitJsxName();
+        continue;
+      }
+      emitPunctuation(character);
+      continue;
+    }
+    if (frame?.kind === "jsx-expression") {
+      if (character === "{")
+        frame.braceDepth += 1;
+      else if (character === "}") {
+        if (frame.braceDepth === 0) {
+          emitPunctuation("}");
+          frames.pop();
+          continue;
+        }
+        frame.braceDepth -= 1;
+      }
+    }
     if (/\s/u.test(character)) {
       advance(character);
+      continue;
+    }
+    if (language === "javascript" && start === 0 && character === "#" && next === "!") {
+      while (offset < source.length && source[offset] !== `
+`)
+        advance(source[offset]);
       continue;
     }
     if (language === "python" && character === "#" || language === "hcl" && character === "#" || language !== "python" && character === "/" && next === "/") {
@@ -9933,9 +10372,10 @@ function tokenize(source, language) {
       continue;
     }
     if (character === "'" || character === '"') {
+      const jsxAttribute = frame?.kind === "jsx" && frame.mode === "tag";
       const triple = language === "python" && source.slice(offset, offset + 3) === character.repeat(3);
       const quoteLength = triple ? 3 : 1;
-      const multiline = triple;
+      const multiline = triple || jsxAttribute;
       for (let count = 0;count < quoteLength; count += 1)
         advance(character);
       let escaped = false;
@@ -9964,7 +10404,7 @@ function tokenize(source, language) {
         advance(current);
         if (escaped)
           escaped = false;
-        else if (current === "\\")
+        else if (current === "\\" && !jsxAttribute)
           escaped = true;
       }
       const raw = source.slice(start, offset);
@@ -10010,6 +10450,17 @@ function tokenize(source, language) {
       });
       continue;
     }
+    if (jsx && character === "<" && jsxElementAllowed(tokens, source, offset)) {
+      emitPunctuation("<");
+      frames.push({
+        kind: "jsx",
+        mode: "tag",
+        angleDepth: 0,
+        line: startLine,
+        column: startColumn
+      });
+      continue;
+    }
     const pair = source.slice(offset, offset + 2);
     const punctuation = [
       "??",
@@ -10044,6 +10495,14 @@ function tokenize(source, language) {
       line: startLine,
       column: startColumn,
       static: true
+    });
+  }
+  const unterminatedFrame = frames.at(-1);
+  if (unterminatedFrame !== undefined) {
+    reportIssue({
+      kind: "mismatched-delimiter",
+      line: unterminatedFrame.line,
+      column: unterminatedFrame.column
     });
   }
   if (issue === undefined) {
@@ -11452,8 +11911,8 @@ function detectAiSdkModelCalls(input) {
   }
   return { facts, consumed, literalSpans };
 }
-function detectSdkCalls(source, path, blobOid, language, scope) {
-  const tokenization = tokenize(source, language);
+function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
+  const tokenization = tokenize(source, language, jsx);
   if (tokenization.issue !== undefined) {
     return {
       facts: [],
@@ -12132,12 +12591,36 @@ function unsupportedFrameworkDiagnostics(byFramework) {
     const remaining = sorted.length - sample.length;
     const cause = framework.semanticSupport === "partial" ? "but no published rule for it resolved a model in those files, so the selector shape is one this " + 'manifest does not read yet (for example a gateway model string such as "openai/gpt-5", or a ' + "provider member outside the published set)" : "and this detector manifest publishes no semantic rule for it";
     diagnostics.push({
-      code: "unsupported-integration-import@1",
+      code: `unsupported-integration-import.${framework.frameworkId}@1`,
       message: `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${cause}. Model selections made that way were assessed by bounded lexical fallback only, so they ` + "cannot block, are reported only as text matches, and produce nothing at all when the " + `selector is dynamic or the model ID is not literal-scan eligible. Files: ${sample.join(", ")}` + `${remaining > 0 ? ` (+${remaining} more)` : ""}.`,
       severity: "notice"
     });
   }
   return diagnostics;
+}
+var AGGREGATED_DIAGNOSTIC_PATH_SAMPLE = 10;
+function aggregateDiagnostics(diagnostics) {
+  const groups = new Map;
+  for (const diagnostic of diagnostics) {
+    const key = JSON.stringify([diagnostic.code, diagnostic.severity]);
+    const group = groups.get(key);
+    if (group === undefined)
+      groups.set(key, [diagnostic]);
+    else
+      group.push(diagnostic);
+  }
+  return [...groups.values()].map((group) => {
+    const first = group[0];
+    if (group.length === 1)
+      return first;
+    const paths = group.map((diagnostic) => diagnostic.path).filter((path) => path !== undefined);
+    const sample = paths.slice(0, AGGREGATED_DIAGNOSTIC_PATH_SAMPLE);
+    return {
+      code: first.code,
+      message: `${group.length} files reported this diagnostic; the first is representative: ${first.message}${sample.length === 0 ? "" : ` Sampled paths (${sample.length} of ${paths.length}): ${sample.join(", ")}.`}`,
+      severity: first.severity
+    };
+  });
 }
 function isClaimDocument(path) {
   return path === ".github/ai-model-lifecycle.yml" || path.startsWith(".github/ai-model-evidence/");
@@ -12183,7 +12666,7 @@ function detectSnapshot(snapshot, feed) {
     let semanticLanguage;
     if (JS_EXTENSIONS.has(extension)) {
       semanticLanguage = "javascript";
-      const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "javascript", scope);
+      const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "javascript", scope, JSX_EXTENSIONS.has(extension));
       semantic = detected.facts;
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
@@ -12251,7 +12734,7 @@ function detectSnapshot(snapshot, feed) {
   evidence.sort((left, right) => compareText5(left.evidenceId, right.evidenceId));
   return {
     evidence,
-    diagnostics,
+    diagnostics: aggregateDiagnostics(diagnostics),
     scanStatus: partial ? "partial" : "complete"
   };
 }
@@ -14232,6 +14715,7 @@ function parseActionInputs(environment) {
   const rawWarn = getInput("warn-within-days", environment);
   const rawFail = getInput("fail-within-days", environment);
   const rawAllowPartial = getInput("allow-partial", environment);
+  const rawMaxFeedAge = getInput("max-feed-age-days", environment);
   const slackWebhook = getInput("slack-webhook", environment);
   const rawNotificationFailure = getInput("notification-failure-mode", environment);
   const warnWithinDays = parseOptionalInteger(rawWarn, "warn-within-days", {
@@ -14241,6 +14725,7 @@ function parseActionInputs(environment) {
     max: MAX_POLICY_DAYS
   });
   const allowPartial = rawAllowPartial === undefined || rawAllowPartial === "" ? null : parseBoolean(rawAllowPartial, "allow-partial", false);
+  const maxFeedAgeDays = rawMaxFeedAge === undefined ? DEFAULT_MAX_FEED_AGE_DAYS : parseOptionalInteger(rawMaxFeedAge, "max-feed-age-days", { max: MAX_POLICY_DAYS });
   const notificationFailureMode = rawNotificationFailure?.toLowerCase() || "fail";
   if (notificationFailureMode !== "fail" && notificationFailureMode !== "warn") {
     throw new Error("Invalid notification-failure-mode: expected `fail` or `warn`.");
@@ -14249,11 +14734,37 @@ function parseActionInputs(environment) {
     warnWithinDays,
     failWithinDays,
     allowPartial,
+    maxFeedAgeDays,
     notificationFailureMode
   };
   if (slackWebhook)
     result.slackWebhook = parseHttpsUrl(slackWebhook, "slack-webhook");
   return result;
+}
+
+// src/shared/text.ts
+var BIDI_CONTROL_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+var CONTROL_OR_WHITESPACE_PATTERN = /[\u0000-\u001f\u007f-\u009f\s]+/g;
+function compact(value, maximum) {
+  if (!Number.isSafeInteger(maximum) || maximum < 1) {
+    throw new Error("Text compaction maximum must be a positive safe integer.");
+  }
+  const singleLine = value.replace(BIDI_CONTROL_PATTERN, "").replace(CONTROL_OR_WHITESPACE_PATTERN, " ").trim();
+  const codePoints = [...singleLine];
+  if (codePoints.length <= maximum)
+    return singleLine;
+  return `${codePoints.slice(0, maximum - 1).join("")}…`;
+}
+function servingPlatformLabel(finding) {
+  const platforms = finding.servingPlatforms.length === 0 ? [finding.servingPlatform] : finding.servingPlatforms;
+  return platforms.join(" or ");
+}
+function resultIcon(result, scanStatus) {
+  if (result === "blocking" || result === "unknown")
+    return "❌";
+  if (result === "advisory" || scanStatus === "partial")
+    return "⚠️";
+  return "✅";
 }
 
 // src/action/notification.ts
@@ -14266,19 +14777,19 @@ var REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/;
 var OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 var RUN_ID_PATTERN = /^[0-9]{1,20}$/;
 var SAFE_LINK_PATTERN = /^https?:\/\/[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]{1,2000}$/;
-var BIDI_CONTROL_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+var BIDI_CONTROL_PATTERN2 = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 function compareText7(left, right) {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-function compact(value, maximum) {
-  const singleLine = value.replace(BIDI_CONTROL_PATTERN, "").replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim();
+function compact2(value, maximum) {
+  const singleLine = value.replace(BIDI_CONTROL_PATTERN2, "").replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim();
   const codePoints = [...singleLine];
   if (codePoints.length <= maximum)
     return singleLine;
   return `${codePoints.slice(0, maximum - 1).join("")}…`;
 }
 function slackText(value, maximum) {
-  return compact(value, maximum).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/@/g, "@​").replace(/\*/g, "∗").replace(/_/g, "＿").replace(/~/g, "∼").replace(/`/g, "ˋ");
+  return compact2(value, maximum).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/@/g, "@​").replace(/\*/g, "∗").replace(/_/g, "＿").replace(/~/g, "∼").replace(/`/g, "ˋ");
 }
 function boundedSlackText(value) {
   if (Buffer.byteLength(value, "utf8") <= MAX_SLACK_TEXT_BYTES)
@@ -14320,8 +14831,8 @@ function partitionFindings(report) {
     const tierDifference = Number(isTextMatch(left)) - Number(isTextMatch(right));
     if (tierDifference !== 0)
       return tierDifference;
-    const leftDays = left.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
-    const rightDays = right.daysUntilShutdown ?? Number.POSITIVE_INFINITY;
+    const leftDays = earliestLifecycleDays(left) ?? Number.POSITIVE_INFINITY;
+    const rightDays = earliestLifecycleDays(right) ?? Number.POSITIVE_INFINITY;
     if (leftDays !== rightDays)
       return leftDays - rightDays;
     const platformDifference = compareText7(left.servingPlatform, right.servingPlatform);
@@ -14332,17 +14843,20 @@ function partitionFindings(report) {
     withheld: notifiable.filter((finding) => PROTECTED_SCOPES2.has(finding.scope))
   };
 }
+function dateText(label, date, days) {
+  if (days === null || days === undefined || !Number.isSafeInteger(days)) {
+    return `${label} ${date}`;
+  }
+  if (days < 0)
+    return `${label} ${date} (${Math.abs(days)}d overdue)`;
+  if (days === 0)
+    return `${label} ${date} (today)`;
+  return `${label} ${date} (${days}d)`;
+}
 function deadlineText(finding) {
   if (finding.shutdownDate === undefined)
     return "shutdown date not announced";
-  const days = finding.daysUntilShutdown;
-  if (days === null || !Number.isSafeInteger(days))
-    return `shutdown ${finding.shutdownDate}`;
-  if (days < 0)
-    return `shutdown ${finding.shutdownDate} (${Math.abs(days)}d overdue)`;
-  if (days === 0)
-    return `shutdown ${finding.shutdownDate} (today)`;
-  return `shutdown ${finding.shutdownDate} (${days}d)`;
+  return dateText("shutdown", finding.shutdownDate, finding.daysUntilShutdown);
 }
 function safeLink(candidate) {
   if (candidate === undefined)
@@ -14374,7 +14888,11 @@ function findingLabel(finding) {
   return isTextMatch(finding) ? "ADVISORY (text match)" : "ADVISORY";
 }
 function findingLine(finding) {
-  const qualifiers = [deadlineText(finding)];
+  const qualifiers = [];
+  if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
+    qualifiers.push(dateText("deprecation", finding.deprecationDate, finding.daysUntilDeprecation));
+  }
+  qualifiers.push(deadlineText(finding));
   if (finding.delta !== undefined && finding.delta !== "unchanged") {
     qualifiers.push(finding.delta);
   }
@@ -14383,7 +14901,7 @@ function findingLine(finding) {
   const replacement = replacementText(finding);
   if (replacement !== null)
     qualifiers.push(replacement);
-  const line = `• *${findingLabel(finding)}* ${slackText(finding.servingPlatform, 80)} / ${slackText(finding.modelId, 180)} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;
+  const line = `• *${findingLabel(finding)}* ${slackText(servingPlatformLabel(finding), 160)} / ${slackText(finding.modelId, 180)} — ${qualifiers.map((value) => slackText(value, 100)).join(" · ")}`;
   const source = safeLink(finding.sourceUrls[0]);
   return source === null ? line : `${line} · ${slackLink(source, "source")}`;
 }
@@ -14408,14 +14926,14 @@ function workflowRunUrl() {
   return safeLink(`${origin}/${repository}/actions/runs/${runId}`);
 }
 function reportFileHint(path) {
-  const normalized = compact(path, 1024);
+  const normalized = compact2(path, 1024);
   if (normalized === "")
     return null;
   const components = normalized.split(/[\\/]/);
   const basename = components.at(-1)?.trim();
   return basename ? slackText(basename, 180) : null;
 }
-function resultIcon(report) {
+function resultIcon2(report) {
   if (report.result === "blocking" || report.result === "unknown")
     return "❌";
   if (report.result === "advisory" || report.scanStatus === "partial")
@@ -14427,7 +14945,7 @@ function renderSlackSnapshot(report) {
   const { listed, withheld } = partitionFindings(report);
   const externalSources = report.evidenceSources.filter((source) => source.kind !== "repository");
   const lines = [
-    `${resultIcon(report)} *AI model lifecycle snapshot*`,
+    `${resultIcon2(report)} *AI model lifecycle snapshot*`,
     `*Result:* ${report.result} · *Scan:* ${report.scanStatus} · *Evidence:* ${report.evidenceHealth}`,
     `*Counts:* ${report.counts.blocking} blocking · ${report.counts.advisory} advisory · ${report.counts.unresolved} unresolved`
   ];
@@ -14501,29 +15019,6 @@ async function deliverSlackNotification(options) {
 // src/action/publish.ts
 var import_node_fs3 = require("node:fs");
 var import_node_path2 = require("node:path");
-
-// src/shared/text.ts
-var BIDI_CONTROL_PATTERN2 = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-var CONTROL_OR_WHITESPACE_PATTERN = /[\u0000-\u001f\u007f-\u009f\s]+/g;
-function compact2(value, maximum) {
-  if (!Number.isSafeInteger(maximum) || maximum < 1) {
-    throw new Error("Text compaction maximum must be a positive safe integer.");
-  }
-  const singleLine = value.replace(BIDI_CONTROL_PATTERN2, "").replace(CONTROL_OR_WHITESPACE_PATTERN, " ").trim();
-  const codePoints = [...singleLine];
-  if (codePoints.length <= maximum)
-    return singleLine;
-  return `${codePoints.slice(0, maximum - 1).join("")}…`;
-}
-function resultIcon2(result, scanStatus) {
-  if (result === "blocking" || result === "unknown")
-    return "❌";
-  if (result === "advisory" || scanStatus === "partial")
-    return "⚠️";
-  return "✅";
-}
-
-// src/action/publish.ts
 var MAX_DETAIL_OUTPUT_BYTES = 120 * 1024;
 var MAX_TOTAL_OUTPUT_BYTES = 700 * 1024;
 var MAX_REPORT_BYTES = 25 * 1024 * 1024;
@@ -14532,7 +15027,7 @@ function escapeHtml(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/#/g, "&#35;").replace(/\\/g, "&#92;").replace(/\|/g, "&#124;").replace(/`/g, "&#96;").replace(/\[/g, "&#91;").replace(/\]/g, "&#93;").replace(/!/g, "&#33;").replace(/\(/g, "&#40;").replace(/\)/g, "&#41;").replace(/\*/g, "&#42;").replace(/_/g, "&#95;").replace(/~/g, "&#126;").replace(/@/g, "&#64;").replace(/:/g, "&#58;").replace(/\./g, "&#46;").replace(/[\r\n]+/g, "<br>");
 }
 function resultIcon3(report) {
-  return resultIcon2(report.result, report.scanStatus);
+  return resultIcon(report.result, report.scanStatus);
 }
 function deliveryLine(report, options = {}) {
   if (options.notificationPending) {
@@ -14543,20 +15038,25 @@ function deliveryLine(report, options = {}) {
   if (report.notificationStatus === "sent")
     return "Delivery: GitHub Actions summary + Slack snapshot";
   if (report.notificationStatus === "failed") {
-    return `Delivery: GitHub Actions summary; Slack failed (${escapeHtml(compact2(report.notificationReason, 300))})`;
+    return `Delivery: GitHub Actions summary; Slack failed (${escapeHtml(compact(report.notificationReason, 300))})`;
   }
-  return `Delivery: GitHub Actions summary; Slack skipped (${escapeHtml(compact2(report.notificationReason, 300))})`;
+  return `Delivery: GitHub Actions summary; Slack skipped (${escapeHtml(compact(report.notificationReason, 300))})`;
+}
+function deadlineCell(finding) {
+  if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
+    return `deprecation ${escapeHtml(finding.deprecationDate)} (${finding.daysUntilDeprecation ?? "?"}d)`;
+  }
+  return finding.shutdownDate === undefined ? "Not announced" : `shutdown ${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
 }
 function findingRow(finding) {
-  const deadline = finding.shutdownDate === undefined ? "Not announced" : `${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
   const delta = finding.delta === undefined ? "—" : finding.delta;
-  return `| <code>${escapeHtml(compact2(finding.modelId, 160))}</code> | ${escapeHtml(finding.servingPlatform)} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadline} |`;
+  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadlineCell(finding)} |`;
 }
 function renderSummary(report, options = {}) {
   const actionable = report.lifecycleFindings.filter((finding) => finding.outcome === "breach" || finding.outcome === "warning");
   const visibleSources = report.evidenceSources.slice(0, 20);
   const hiddenSourceCount = report.evidenceSources.length - visibleSources.length;
-  const sourceText = report.evidenceSources.length === 1 ? "repository only" : `${visibleSources.map((source) => `${compact2(source.id, 180)} (${source.kind}, ${source.health})`).join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
+  const sourceText = report.evidenceSources.length === 1 ? "repository only" : `${visibleSources.map((source) => `${compact(source.id, 180)} (${source.kind}, ${source.health})`).join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
   const lines = [
     "## AI model lifecycle",
     "",
@@ -14574,7 +15074,7 @@ function renderSummary(report, options = {}) {
       lines.push("No runtime or control-plane evidence source was supplied; those systems were not assessed.", "");
     }
   } else {
-    lines.push("### Actionable lifecycle findings", "", "| Model | Serving platform | Outcome | Change | Shutdown |", "| --- | --- | --- | --- | --- |", ...actionable.slice(0, 100).map(findingRow), "");
+    lines.push("### Actionable lifecycle findings", "", "| Model | Serving platform | Outcome | Change | Next lifecycle date |", "| --- | --- | --- | --- | --- |", ...actionable.slice(0, 100).map(findingRow), "");
     if (actionable.length > 100) {
       lines.push(`${actionable.length - 100} additional finding(s) are in the local JSON report.`, "");
     }
@@ -14582,30 +15082,32 @@ function renderSummary(report, options = {}) {
   if (report.unresolvedReferences.length > 0) {
     lines.push("### Conditional and unresolved evidence", "", ...report.unresolvedReferences.slice(0, 50).map((fact) => {
       const location = fact.locations[0];
-      return `- <code>${escapeHtml(compact2(fact.rawValue, 180))}</code> — ${escapeHtml(compact2(fact.detectorRuleId, 240))} · ${fact.modelResolution}/${fact.platformResolution}${location === undefined ? "" : ` · <code>${escapeHtml(compact2(location.path, 300))}</code>`}`;
+      return `- <code>${escapeHtml(compact(fact.rawValue, 180))}</code> — ${escapeHtml(compact(fact.detectorRuleId, 240))} · ${fact.modelResolution}/${fact.platformResolution}${location === undefined ? "" : ` · <code>${escapeHtml(compact(location.path, 300))}</code>`}`;
     }), "");
   }
   const external = report.evidenceSources.filter((source) => source.kind !== "repository");
   if (external.length > 0) {
-    lines.push("### External evidence health", "", ...external.slice(0, 50).map((source) => `- ${escapeHtml(compact2(source.id, 180))}: **${source.health}**`), ...external.length > 50 ? [`- ${external.length - 50} additional source(s) are in the JSON report.`] : [], "");
+    lines.push("### External evidence health", "", ...external.slice(0, 50).map((source) => `- ${escapeHtml(compact(source.id, 180))}: **${source.health}**`), ...external.length > 50 ? [`- ${external.length - 50} additional source(s) are in the JSON report.`] : [], "");
   }
   if (report.policyDiff.length > 0) {
-    lines.push("### Policy and evidence changes", "", ...report.policyDiff.slice(0, 100).map((change) => `- ${escapeHtml(compact2(change, 500))}`), "");
+    lines.push("### Policy and evidence changes", "", ...report.policyDiff.slice(0, 100).map((change) => `- ${escapeHtml(compact(change, 500))}`), "");
   }
   const suppressed = report.lifecycleFindings.filter((finding) => finding.suppressedBy !== undefined);
   if (suppressed.length > 0) {
-    lines.push("### Active suppressions", "", ...suppressed.slice(0, 100).map((finding) => `- <code>${escapeHtml(compact2(finding.modelId, 160))}</code> on ${escapeHtml(compact2(finding.servingPlatform, 80))} — <code>${escapeHtml(compact2(finding.suppressedBy, 160))}</code>`), ...suppressed.length > 100 ? [`- ${suppressed.length - 100} additional suppressed finding(s) are in the JSON report.`] : [], "");
+    lines.push("### Active suppressions", "", ...suppressed.slice(0, 100).map((finding) => `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(compact(servingPlatformLabel(finding), 300))} — <code>${escapeHtml(compact(finding.suppressedBy, 160))}</code>`), ...suppressed.length > 100 ? [`- ${suppressed.length - 100} additional suppressed finding(s) are in the JSON report.`] : [], "");
   }
   if (report.diagnostics.length > 0) {
-    lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...report.diagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact2(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact2(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact2(diagnostic.message, 800))}`), "", "</details>", "");
+    lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...report.diagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact(diagnostic.message, 800))}`), "", "</details>", "");
   }
-  lines.push(`Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code>`, `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact2(report.reportPath, 500))}</code>`, "");
+  const feedFreshness = report.feed.generatedAt === "" || report.feed.ageDays === null ? "unavailable" : `${escapeHtml(report.feed.generatedAt)} (${report.feed.ageDays}d old)`;
+  lines.push(`Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code> · generated ${feedFreshness}`, `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact(report.reportPath, 500))}</code>`, "");
   return lines.join(`
 `);
 }
 function annotationText(finding) {
   const deadline = finding.shutdownDate === undefined ? "shutdown date not announced" : `shutdown ${finding.shutdownDate} (${finding.daysUntilShutdown ?? "?"} day(s))`;
-  return `${finding.modelId} on ${finding.servingPlatform}: ${deadline}. ${finding.reasons.join(" ")}`;
+  const deprecation = deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined ? `deprecation ${finding.deprecationDate} (${finding.daysUntilDeprecation ?? "?"} day(s)), ` : "";
+  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${deprecation}${deadline}. ${finding.reasons.join(" ")}`;
 }
 function publishAnnotations(report, log = console.log) {
   const actionable = report.lifecycleFindings.filter((finding) => (finding.outcome === "breach" || finding.outcome === "warning") && finding.delta !== "unchanged" && finding.delta !== "resolved");
@@ -14615,9 +15117,9 @@ function publishAnnotations(report, log = console.log) {
       break;
     const location = finding.locations[0];
     if (location === undefined || Buffer.byteLength(location.path, "utf8") > 1024) {
-      emitCommand(finding.outcome === "breach" ? "error" : "warning", compact2(annotationText(finding), 2000), log);
+      emitCommand(finding.outcome === "breach" ? "error" : "warning", compact(annotationText(finding), 2000), log);
     } else {
-      emitAnnotation(finding.outcome === "breach" ? "error" : "warning", compact2(annotationText(finding), 2000), {
+      emitAnnotation(finding.outcome === "breach" ? "error" : "warning", compact(annotationText(finding), 2000), {
         title: "AI model lifecycle",
         file: location.path,
         line: location.line,
@@ -14687,6 +15189,8 @@ function publishCoreOutputs(report, environment) {
     "normalized-feed-sha256": report.feed.normalizedFeedSha256,
     "active-records-sha256": report.feed.activeRecordsSha256,
     "feed-adapter-manifest-sha256": report.feed.feedAdapterManifestSha256,
+    "feed-generated-at": report.feed.generatedAt,
+    "feed-age-days": report.feed.ageDays === null ? "" : String(report.feed.ageDays),
     "detector-manifest-sha256": report.detectorManifestSha256,
     "evidence-fingerprint": evidenceFingerprint,
     "finding-fingerprint": findingFingerprint2,
@@ -14727,7 +15231,7 @@ function publishNotificationSummary(report, environment) {
   appendSummary(environment.GITHUB_STEP_SUMMARY, [
     "## Notification delivery",
     "",
-    `Slack: **${report.notificationStatus}** · ${escapeHtml(compact2(report.notificationReason, 800))}`,
+    `Slack: **${report.notificationStatus}** · ${escapeHtml(compact(report.notificationReason, 800))}`,
     ""
   ].join(`
 `));
@@ -15233,6 +15737,7 @@ var DEFAULT_INPUTS = {
   warnWithinDays: null,
   failWithinDays: null,
   allowPartial: null,
+  maxFeedAgeDays: DEFAULT_MAX_FEED_AGE_DAYS,
   notificationFailureMode: "fail"
 };
 
@@ -15246,7 +15751,7 @@ class ActionRunError extends Error {
 }
 function safeMessage(error) {
   const message = error instanceof Error ? error.message : String(error);
-  return compact2(message, 2000);
+  return compact(message, 2000);
 }
 function reportPath(environment2, requested) {
   if (requested !== undefined)
@@ -15280,11 +15785,33 @@ function unavailableFeed() {
     sourceFeedSha256: UNAVAILABLE_SHA256,
     normalizedFeedSha256: UNAVAILABLE_SHA256,
     activeRecordsSha256: UNAVAILABLE_SHA256,
-    feedAdapterManifestSha256: UNAVAILABLE_SHA256
+    feedAdapterManifestSha256: UNAVAILABLE_SHA256,
+    generatedAt: "",
+    ageDays: null
   };
 }
-function feedDiagnostics(feed) {
-  return feed.index.diagnostics.map((diagnostic) => {
+function feedFreshness(feed, maxAgeDays, nowMs) {
+  const generatedAt = feed.index.envelope.generatedAt;
+  const ageDays = feedAgeInDays(generatedAt, nowMs);
+  return {
+    generatedAt,
+    ageDays,
+    maxAgeDays,
+    stale: maxAgeDays !== null && ageDays > maxAgeDays
+  };
+}
+function feedIdentity(feed, freshness) {
+  return { ...feed.digests, generatedAt: freshness.generatedAt, ageDays: freshness.ageDays };
+}
+function feedDiagnostics(feed, freshness) {
+  const staleness = freshness.stale ? [
+    {
+      code: "feed-stale",
+      message: `The upstream lifecycle feed was generated at ${freshness.generatedAt}, which is older than the configured max-feed-age-days horizon of ${String(freshness.maxAgeDays)} day(s). A feed that stopped updating reports a permanent all-clear, so lifecycle coverage is not trustworthy.`,
+      severity: "partial"
+    }
+  ] : [];
+  const upstream = feed.index.diagnostics.map((diagnostic) => {
     if (diagnostic.kind === "feed-conflict") {
       return {
         code: diagnostic.kind,
@@ -15301,6 +15828,7 @@ function feedDiagnostics(feed) {
       severity: "partial"
     };
   });
+  return [...upstream, ...staleness];
 }
 function applyFeedCoverage(detection, feed) {
   if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change")) {
@@ -15308,10 +15836,20 @@ function applyFeedCoverage(detection, feed) {
   }
   return detection.scanStatus === "partial" ? detection : { ...detection, scanStatus: "partial" };
 }
-function reportEvidenceSources(evaluation, inspections, effectiveDocuments) {
+function applyFeedFreshnessCoverage(scanStatus, freshness) {
+  return freshness.stale ? "partial" : scanStatus;
+}
+function reportEvidenceSources(evaluation, inspections, policy, effectiveDocuments) {
   const result = [
     { id: "repository", kind: "repository", health: "current" }
   ];
+  if (policy.servingPlatforms.length > 0) {
+    result.push({
+      id: `declared-serving-platforms: ${policy.servingPlatforms.join(", ")}`,
+      kind: "repository",
+      health: "current"
+    });
+  }
   const manual = evaluation.evidence.filter((fact) => fact.origin === "manual-claim");
   if (manual.length > 0) {
     result.push({
@@ -15412,7 +15950,7 @@ function diagnosticTargetEvaluation(input) {
         ...input.extraDiagnostics,
         ...input.detection.diagnostics,
         ...claimDiagnostics,
-        ...feedDiagnostics(input.feed)
+        ...feedDiagnostics(input.feed, input.freshness)
       ]
     }),
     policy
@@ -15425,6 +15963,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
   let inputs = DEFAULT_INPUTS;
   let resolvedEvent;
   let feed;
+  let freshness;
   try {
     const rawWebhook = getInput("slack-webhook", environment2);
     if (rawWebhook !== undefined && rawWebhook !== "")
@@ -15438,6 +15977,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
     });
     stage = "feed";
     feed = await (dependencies.loadFeed?.() ?? loadLifecycleFeed());
+    freshness = feedFreshness(feed, inputs.maxFeedAgeDays, evaluatedAtMs);
     const readSnapshot = dependencies.readSnapshot ?? ((path, treeish) => readGitTreeSnapshot({ repositoryPath: path, treeish }));
     const detector = dependencies.detect ?? detectSnapshot;
     const policyInspector = dependencies.inspectPolicy ?? inspectSnapshotPolicy;
@@ -15458,6 +15998,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
         detection: targetDetection,
         claims: targetClaims2,
         feed,
+        freshness,
         inputs,
         now: evaluatedAtMs,
         extraDiagnostics: resolvedEvent.diagnostics
@@ -15473,8 +16014,8 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           evaluation: diagnostic.evaluation,
           diagnostics: diagnostic.evaluation.diagnostics,
           policyDiff: targetClaims2.policy.valid ? [] : ["Target policy/configuration is invalid and non-authoritative."],
-          feed: feed.digests,
-          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+          feed: feedIdentity(feed, freshness),
+          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
           reportPath: localReportPath
         }),
         policy: diagnostic.policy,
@@ -15492,6 +16033,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
         detection: targetDetection,
         claims: targetClaims2,
         feed,
+        freshness,
         inputs,
         now: evaluatedAtMs,
         extraDiagnostics: resolvedEvent.diagnostics
@@ -15509,29 +16051,30 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
             diagnostics: [
               ...targetClaims2.diagnostics,
               ...targetDetection.diagnostics,
-              ...feedDiagnostics(feed)
+              ...feedDiagnostics(feed, freshness)
             ],
-            feed: feed.digests,
-            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+            feed: feedIdentity(feed, freshness),
+            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
             reportPath: localReportPath
           }),
           policy: diagnostic.policy,
           inputs
         };
       }
-      const exitReason2 = decisionFor(diagnostic.evaluation.result, diagnostic.evaluation.scanStatus, diagnostic.policy);
+      const scanStatus2 = applyFeedFreshnessCoverage(diagnostic.evaluation.scanStatus, freshness);
+      const exitReason2 = decisionFor(diagnostic.evaluation.result, scanStatus2, diagnostic.policy);
       return {
         report: finishReport({
           evaluatedAt,
           result: diagnostic.evaluation.result,
-          scanStatus: diagnostic.evaluation.scanStatus,
+          scanStatus: scanStatus2,
           comparisonStatus: "not-applicable",
           exitReason: exitReason2,
           event: reportEvent(resolvedEvent),
           evaluation: diagnostic.evaluation,
           diagnostics: diagnostic.evaluation.diagnostics,
-          feed: feed.digests,
-          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+          feed: feedIdentity(feed, freshness),
+          evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
           reportPath: localReportPath
         }),
         policy: diagnostic.policy,
@@ -15565,6 +16108,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           detection: targetDetection,
           claims: targetClaims2,
           feed,
+          freshness,
           inputs,
           now: evaluatedAtMs,
           extraDiagnostics: unavailableDiagnostics
@@ -15579,8 +16123,8 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
             event: reportEvent(resolvedEvent),
             evaluation: diagnostic.evaluation,
             diagnostics: diagnostic.evaluation.diagnostics,
-            feed: feed.digests,
-            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
+            feed: feedIdentity(feed, freshness),
+            evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2], diagnostic.policy),
             reportPath: localReportPath
           }),
           policy: diagnostic.policy,
@@ -15621,16 +16165,17 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
       ...resolvedEvent.diagnostics,
       ...comparison.evaluation.diagnostics,
       ...comparison.baseline.diagnostics,
-      ...feedDiagnostics(feed)
+      ...feedDiagnostics(feed, freshness)
     ];
-    const exitReason = decisionFor(comparison.result, comparison.scanStatus, comparison.policy);
+    const scanStatus = applyFeedFreshnessCoverage(comparison.scanStatus, freshness);
+    const exitReason = decisionFor(comparison.result, scanStatus, comparison.policy);
     return {
       report: finishReport({
         evaluatedAt,
         result: comparison.result,
         baselineResult: comparison.baselineResult,
         targetResult: comparison.targetResult,
-        scanStatus: comparison.scanStatus,
+        scanStatus,
         baselineScanStatus: comparison.baselineScanStatus,
         targetScanStatus: comparison.targetScanStatus,
         comparisonStatus: comparison.comparisonStatus,
@@ -15639,8 +16184,8 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
         evaluation: comparison.evaluation,
         diagnostics,
         policyDiff: comparison.policyDiff,
-        feed: feed.digests,
-        evidenceSources: reportEvidenceSources(comparison.evaluation, [targetClaims], monotonicEvidenceSourceDocuments(baseClaims, targetClaims)),
+        feed: feedIdentity(feed, freshness),
+        evidenceSources: reportEvidenceSources(comparison.evaluation, [targetClaims], comparison.policy, monotonicEvidenceSourceDocuments(baseClaims, targetClaims)),
         reportPath: localReportPath
       }),
       policy: comparison.policy,
@@ -15655,7 +16200,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
       stage,
       ...resolvedEvent === undefined ? {} : { event: reportEvent(resolvedEvent) },
       ...resolvedEvent === undefined ? {} : { comparisonStatus: resolvedEvent.comparisonStatus },
-      ...feed === undefined ? {} : { feed: feed.digests },
+      ...feed === undefined || freshness === undefined ? {} : { feed: feedIdentity(feed, freshness) },
       inputs,
       ...resolvedEvent === undefined ? {} : { diagnostics: resolvedEvent.diagnostics }
     });

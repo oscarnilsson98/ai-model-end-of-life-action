@@ -107,13 +107,18 @@ export type LifecycleFinding = {
   semanticKey: string;
   evidenceIds: string[];
   modelId: string;
+  /** Representative platform: the one whose lifecycle record supplied the reported dates. */
   servingPlatform: string;
+  /** Every candidate platform this finding covers; more than one means the platform is unproven. */
+  servingPlatforms: string[];
   lifecycleMatch: LifecycleMatch;
   lifecycleStatus: "deprecated" | "shutdown-scheduled" | "retired";
   announcementDate?: string;
   deprecationDate?: string;
   shutdownDate?: string;
   daysUntilShutdown: number | null;
+  /** Present exactly when `deprecationDate` is. Signed, like `daysUntilShutdown`. */
+  daysUntilDeprecation?: number;
   replacementModels: Array<{ modelId: string; servingPlatform?: string }>;
   sourceUrls: string[];
   feedConflict: boolean;
@@ -139,6 +144,8 @@ export type Policy = {
   warnWithinDays: number;
   failWithinDays: number | null;
   allowPartial: boolean;
+  /** Canonical platform slugs this repository declares it serves models from; empty means undeclared. */
+  servingPlatforms: string[];
   usageEvidenceFiles: string[];
   assertions: AssertionClaim[];
   resolutions: ResolutionRule[];
@@ -269,6 +276,10 @@ export type FeedIdentity = {
   normalizedFeedSha256: string;
   activeRecordsSha256: string;
   feedAdapterManifestSha256: string;
+  /** Upstream production instant, or empty when the feed could not be loaded. */
+  generatedAt: string;
+  /** Whole days between `generatedAt` and evaluation; null when the feed is unavailable. */
+  ageDays: number | null;
 };
 
 export type AssessmentReport = {
@@ -310,6 +321,8 @@ export type ActionInputs = {
   warnWithinDays: number | null;
   failWithinDays: number | null;
   allowPartial: boolean | null;
+  /** Upstream-freshness horizon in days; null disables the staleness guard entirely. */
+  maxFeedAgeDays: number | null;
   slackWebhook?: string;
   notificationFailureMode: "fail" | "warn";
 };

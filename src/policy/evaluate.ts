@@ -4,10 +4,13 @@ import {
   type IndexedModelPair,
   type V3FeedIndex,
 } from "../lifecycle/feed.ts";
-import { matchRepositoryPattern } from "./policy.ts";
+import { matchRepositoryPattern, POLICY_PATH } from "./policy.ts";
 import {
   canonicalSha256,
   combineEvidenceHealth,
+  compareOutcome,
+  daysUntilEarliestLifecycleDate,
+  earliestLifecycleDays,
   resultFromFindings,
   strongerOutcome,
 } from "../shared/status.ts";
@@ -269,6 +272,27 @@ function suppressionMatches(
   );
 }
 
+function dayPhrase(subject: string, days: number): string {
+  if (days < 0) return `${subject} was ${Math.abs(days)} UTC calendar day(s) ago`;
+  if (days === 0) return `${subject} is today`;
+  return `${subject} is ${days} UTC calendar day(s) away`;
+}
+
+function horizonReason(
+  daysUntilShutdown: number | null,
+  daysUntilDeprecation: number | null,
+): string {
+  if (daysUntilShutdown === null) {
+    return daysUntilDeprecation === null
+      ? "The joined lifecycle record has no published shutdown date."
+      : `The joined lifecycle record has no published shutdown date; ${dayPhrase("deprecation", daysUntilDeprecation)}.`;
+  }
+  if (daysUntilDeprecation === null || daysUntilDeprecation >= daysUntilShutdown) {
+    return `${dayPhrase("Shutdown", daysUntilShutdown)}.`;
+  }
+  return `${dayPhrase("Deprecation", daysUntilDeprecation)}; ${dayPhrase("shutdown", daysUntilShutdown)}.`;
+}
+
 function policyOutcome(input: {
   fact: EvidenceFact;
   pair: IndexedModelPair;
@@ -276,10 +300,19 @@ function policyOutcome(input: {
   policy: Policy;
   now: number;
   exactPlatform: boolean;
-}): { outcome: PolicyOutcome; daysUntilShutdown: number | null; reasons: string[] } {
+}): {
+  outcome: PolicyOutcome;
+  daysUntilShutdown: number | null;
+  daysUntilDeprecation: number | null;
+  reasons: string[];
+} {
   const { fact, pair, lifecycle, policy, exactPlatform } = input;
   const daysUntilShutdown =
     lifecycle.shutdownDate === null ? null : calendarDaysUntil(lifecycle.shutdownDate, input.now);
+  const daysUntilDeprecation =
+    lifecycle.deprecationDate === null
+      ? null
+      : calendarDaysUntil(lifecycle.deprecationDate, input.now);
   const reasons: string[] = [];
   const scopeEligible = fact.scope === "application" || fact.scope === "deployment";
   const protectedOrUnknown =
@@ -287,8 +320,12 @@ function policyOutcome(input: {
     fact.scope === "test" ||
     fact.scope === "example" ||
     fact.scope === "unknown";
+  const daysUntilLifecycle = daysUntilEarliestLifecycleDate(
+    daysUntilShutdown,
+    daysUntilDeprecation,
+  );
   const insideWarning =
-    daysUntilShutdown === null || daysUntilShutdown <= policy.warnWithinDays;
+    daysUntilLifecycle === null || daysUntilLifecycle <= policy.warnWithinDays;
   let outcome: PolicyOutcome = "none";
   if (insideWarning) {
     if (fact.kind === "lexical") {
@@ -300,11 +337,7 @@ function policyOutcome(input: {
       );
     } else if (scopeEligible || fact.origin !== "repository") {
       outcome = "warning";
-      reasons.push(
-        lifecycle.shutdownDate === null
-          ? "The joined lifecycle record has no published shutdown date."
-          : `Shutdown is ${daysUntilShutdown} UTC calendar day(s) away.`,
-      );
+      reasons.push(horizonReason(daysUntilShutdown, daysUntilDeprecation));
     } else if (protectedOrUnknown) {
       outcome = "notice";
       reasons.push("Evidence is outside an actionable application/deployment scope.");
@@ -317,6 +350,9 @@ function policyOutcome(input: {
     if (outcome === "notice" || outcome === "none") outcome = "warning";
     reasons.push("The feed has conflicting active lifecycle signatures for this exact pair.");
   }
+  // Enforcement deliberately stays keyed to the shutdown date. The warning horizon may
+  // open early on a deprecation, but failing a job is the irreversible direction and
+  // `failWithinDays` is contracted against the date the model stops being served.
   const breachEligible =
     policy.failWithinDays !== null &&
     daysUntilShutdown !== null &&
@@ -337,7 +373,7 @@ function policyOutcome(input: {
     outcome = "breach";
     reasons.push(`Definite evidence breaches failWithinDays=${policy.failWithinDays}.`);
   }
-  return { outcome, daysUntilShutdown, reasons };
+  return { outcome, daysUntilShutdown, daysUntilDeprecation, reasons };
 }
 
 function strongestScope(left: EvidenceScope, right: EvidenceScope): EvidenceScope {
@@ -407,12 +443,16 @@ function lifecycleFinding(
     evidenceIds: [fact.evidenceId],
     modelId: pair.modelId,
     servingPlatform: pair.servingPlatform,
+    servingPlatforms: [pair.servingPlatform],
     lifecycleMatch: "exact",
     lifecycleStatus: lifecycle.lifecycleStatus,
     ...(lifecycle.announcementDate === null ? {} : { announcementDate: lifecycle.announcementDate }),
     ...(lifecycle.deprecationDate === null ? {} : { deprecationDate: lifecycle.deprecationDate }),
     ...(lifecycle.shutdownDate === null ? {} : { shutdownDate: lifecycle.shutdownDate }),
     daysUntilShutdown: evaluated.daysUntilShutdown,
+    ...(evaluated.daysUntilDeprecation === null
+      ? {}
+      : { daysUntilDeprecation: evaluated.daysUntilDeprecation }),
     replacementModels: lifecycle.provenance.flatMap((entry) => [...entry.replacementModels]),
     sourceUrls: [...lifecycle.primarySourceUrls],
     feedConflict: pair.conflict,
@@ -423,6 +463,103 @@ function lifecycleFinding(
     confidence: fact.confidence,
     selectorKind: fact.selectorKind,
     locations: [...fact.locations],
+  };
+}
+
+type ReplacementModel = LifecycleFinding["replacementModels"][number];
+
+function mergeReplacementModels(
+  replacements: readonly ReplacementModel[],
+): ReplacementModel[] {
+  return [
+    ...new Map(
+      replacements.map((replacement) => [
+        JSON.stringify([replacement.servingPlatform ?? null, replacement.modelId]),
+        replacement,
+      ]),
+    ).values(),
+  ].sort((left, right) =>
+    compareText(left.servingPlatform ?? "", right.servingPlatform ?? "") ||
+    compareText(left.modelId, right.modelId)
+  );
+}
+
+/**
+ * A serving platform the evidence itself established. A lexical hit never
+ * establishes one: its platform is inferred from the feed listing exactly one
+ * platform for that model ID, which is a property of the feed, not of the code.
+ */
+function platformIsProven(fact: EvidenceFact): boolean {
+  return fact.platformResolution === "resolved" && fact.kind !== "lexical";
+}
+
+/**
+ * Strongest outcome first, then the nearest deadline. Urgency is measured by the
+ * date the warning horizon measured — the earliest of deprecation and shutdown —
+ * so a candidate already past its deprecation date is not buried under one whose
+ * shutdown merely happens to be sooner. A record with no published shutdown date
+ * has no measurable end and orders last.
+ */
+function compareAmbiguousCandidate(left: LifecycleFinding, right: LifecycleFinding): number {
+  const leftDays = earliestLifecycleDays(left);
+  const rightDays = earliestLifecycleDays(right);
+  return (
+    compareOutcome(right.outcome, left.outcome) ||
+    (leftDays === null ? 1 : 0) - (rightDays === null ? 1 : 0) ||
+    (leftDays ?? 0) - (rightDays ?? 0) ||
+    compareText(left.servingPlatform, right.servingPlatform) ||
+    compareText(left.semanticKey, right.semanticKey)
+  );
+}
+
+/**
+ * One unproven-platform occurrence is one risk, not one risk per feed provider
+ * that happens to publish the same model ID. Collapse the candidates into a
+ * single finding that reports every candidate platform and the most severe of
+ * their lifecycle records, so alert volume follows evidence, not feed breadth.
+ */
+function collapseAmbiguousCandidates(
+  candidates: readonly LifecycleFinding[],
+  restrictedTo: readonly string[],
+): LifecycleFinding {
+  const ordered = [...candidates].sort(compareAmbiguousCandidate);
+  const representative = ordered[0] as LifecycleFinding;
+  const servingPlatforms = [
+    ...new Set(ordered.map((candidate) => candidate.servingPlatform)),
+  ].sort(compareText);
+  const semanticKey = JSON.stringify([
+    "ambiguous-platform",
+    servingPlatforms,
+    representative.semanticKey,
+  ]);
+  const reasons = [
+    ...representative.reasons,
+    servingPlatforms.length === 1
+      ? "Serving platform is ambiguous; this match cannot block."
+      : `Serving platform is ambiguous across ${servingPlatforms.join(
+          ", ",
+        )}; the most urgent of their lifecycle records is reported and this match cannot block.`,
+    ...(restrictedTo.length === 0
+      ? []
+      : [`Matching was restricted to the declared serving platform(s): ${restrictedTo.join(", ")}.`]),
+  ];
+  return {
+    ...representative,
+    findingId: canonicalSha256("ai-model-eol/lifecycle-finding/v3", semanticKey),
+    semanticKey,
+    servingPlatforms,
+    // The representative already holds the strongest outcome; recombining keeps
+    // severity independent of the ordering rule.
+    outcome: ordered.reduce<PolicyOutcome>(
+      (strongest, candidate) => strongerOutcome(strongest, candidate.outcome),
+      "none",
+    ),
+    feedConflict: ordered.some((candidate) => candidate.feedConflict),
+    sourceUrls: [...new Set(ordered.flatMap((candidate) => candidate.sourceUrls))].sort(compareText),
+    replacementModels: mergeReplacementModels(
+      ordered.flatMap((candidate) => candidate.replacementModels),
+    ),
+    reasons,
   };
 }
 
@@ -437,16 +574,24 @@ function joinFact(fact: EvidenceFact, feed: V3FeedIndex, policy: Policy, now: nu
   } else if (fact.platformResolution === "ambiguous") {
     pairs = feed.modelPairs.filter((pair) => pair.modelId === fact.modelId);
   }
+  // A declared platform set narrows only the platforms the evidence left open,
+  // so a declaration can never hide a finding that could have blocked.
+  const restrictedTo =
+    policy.servingPlatforms.length > 0 && !platformIsProven(fact) ? policy.servingPlatforms : [];
+  if (restrictedTo.length > 0) {
+    const declared = new Set(restrictedTo);
+    pairs = pairs.filter((pair) => declared.has(pair.servingPlatform));
+  }
   const findings: LifecycleFinding[] = [];
   for (const pair of pairs) {
     for (const lifecycle of pair.activeLifecycles) {
       const finding = lifecycleFinding(fact, pair, lifecycle, policy, now, exactPlatform);
       if (!exactPlatform && finding.outcome === "breach") finding.outcome = "warning";
-      if (!exactPlatform) finding.reasons.push("Serving platform is ambiguous; this match cannot block.");
       findings.push(finding);
     }
   }
-  return findings;
+  if (exactPlatform || findings.length === 0) return findings;
+  return [collapseAmbiguousCandidates(findings, restrictedTo)];
 }
 
 function aggregateFindings(findings: readonly LifecycleFinding[]): LifecycleFinding[] {
@@ -460,6 +605,7 @@ function aggregateFindings(findings: readonly LifecycleFinding[]): LifecycleFind
       byKey.set(finding.semanticKey, {
         ...finding,
         evidenceIds: [...finding.evidenceIds],
+        servingPlatforms: [...finding.servingPlatforms],
         replacementModels: [...finding.replacementModels],
         sourceUrls: [...finding.sourceUrls],
         reasons: [...finding.reasons],
@@ -468,31 +614,29 @@ function aggregateFindings(findings: readonly LifecycleFinding[]): LifecycleFind
       continue;
     }
     existing.outcome = strongerOutcome(existing.outcome, finding.outcome);
+    existing.servingPlatforms = [
+      ...new Set([...existing.servingPlatforms, ...finding.servingPlatforms]),
+    ].sort(compareText);
     existing.evidenceIds = [...new Set([...existing.evidenceIds, ...finding.evidenceIds])].sort(compareText);
     existing.sourceUrls = [...new Set([...existing.sourceUrls, ...finding.sourceUrls])].sort(compareText);
     existing.reasons = [...new Set([...existing.reasons, ...finding.reasons])].sort(compareText);
     existing.locations = [...existing.locations, ...finding.locations]
       .sort(compareLocation)
       .slice(0, 20);
-    existing.replacementModels = [
-      ...new Map(
-        [...existing.replacementModels, ...finding.replacementModels].map((replacement) => [
-          JSON.stringify([replacement.servingPlatform ?? null, replacement.modelId]),
-          replacement,
-        ]),
-      ).values(),
-    ].sort((left, right) =>
-      compareText(left.servingPlatform ?? "", right.servingPlatform ?? "") ||
-      compareText(left.modelId, right.modelId)
-    );
+    existing.replacementModels = mergeReplacementModels([
+      ...existing.replacementModels,
+      ...finding.replacementModels,
+    ]);
     existing.scope = strongestScope(existing.scope, finding.scope);
     existing.environment = strongestEnvironment(existing.environment, finding.environment);
     existing.confidence = strongestConfidence(existing.confidence, finding.confidence);
     if (existing.suppressedBy !== finding.suppressedBy) delete existing.suppressedBy;
   }
   return [...byKey.values()].sort((left, right) => {
-    const daysLeft = left.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
-    const daysRight = right.daysUntilShutdown ?? Number.MAX_SAFE_INTEGER;
+    // Order by the deadline the horizon actually measures, so a model already past its
+    // deprecation date is not buried under one with a nearer shutdown.
+    const daysLeft = earliestLifecycleDays(left) ?? Number.MAX_SAFE_INTEGER;
+    const daysRight = earliestLifecycleDays(right) ?? Number.MAX_SAFE_INTEGER;
     return daysLeft - daysRight || compareText(left.semanticKey, right.semanticKey);
   });
 }
@@ -520,7 +664,11 @@ function applySuppressions(
         const fact = evidenceById.get(evidenceId);
         return (
           fact !== undefined &&
-          suppressionMatches(suppression, fact, finding.modelId, finding.servingPlatform)
+          // A collapsed finding covers several candidate platforms; a suppression
+          // naming any one of them still targets this finding.
+          finding.servingPlatforms.some((servingPlatform) =>
+            suppressionMatches(suppression, fact, finding.modelId, servingPlatform),
+          )
         );
       });
       if (matched) {
@@ -556,6 +704,16 @@ export function evaluateEvidence(input: {
   diagnostics?: readonly CoverageDiagnostic[];
 }): Evaluation {
   const diagnostics = [...(input.diagnostics ?? [])];
+  if (input.policy.servingPlatforms.length > 0) {
+    diagnostics.push({
+      code: "declared-serving-platforms",
+      message: `Lifecycle matching for lexical and platform-ambiguous evidence is restricted to the declared serving platform(s): ${input.policy.servingPlatforms.join(
+        ", ",
+      )}.`,
+      path: POLICY_PATH,
+      severity: "notice",
+    });
+  }
   const orderedEvidence = [...input.evidence].sort((left, right) =>
     compareText(left.evidenceId, right.evidenceId)
   );

@@ -97,6 +97,49 @@ export function chooseExitReason(...reasons: readonly ExitReason[]): ExitReason 
   return result;
 }
 
+/**
+ * Distance to the earliest published lifecycle transition, which is what the warning
+ * horizon measures. Some providers stop serving at the deprecation date rather than at
+ * the shutdown date, so a nearer deprecation opens the horizon early. A record with no
+ * published shutdown date has no measurable end and stays inside the horizon at any
+ * distance, which keeps undated deprecations advisory.
+ */
+export function daysUntilEarliestLifecycleDate(
+  daysUntilShutdown: number | null,
+  daysUntilDeprecation: number | null | undefined,
+): number | null {
+  if (daysUntilShutdown === null) return null;
+  return daysUntilDeprecation === null || daysUntilDeprecation === undefined
+    ? daysUntilShutdown
+    : Math.min(daysUntilDeprecation, daysUntilShutdown);
+}
+
+export function earliestLifecycleDays(
+  finding: Pick<LifecycleFinding, "daysUntilShutdown" | "daysUntilDeprecation">,
+): number | null {
+  return daysUntilEarliestLifecycleDate(
+    finding.daysUntilShutdown,
+    finding.daysUntilDeprecation,
+  );
+}
+
+/**
+ * Whether the deprecation is the date the horizon measured. Human-facing surfaces name
+ * that date, because a warning reported only against a distant shutdown reads as noise.
+ */
+export function deprecationLeadsHorizon(
+  finding: Pick<
+    LifecycleFinding,
+    "deprecationDate" | "daysUntilShutdown" | "daysUntilDeprecation"
+  >,
+): boolean {
+  if (finding.deprecationDate === undefined) return false;
+  return (
+    finding.daysUntilShutdown === null ||
+    (finding.daysUntilDeprecation ?? 0) < finding.daysUntilShutdown
+  );
+}
+
 export function resultFromFindings(
   findings: readonly Pick<LifecycleFinding, "outcome">[],
 ): Exclude<Result, "unknown"> {
