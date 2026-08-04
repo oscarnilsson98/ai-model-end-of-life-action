@@ -104,6 +104,8 @@ The action detects static model values in these supported integrations:
 
 Other tracked UTF-8 files are checked for exact eligible model IDs from the lifecycle feed. Those text-only matches, documentation, examples, tests, dynamic selectors, and ambiguous serving platforms can warn or appear as notices, but never block.
 
+The supported parsers do not accept every construct in the languages they cover; JSX and TSX element syntax is the most common gap. Such a file falls back to the same text-only matching an unsupported language gets, and a notice names it. Because the file is still assessed, `scan-status` stays `complete` — a repository is never pushed into partial coverage, and so into `allowPartial: true`, by a parser gap.
+
 Static evidence has limits. Remote databases, secrets, provider consoles, external deployment repositories, and runtime routers are outside it. A clean result means only that no actionable lifecycle risk was found in the evidence actually assessed. [Checked-in claims](#optional-runtime-only-claims) can represent known runtime-only facts; they do not prove complete coverage.
 
 The exact support matrix and stable rule IDs are published in [the detector contract](docs/v3-detector-contract.md).
@@ -147,6 +149,8 @@ A warning-only scheduled job finishes green, so it may not attract attention. A 
 To rely on GitHub's workflow-failure notifications instead, set `failWithinDays` and make sure the relevant evidence is established as a resolved deployment or as production application use, as described above.
 
 Slack is a snapshot, not a stateful alert subscription. Delivery is attempted only when the event name is exactly `schedule`, `workflow_dispatch`, or `push` and the selected target is a commit. Every other event — including `pull_request`, `merge_group`, `release`, and local or unknown events — is skipped, so untrusted changes cannot consume a webhook.
+
+The message names every blocking and advisory finding in application or deployment scope, with its deadline, the feed's first replacement model, and a link to the provider's deprecation page when the feed supplies one. A match found only in text — the fallback when a repository has no typed SDK call site — is named too and labelled `ADVISORY (text match)`, so an advisory run always says which models it is about. Findings in documentation, test, or example scope are reported as a count and stay in the job summary. The snapshot links back to the workflow run, so the summary, annotations, and any uploaded report are one click away.
 
 A delivery failure does not change `result` or `scan-status`. It changes `notification-status`, `exit-reason`, and, by default, the final step exit; set `notification-failure-mode: warn` to keep delivery best-effort.
 
