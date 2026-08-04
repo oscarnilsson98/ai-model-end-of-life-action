@@ -210,11 +210,25 @@ A finding is eligible for `blocking` only when all of the following hold:
 
 The v3.0 provider-alias registry is empty, so v3.0 blocking lifecycle joins are exact in practice.
 
-Advisory eligibility is intentionally broader: within the warning horizon, resolved or conditional semantic evidence in application/deployment scope is advisory even when environment is unknown; current repository-supplied claims are advisory unless they meet every blocking condition; and application/deployment lexical evidence may be advisory as defined above. Protected/unknown-scope lexical evidence and findings outside the warning horizon are notices only. Undated deprecations with joined evidence are advisory.
+Advisory eligibility is intentionally broader: within the warning horizon, resolved or conditional semantic evidence in application/deployment scope is advisory even when environment is unknown; current repository-supplied claims are advisory unless they meet every blocking condition; and application/deployment lexical evidence may be advisory as defined above. Protected/unknown-scope lexical evidence and findings outside the warning horizon are notices only. Undated deprecations with joined evidence are advisory, as are models already inside their published deprecation date — see [Lifecycle date precedence](#lifecycle-date-precedence).
 
 The default warning horizon is 180 UTC calendar days. Findings beyond the warning horizon remain in the bounded report but do not produce annotations unless policy says otherwise.
 
-The action captures one `evaluatedAt` UTC instant before evaluation and derives one UTC calendar date from it. Feed lifecycle dates are ISO `YYYY-MM-DD` dates. `daysUntilShutdown` is the signed calendar-day difference `shutdownDate - evaluatedDate`: shutdown today is `0`, a past shutdown is negative, and a shutdown exactly at the configured horizon is included. Base, target, summary, notification, and fingerprints use the same instant.
+### Lifecycle date precedence
+
+A feed record may publish an `announcementDate`, a `deprecationDate`, and a `shutdownDate`, and the feed contract requires them to be non-decreasing in that order. They are not interchangeable, and each has exactly one job:
+
+| Date | Meaning | Effect on outcome |
+| --- | --- | --- |
+| `announcementDate` | When the deprecation was made public | None. It is reported for provenance only. It is in the past for essentially every record, so measuring a horizon against it would make every joined finding actionable and the horizon meaningless. |
+| `deprecationDate` | When the provider stops supporting the model | **Opens the warning horizon.** Some providers stop serving here rather than at the shutdown date. |
+| `shutdownDate` | When the provider stops serving the model | Opens the warning horizon, and is the only date that opens the **failure** horizon. |
+
+The warning horizon therefore measures the **earliest published transition**: `min(deprecationDate, shutdownDate)`, which given the required ordering is `deprecationDate` whenever one is published. A model whose deprecation date has passed or is near is advisory even when its shutdown is hundreds of days out. A record with no published `shutdownDate` has no measurable end and stays inside the warning horizon at any distance, which is why undated deprecations with joined evidence are advisory.
+
+`failWithinDays` deliberately keeps measuring `shutdownDate` alone. Failing a job is the irreversible direction, and enforcement is contracted against the date the model actually stops being served. A deprecation inside the failure horizon warns; it does not block.
+
+The action captures one `evaluatedAt` UTC instant before evaluation and derives one UTC calendar date from it. Feed lifecycle dates are ISO `YYYY-MM-DD` dates. `daysUntilShutdown` is the signed calendar-day difference `shutdownDate - evaluatedDate`: shutdown today is `0`, a past shutdown is negative, and a shutdown exactly at the configured horizon is included. `daysUntilDeprecation` is the same signed difference against `deprecationDate` and is present in a finding exactly when `deprecationDate` is. Base, target, summary, notification, and fingerprints use the same instant.
 
 “Trusted” means authoritative for this action invocation: valid evidence or policy read from the base Git tree on a pull request/merge group, or from the evaluated target tree on a non-PR run. A target-only PR addition may contribute evidence because that can only strengthen its own result, but it never gains authority to suppress or weaken base policy. Trust does not mean that the repository-supplied claim was independently verified.
 
