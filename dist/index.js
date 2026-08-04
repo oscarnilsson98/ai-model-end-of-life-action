@@ -7298,6 +7298,14 @@ function isRfc3339UtcInstant(value) {
     return false;
   return isDateOnly(`${match[1]}-${match[2]}-${match[3]}`);
 }
+var MILLISECONDS_PER_DAY = 86400000;
+function feedAgeInDays(generatedAt, nowMs) {
+  const generatedMs = Date.parse(generatedAt);
+  if (!Number.isFinite(generatedMs)) {
+    throw new Error(`Cannot measure feed age from generatedAt ${JSON.stringify(generatedAt)}.`);
+  }
+  return Math.max(0, Math.floor((nowMs - generatedMs) / MILLISECONDS_PER_DAY));
+}
 function dateField(object, field, path) {
   const value = optionalText(object, field, path, 10);
   if (value !== undefined && !isDateOnly(value)) {
@@ -8117,6 +8125,7 @@ var DETECTOR_MANIFEST_SHA256 = canonicalSha256("ai-model-eol/detector-manifest/v
 
 // src/shared/limits.ts
 var MAX_POLICY_DAYS = 36500;
+var DEFAULT_MAX_FEED_AGE_DAYS = 30;
 
 // src/policy/policy.ts
 var POLICY_PATH = ".github/ai-model-lifecycle.yml";
@@ -13806,6 +13815,7 @@ function parseActionInputs(environment) {
   const rawWarn = getInput("warn-within-days", environment);
   const rawFail = getInput("fail-within-days", environment);
   const rawAllowPartial = getInput("allow-partial", environment);
+  const rawMaxFeedAge = getInput("max-feed-age-days", environment);
   const slackWebhook = getInput("slack-webhook", environment);
   const rawNotificationFailure = getInput("notification-failure-mode", environment);
   const warnWithinDays = parseOptionalInteger(rawWarn, "warn-within-days", {
@@ -13815,6 +13825,7 @@ function parseActionInputs(environment) {
     max: MAX_POLICY_DAYS
   });
   const allowPartial = rawAllowPartial === undefined || rawAllowPartial === "" ? null : parseBoolean(rawAllowPartial, "allow-partial", false);
+  const maxFeedAgeDays = rawMaxFeedAge === undefined ? DEFAULT_MAX_FEED_AGE_DAYS : parseOptionalInteger(rawMaxFeedAge, "max-feed-age-days", { max: MAX_POLICY_DAYS });
   const notificationFailureMode = rawNotificationFailure?.toLowerCase() || "fail";
   if (notificationFailureMode !== "fail" && notificationFailureMode !== "warn") {
     throw new Error("Invalid notification-failure-mode: expected `fail` or `warn`.");
@@ -13823,6 +13834,7 @@ function parseActionInputs(environment) {
     warnWithinDays,
     failWithinDays,
     allowPartial,
+    maxFeedAgeDays,
     notificationFailureMode
   };
   if (slackWebhook)
@@ -14185,7 +14197,8 @@ function renderSummary(report, options = {}) {
   if (report.diagnostics.length > 0) {
     lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...report.diagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact2(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact2(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact2(diagnostic.message, 800))}`), "", "</details>", "");
   }
-  lines.push(`Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code>`, `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact2(report.reportPath, 500))}</code>`, "");
+  const feedFreshness = report.feed.generatedAt === "" || report.feed.ageDays === null ? "unavailable" : `${escapeHtml(report.feed.generatedAt)} (${report.feed.ageDays}d old)`;
+  lines.push(`Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code> · generated ${feedFreshness}`, `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact2(report.reportPath, 500))}</code>`, "");
   return lines.join(`
 `);
 }
@@ -14274,6 +14287,8 @@ function publishCoreOutputs(report, environment) {
     "normalized-feed-sha256": report.feed.normalizedFeedSha256,
     "active-records-sha256": report.feed.activeRecordsSha256,
     "feed-adapter-manifest-sha256": report.feed.feedAdapterManifestSha256,
+    "feed-generated-at": report.feed.generatedAt,
+    "feed-age-days": report.feed.ageDays === null ? "" : String(report.feed.ageDays),
     "detector-manifest-sha256": report.detectorManifestSha256,
     "evidence-fingerprint": evidenceFingerprint,
     "finding-fingerprint": findingFingerprint2,
@@ -14820,6 +14835,7 @@ var DEFAULT_INPUTS = {
   warnWithinDays: null,
   failWithinDays: null,
   allowPartial: null,
+  maxFeedAgeDays: DEFAULT_MAX_FEED_AGE_DAYS,
   notificationFailureMode: "fail"
 };
 
@@ -14867,11 +14883,33 @@ function unavailableFeed() {
     sourceFeedSha256: UNAVAILABLE_SHA256,
     normalizedFeedSha256: UNAVAILABLE_SHA256,
     activeRecordsSha256: UNAVAILABLE_SHA256,
-    feedAdapterManifestSha256: UNAVAILABLE_SHA256
+    feedAdapterManifestSha256: UNAVAILABLE_SHA256,
+    generatedAt: "",
+    ageDays: null
   };
 }
-function feedDiagnostics(feed) {
-  return feed.index.diagnostics.map((diagnostic) => {
+function feedFreshness(feed, maxAgeDays, nowMs) {
+  const generatedAt = feed.index.envelope.generatedAt;
+  const ageDays = feedAgeInDays(generatedAt, nowMs);
+  return {
+    generatedAt,
+    ageDays,
+    maxAgeDays,
+    stale: maxAgeDays !== null && ageDays > maxAgeDays
+  };
+}
+function feedIdentity(feed, freshness) {
+  return { ...feed.digests, generatedAt: freshness.generatedAt, ageDays: freshness.ageDays };
+}
+function feedDiagnostics(feed, freshness) {
+  const staleness = freshness.stale ? [
+    {
+      code: "feed-stale",
+      message: `The upstream lifecycle feed was generated at ${freshness.generatedAt}, which is older than the configured max-feed-age-days horizon of ${String(freshness.maxAgeDays)} day(s). A feed that stopped updating reports a permanent all-clear, so lifecycle coverage is not trustworthy.`,
+      severity: "partial"
+    }
+  ] : [];
+  const upstream = feed.index.diagnostics.map((diagnostic) => {
     if (diagnostic.kind === "feed-conflict") {
       return {
         code: diagnostic.kind,
@@ -14888,12 +14926,16 @@ function feedDiagnostics(feed) {
       severity: "partial"
     };
   });
+  return [...upstream, ...staleness];
 }
 function applyFeedCoverage(detection, feed) {
   if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-pair-set-change")) {
     return detection;
   }
   return detection.scanStatus === "partial" ? detection : { ...detection, scanStatus: "partial" };
+}
+function applyFeedFreshnessCoverage(scanStatus, freshness) {
+  return freshness.stale ? "partial" : scanStatus;
 }
 function reportEvidenceSources(evaluation, inspections, effectiveDocuments) {
   const result = [
@@ -14999,7 +15041,7 @@ function diagnosticTargetEvaluation(input) {
         ...input.extraDiagnostics,
         ...input.detection.diagnostics,
         ...claimDiagnostics,
-        ...feedDiagnostics(input.feed)
+        ...feedDiagnostics(input.feed, input.freshness)
       ]
     }),
     policy
@@ -15012,6 +15054,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
   let inputs = DEFAULT_INPUTS;
   let resolvedEvent;
   let feed;
+  let freshness;
   try {
     const rawWebhook = getInput("slack-webhook", environment2);
     if (rawWebhook !== undefined && rawWebhook !== "")
@@ -15025,6 +15068,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
     });
     stage = "feed";
     feed = await (dependencies.loadFeed?.() ?? loadLifecycleFeed());
+    freshness = feedFreshness(feed, inputs.maxFeedAgeDays, evaluatedAtMs);
     const readSnapshot = dependencies.readSnapshot ?? ((path, treeish) => readGitTreeSnapshot({ repositoryPath: path, treeish }));
     const detector = dependencies.detect ?? detectSnapshot;
     const policyInspector = dependencies.inspectPolicy ?? inspectSnapshotPolicy;
@@ -15045,6 +15089,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
         detection: targetDetection,
         claims: targetClaims2,
         feed,
+        freshness,
         inputs,
         now: evaluatedAtMs,
         extraDiagnostics: resolvedEvent.diagnostics
@@ -15060,7 +15105,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           evaluation: diagnostic.evaluation,
           diagnostics: diagnostic.evaluation.diagnostics,
           policyDiff: targetClaims2.policy.valid ? [] : ["Target policy/configuration is invalid and non-authoritative."],
-          feed: feed.digests,
+          feed: feedIdentity(feed, freshness),
           evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
           reportPath: localReportPath
         }),
@@ -15079,6 +15124,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
         detection: targetDetection,
         claims: targetClaims2,
         feed,
+        freshness,
         inputs,
         now: evaluatedAtMs,
         extraDiagnostics: resolvedEvent.diagnostics
@@ -15096,9 +15142,9 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
             diagnostics: [
               ...targetClaims2.diagnostics,
               ...targetDetection.diagnostics,
-              ...feedDiagnostics(feed)
+              ...feedDiagnostics(feed, freshness)
             ],
-            feed: feed.digests,
+            feed: feedIdentity(feed, freshness),
             evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
             reportPath: localReportPath
           }),
@@ -15106,18 +15152,19 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           inputs
         };
       }
-      const exitReason2 = decisionFor(diagnostic.evaluation.result, diagnostic.evaluation.scanStatus, diagnostic.policy);
+      const scanStatus2 = applyFeedFreshnessCoverage(diagnostic.evaluation.scanStatus, freshness);
+      const exitReason2 = decisionFor(diagnostic.evaluation.result, scanStatus2, diagnostic.policy);
       return {
         report: finishReport({
           evaluatedAt,
           result: diagnostic.evaluation.result,
-          scanStatus: diagnostic.evaluation.scanStatus,
+          scanStatus: scanStatus2,
           comparisonStatus: "not-applicable",
           exitReason: exitReason2,
           event: reportEvent(resolvedEvent),
           evaluation: diagnostic.evaluation,
           diagnostics: diagnostic.evaluation.diagnostics,
-          feed: feed.digests,
+          feed: feedIdentity(feed, freshness),
           evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
           reportPath: localReportPath
         }),
@@ -15152,6 +15199,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
           detection: targetDetection,
           claims: targetClaims2,
           feed,
+          freshness,
           inputs,
           now: evaluatedAtMs,
           extraDiagnostics: unavailableDiagnostics
@@ -15166,7 +15214,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
             event: reportEvent(resolvedEvent),
             evaluation: diagnostic.evaluation,
             diagnostics: diagnostic.evaluation.diagnostics,
-            feed: feed.digests,
+            feed: feedIdentity(feed, freshness),
             evidenceSources: reportEvidenceSources(diagnostic.evaluation, [targetClaims2]),
             reportPath: localReportPath
           }),
@@ -15208,16 +15256,17 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
       ...resolvedEvent.diagnostics,
       ...comparison.evaluation.diagnostics,
       ...comparison.baseline.diagnostics,
-      ...feedDiagnostics(feed)
+      ...feedDiagnostics(feed, freshness)
     ];
-    const exitReason = decisionFor(comparison.result, comparison.scanStatus, comparison.policy);
+    const scanStatus = applyFeedFreshnessCoverage(comparison.scanStatus, freshness);
+    const exitReason = decisionFor(comparison.result, scanStatus, comparison.policy);
     return {
       report: finishReport({
         evaluatedAt,
         result: comparison.result,
         baselineResult: comparison.baselineResult,
         targetResult: comparison.targetResult,
-        scanStatus: comparison.scanStatus,
+        scanStatus,
         baselineScanStatus: comparison.baselineScanStatus,
         targetScanStatus: comparison.targetScanStatus,
         comparisonStatus: comparison.comparisonStatus,
@@ -15226,7 +15275,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
         evaluation: comparison.evaluation,
         diagnostics,
         policyDiff: comparison.policyDiff,
-        feed: feed.digests,
+        feed: feedIdentity(feed, freshness),
         evidenceSources: reportEvidenceSources(comparison.evaluation, [targetClaims], monotonicEvidenceSourceDocuments(baseClaims, targetClaims)),
         reportPath: localReportPath
       }),
@@ -15242,7 +15291,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
       stage,
       ...resolvedEvent === undefined ? {} : { event: reportEvent(resolvedEvent) },
       ...resolvedEvent === undefined ? {} : { comparisonStatus: resolvedEvent.comparisonStatus },
-      ...feed === undefined ? {} : { feed: feed.digests },
+      ...feed === undefined || freshness === undefined ? {} : { feed: feedIdentity(feed, freshness) },
       inputs,
       ...resolvedEvent === undefined ? {} : { diagnostics: resolvedEvent.diagnostics }
     });

@@ -271,6 +271,10 @@ export type FeedIdentity = {
   normalizedFeedSha256: string;
   activeRecordsSha256: string;
   feedAdapterManifestSha256: string;
+  /** Upstream production instant, or empty when the feed could not be loaded. */
+  generatedAt: string;
+  /** Whole days between `generatedAt` and evaluation; null when the feed is unavailable. */
+  ageDays: number | null;
 };
 
 export type AssessmentReport = {
@@ -312,6 +316,8 @@ export type ActionInputs = {
   warnWithinDays: number | null;
   failWithinDays: number | null;
   allowPartial: boolean | null;
+  /** Upstream-freshness horizon in days; null disables the staleness guard entirely. */
+  maxFeedAgeDays: number | null;
   slackWebhook?: string;
   notificationFailureMode: "fail" | "warn";
 };

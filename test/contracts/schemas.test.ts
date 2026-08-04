@@ -164,4 +164,17 @@ describe("published v3 JSON Schemas", () => {
     expect(findingProperties.daysUntilDeprecation).toEqual({ type: "integer" });
     expect(findingProperties.deprecationDate).toBeDefined();
   });
+
+  test("assessment report schema publishes upstream feed freshness", async () => {
+    const document = await schema("assessment-report.schema.json");
+    const feed = definition(document, "feedIdentity");
+    expect(required(feed)).toEqual(expect.arrayContaining(["generatedAt", "ageDays"]));
+    const properties = feed.properties as Record<string, JsonSchema>;
+    // An unavailable feed still has to serialize, so both admit the empty/null form.
+    expect(properties.generatedAt?.oneOf).toEqual(
+      expect.arrayContaining([{ const: "" }]),
+    );
+    expect(properties.ageDays?.type).toEqual(["integer", "null"]);
+    expect(properties.ageDays?.minimum).toBe(0);
+  });
 });
