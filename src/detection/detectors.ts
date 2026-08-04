@@ -2911,7 +2911,15 @@ function supportedSemanticPath(path: string): boolean {
     GITHUB_WORKFLOW_PATH.test(path);
 }
 
-function tokenizationCoverageDiagnostic(
+/**
+ * A tokenization failure is degraded fidelity, not a coverage blind spot: the
+ * blob is still assessed by the lexical fallback, whose evidence is already
+ * capped at advisory authority. Declared coverage therefore stays complete, so a
+ * construct no published tokenizer accepts — JSX, most visibly — cannot pin a
+ * repository to `scan-status: partial` and force `allowPartial: true`, which
+ * would also switch off fail-closed enforcement for genuinely unassessed blobs.
+ */
+function tokenizationFidelityDiagnostic(
   path: string,
   language: "javascript" | "python" | "hcl",
   issue: TokenizationIssue,
@@ -2926,9 +2934,9 @@ function tokenizationCoverageDiagnostic(
   return {
     code: "semantic-tokenization-incomplete@1",
     message:
-      `The ${language} semantic detector found ${descriptions[issue.kind]} at line ${issue.line}, column ${issue.column}. Semantic evidence from this file was discarded; lexical fallback evidence remains available.`,
+      `The ${language} semantic detector found ${descriptions[issue.kind]} at line ${issue.line}, column ${issue.column}. Semantic evidence from this file was discarded; the blob remains assessed by lexical fallback, so declared coverage is unchanged.`,
     path,
-    severity: "partial",
+    severity: "notice",
   };
 }
 
@@ -3004,9 +3012,8 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
       tokenizationIssue = detected.tokenizationIssue;
     }
     if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
-      partial = true;
       diagnostics.push(
-        tokenizationCoverageDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue),
+        tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue),
       );
     }
     const lexical = lexicalFacts(

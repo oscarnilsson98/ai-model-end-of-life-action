@@ -21,7 +21,7 @@ function finding(overrides: Partial<LifecycleFinding> = {}): LifecycleFinding {
     shutdownDate: "2026-08-20",
     daysUntilShutdown: 18,
     replacementModels: [],
-    sourceUrls: ["https://secret.example/source"],
+    sourceUrls: ["https://provider.example/deprecations"],
     feedConflict: false,
     outcome: "warning",
     reasons: ["INTERNAL_SECRET_REASON"],
@@ -94,6 +94,46 @@ type CapturedRequest = {
   input: string | URL | Request;
   init?: RequestInit;
 };
+
+async function withEnvironment<T>(
+  overrides: Readonly<Record<string, string | undefined>>,
+  run: () => Promise<T>,
+): Promise<T> {
+  const previous = new Map(
+    Object.keys(overrides).map((key) => [key, process.env[key]] as const),
+  );
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+async function deliveredText(
+  assessment: AssessmentReport,
+  environment: Readonly<Record<string, string | undefined>> = {},
+): Promise<string> {
+  let captured: CapturedRequest | undefined;
+  const result = await withEnvironment(environment, () =>
+    deliverSlackNotification({
+      webhookUrl: WEBHOOK,
+      report: assessment,
+      fetchImpl: async (input, init) => {
+        captured = init === undefined ? { input } : { input, init };
+        return new Response(null, { status: 204 });
+      },
+    }),
+  );
+  expect(result.status).toBe("sent");
+  return payloadText(captured as CapturedRequest);
+}
 
 function payloadText(request: CapturedRequest): string {
   const body = request.init?.body;
@@ -224,7 +264,13 @@ describe("v3 Slack snapshot delivery", () => {
     expect(text).toContain("2d overdue");
     expect(text).toContain("medium-advisory");
     expect(text).toContain("review-overdue");
-    expect(text).toContain("more finding(s) in the report");
+    // Verified findings outrank the text match, which the bounded view then defers.
+    expect(text).toContain("*Actionable findings (23):*");
+    expect(text).toContain("13 more finding(s) in the report");
+    expect(text).toContain(
+      "1 counted finding(s) outside application and deployment scope stay in the job summary.",
+    );
+    expect(text).toContain("<https://provider.example/deprecations|source>");
     expect(text).not.toContain("<@U123>");
     expect(text).not.toContain("@channel");
     expect(text).not.toContain("lexical-model");
@@ -233,8 +279,178 @@ describe("v3 Slack snapshot delivery", () => {
     expect(text).not.toContain("INTERNAL_SECRET_REASON");
     expect(text).not.toContain("DO_NOT_SEND_DIAGNOSTIC");
     expect(text).not.toContain("DO_NOT_SEND_POLICY_DIFF");
-    expect(text).not.toContain("https://secret.example/source");
+    expect(text).not.toContain("/secret/workspace/src/chat.ts");
     expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(12_000);
+  });
+
+  test("names low-confidence findings an advisory result counted", async () => {
+    const lifecycleFindings = [
+      finding({
+        findingId: "lexical-a",
+        semanticKey: "lexical-a",
+        modelId: "o4-mini",
+        confidence: "low",
+        daysUntilShutdown: 81,
+        shutdownDate: "2026-10-23",
+        replacementModels: [{ modelId: "gpt-5.1", servingPlatform: "openai" }],
+      }),
+      finding({
+        findingId: "lexical-b",
+        semanticKey: "lexical-b",
+        modelId: "gpt-4.5-preview",
+        confidence: "low",
+        replacementModels: [{ modelId: "claude-x", servingPlatform: "anthropic" }],
+      }),
+    ];
+    const text = await deliveredText(
+      report({
+        result: "advisory",
+        scanStatus: "partial",
+        lifecycleFindings,
+        counts: { ...report().counts, findings: 2, advisory: 2, notices: 2 },
+      }),
+    );
+
+    expect(text).toContain("*Result:* advisory");
+    expect(text).toContain("*Actionable findings (2):*");
+    expect(text).not.toContain("None in the bounded notification view.");
+    expect(text).toContain("*ADVISORY (text match)* openai / o4-mini");
+    expect(text).toContain("*ADVISORY (text match)* openai / gpt-4.5-preview");
+    // A replacement on a different platform keeps the platform prefix.
+    expect(text).toContain("→ gpt-5.1");
+    expect(text).toContain("→ anthropic/claude-x");
+  });
+
+  test("a collapsed text match names every candidate platform on its line", async () => {
+    const text = await deliveredText(
+      report({
+        result: "advisory",
+        lifecycleFindings: [
+          finding({
+            modelId: "o4-mini",
+            confidence: "low",
+            servingPlatform: "azure",
+            servingPlatforms: ["azure", "openai"],
+          }),
+        ],
+        counts: { ...report().counts, findings: 1, advisory: 1 },
+      }),
+    );
+
+    expect(text).toContain("*ADVISORY (text match)* azure or openai / o4-mini");
+  });
+
+  test("reconciles the counts line with the listed and withheld findings", async () => {
+    const lifecycleFindings = [
+      finding({ findingId: "breach", semanticKey: "breach", outcome: "breach" }),
+      finding({ findingId: "warning", semanticKey: "warning", modelId: "warned" }),
+      finding({ findingId: "docs", semanticKey: "docs", scope: "documentation" }),
+      finding({ findingId: "example", semanticKey: "example", scope: "example" }),
+      finding({ findingId: "notice", semanticKey: "notice", outcome: "notice" }),
+    ];
+    const counted = { blocking: 1, advisory: 3, notices: 1, unresolved: 4 };
+    const text = await deliveredText(
+      report({
+        result: "blocking",
+        lifecycleFindings,
+        counts: { ...report().counts, findings: lifecycleFindings.length, ...counted },
+      }),
+    );
+
+    expect(text).toContain("*Counts:* 1 blocking · 3 advisory · 4 unresolved");
+    expect(text).toContain("*Actionable findings (2):*");
+    expect(text).toContain(
+      "• 2 counted finding(s) outside application and deployment scope stay in the job summary.",
+    );
+    // Listed plus withheld accounts for every blocking and advisory count in the report.
+    expect(2 + 2).toBe(counted.blocking + counted.advisory);
+  });
+
+  test("explains an empty list instead of contradicting withheld findings", async () => {
+    const withheldOnly = await deliveredText(
+      report({
+        result: "advisory",
+        lifecycleFindings: [finding({ scope: "test" })],
+        counts: { ...report().counts, findings: 1, advisory: 1 },
+      }),
+    );
+    expect(withheldOnly).toContain("*Actionable findings (0):*");
+    expect(withheldOnly).toContain(
+      "• 1 counted finding(s) outside application and deployment scope stay in the job summary.",
+    );
+    expect(withheldOnly).not.toContain("None in the bounded notification view.");
+
+    const nothingCounted = await deliveredText(report());
+    expect(nothingCounted).toContain("*Actionable findings (0):*");
+    expect(nothingCounted).toContain("• None in the bounded notification view.");
+  });
+
+  test("links the workflow run only from complete and trusted run identity", async () => {
+    const assessment = report({
+      result: "advisory",
+      lifecycleFindings: [finding()],
+      counts: { ...report().counts, findings: 1, advisory: 1 },
+    });
+    const linked = await deliveredText(assessment, {
+      GITHUB_SERVER_URL: "https://github.example",
+      GITHUB_REPOSITORY: "acme/service",
+      GITHUB_RUN_ID: "17654321",
+    });
+    expect(linked).toContain(
+      "*Run:* <https://github.example/acme/service/actions/runs/17654321|workflow run>",
+    );
+
+    for (const broken of [
+      { GITHUB_SERVER_URL: "http://github.example" },
+      { GITHUB_SERVER_URL: "https://user:pass@github.example" },
+      { GITHUB_SERVER_URL: undefined },
+      { GITHUB_RUN_ID: "17654321; rm -rf /" },
+      { GITHUB_RUN_ID: undefined },
+      { GITHUB_REPOSITORY: "not a repository" },
+      { GITHUB_REPOSITORY: undefined },
+    ]) {
+      const text = await deliveredText(assessment, {
+        GITHUB_SERVER_URL: "https://github.example",
+        GITHUB_REPOSITORY: "acme/service",
+        GITHUB_RUN_ID: "17654321",
+        ...broken,
+      });
+      expect(text).not.toContain("*Run:*");
+      expect(text).toContain("*Report:*");
+    }
+  });
+
+  test("renders only source URLs that cannot escape Slack link syntax", async () => {
+    const hostile = [
+      "https://provider.example/deprecations|@channel",
+      "https://provider.example/a>b",
+      "javascript:alert(1)",
+      "https://user:pass@provider.example/deprecations",
+      "not a url",
+      " ",
+    ];
+    for (const sourceUrl of hostile) {
+      const text = await deliveredText(
+        report({
+          result: "advisory",
+          lifecycleFindings: [finding({ sourceUrls: [sourceUrl] })],
+          counts: { ...report().counts, findings: 1, advisory: 1 },
+        }),
+      );
+      expect(text).toContain("gpt-old");
+      expect(text).not.toContain("|source>");
+      expect(text).not.toContain("@channel");
+    }
+
+    const clean = await deliveredText(
+      report({
+        result: "advisory",
+        lifecycleFindings: [finding({ sourceUrls: ["http://provider.example/eol?a=1&b=2#x"] })],
+        counts: { ...report().counts, findings: 1, advisory: 1 },
+      }),
+    );
+    expect(clean).toContain("<http://provider.example/eol?a=1&amp;b=2#x|source>");
+    expect(clean).not.toContain("?a=1&b=2");
   });
 
   test("skips PR, merge-group, and local reports without touching the webhook", async () => {
