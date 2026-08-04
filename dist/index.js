@@ -9972,7 +9972,8 @@ function tokenize(source, language, jsx = false) {
       offset: tokenStart,
       line: tokenLine,
       column: tokenColumn,
-      static: true
+      static: true,
+      jsx: true
     });
   };
   const consumeJavascriptTemplate = () => {
@@ -10584,36 +10585,83 @@ function matchingOpenIndex(tokens, closeIndex, open, close) {
   }
   return null;
 }
+var PARENTHESISED_KEYWORDS = new Set([
+  "if",
+  "else",
+  "while",
+  "switch",
+  "return",
+  "typeof",
+  "await",
+  "yield",
+  "in",
+  "of",
+  "new",
+  "delete",
+  "void",
+  "throw",
+  "do",
+  "case"
+]);
 function functionParameterNames(tokens, language) {
   const names = new Set;
   const inspect = (open, close) => {
     let depth = 0;
     for (let index = open + 1;index < close; index += 1) {
       const value = structuralValue(tokens[index]);
-      if (["(", "[", "{"].includes(value ?? ""))
+      if (["(", "[", "{"].includes(value ?? "")) {
         depth += 1;
-      else if ([")", "]", "}"].includes(value ?? ""))
+        continue;
+      }
+      if ([")", "]", "}"].includes(value ?? "")) {
         depth = Math.max(0, depth - 1);
-      if (depth === 0 && tokens[index]?.kind === "identifier" && (structuralValue(tokens[index - 1]) === "(" || structuralValue(tokens[index - 1]) === ",")) {
+        continue;
+      }
+      if (depth > 1 || tokens[index]?.kind !== "identifier")
+        continue;
+      const previous = structuralValue(tokens[index - 1]);
+      if (previous === "(" || previous === "," || previous === "{" || previous === "[") {
         names.add(value);
       }
     }
   };
+  const inspectAt = (open) => {
+    if (structuralValue(tokens[open]) !== "(")
+      return;
+    const close = matchingIndex(tokens, open, "(", ")");
+    if (close !== null)
+      inspect(open, close);
+  };
   for (let index = 0;index < tokens.length; index += 1) {
     const token = tokens[index];
     const value = token?.value;
-    if (token?.kind === "identifier" && (value === "function" || value === "def") && tokens[index + 1]?.kind === "identifier") {
-      let open = index + 2;
+    if (token?.kind === "identifier" && (value === "function" || value === "def")) {
+      let open = tokens[index + 1]?.kind === "identifier" ? index + 2 : index + 1;
       while (open < Math.min(tokens.length, index + 12) && structuralValue(tokens[open]) !== "(") {
         open += 1;
       }
-      if (structuralValue(tokens[open]) === "(") {
-        const close = matchingIndex(tokens, open, "(", ")");
-        if (close !== null)
-          inspect(open, close);
+      inspectAt(open);
+    }
+    if (language !== "javascript")
+      continue;
+    if (isIdentifier(token, "catch") && structuralValue(tokens[index + 1]) === "(") {
+      inspectAt(index + 1);
+    }
+    if (isIdentifier(token, "for") && structuralValue(tokens[index + 1]) === "(") {
+      const close = matchingIndex(tokens, index + 1, "(", ")");
+      for (let cursor = index + 2;close !== null && cursor < close; cursor += 1) {
+        if (tokens[cursor]?.kind === "identifier" && (isIdentifier(tokens[cursor - 1], "const") || isIdentifier(tokens[cursor - 1], "let") || isIdentifier(tokens[cursor - 1], "var"))) {
+          names.add(tokens[cursor]?.value);
+        }
       }
     }
-    if (language !== "javascript" || structuralValue(token) !== "=>")
+    if (token?.kind === "identifier" && token.jsx !== true && !PARENTHESISED_KEYWORDS.has(value ?? "") && structuralValue(tokens[index + 1]) === "(" && structuralValue(tokens[index - 1]) !== "." && structuralValue(tokens[index - 1]) !== "?.") {
+      const close = matchingIndex(tokens, index + 1, "(", ")");
+      if (close !== null && structuralValue(tokens[close + 1]) === "{") {
+        inspect(index + 1, close);
+      }
+    }
+    if (structuralValue(token) !== "=>")
       continue;
     if (tokens[index - 1]?.kind === "identifier") {
       names.add(tokens[index - 1]?.value);
@@ -10742,68 +10790,94 @@ function resolveTokenValue(tokens, valueIndex, constants, defaultSelectorKind, e
     trace: [{ kind: "detector", detail: "runtime-computed selector" }]
   };
 }
+var npmPrefix = (prefix) => ({ prefix, ecosystem: "npm" });
+var pythonPrefix = (prefix) => ({ prefix, ecosystem: "python" });
 var UNSUPPORTED_INTEGRATION_FRAMEWORKS = Object.freeze([
   Object.freeze({
     frameworkId: "vercel-ai-sdk",
     displayName: "The Vercel AI SDK",
-    modulePrefixes: Object.freeze(["ai", "@ai-sdk"]),
+    modulePrefixes: Object.freeze([npmPrefix("ai"), npmPrefix("@ai-sdk")]),
     semanticSupport: "partial",
     rulePrefix: "source.ts.vercel-ai-sdk."
   }),
   Object.freeze({
     frameworkId: "langchain",
     displayName: "LangChain",
-    modulePrefixes: Object.freeze(["langchain", "@langchain"]),
+    modulePrefixes: Object.freeze([
+      npmPrefix("langchain"),
+      npmPrefix("@langchain"),
+      pythonPrefix("langchain")
+    ]),
     semanticSupport: "none"
   }),
   Object.freeze({
     frameworkId: "llamaindex",
     displayName: "LlamaIndex",
-    modulePrefixes: Object.freeze(["llamaindex", "llama_index"]),
+    modulePrefixes: Object.freeze([
+      npmPrefix("llamaindex"),
+      npmPrefix("@llamaindex"),
+      pythonPrefix("llama_index")
+    ]),
     semanticSupport: "none"
   }),
   Object.freeze({
     frameworkId: "litellm",
     displayName: "LiteLLM",
-    modulePrefixes: Object.freeze(["litellm"]),
+    modulePrefixes: Object.freeze([npmPrefix("litellm"), pythonPrefix("litellm")]),
     semanticSupport: "none"
   }),
   Object.freeze({
     frameworkId: "google-generative-ai-legacy",
     displayName: "The legacy Google Generative AI SDK",
-    modulePrefixes: Object.freeze(["@google/generative-ai", "google.generativeai"]),
+    modulePrefixes: Object.freeze([
+      npmPrefix("@google/generative-ai"),
+      pythonPrefix("google.generativeai")
+    ]),
     semanticSupport: "none"
   }),
   Object.freeze({
     frameworkId: "vertex-ai-generative-legacy",
     displayName: "The retired Vertex AI generative SDK module",
-    modulePrefixes: Object.freeze(["vertexai", "@google-cloud/vertexai"]),
+    modulePrefixes: Object.freeze([
+      npmPrefix("@google-cloud/vertexai"),
+      pythonPrefix("vertexai")
+    ]),
     semanticSupport: "none"
   })
 ]);
-function unsupportedFrameworkForModule(specifier) {
+function unsupportedFrameworkForModule(specifier, language) {
+  const ecosystem = language === "javascript" ? "npm" : "python";
   for (const framework of UNSUPPORTED_INTEGRATION_FRAMEWORKS) {
-    for (const prefix of framework.modulePrefixes) {
-      if (specifier === prefix || specifier.startsWith(`${prefix}/`) || specifier.startsWith(`${prefix}.`) || specifier.startsWith(`${prefix}_`)) {
+    for (const { prefix, ecosystem: prefixEcosystem } of framework.modulePrefixes) {
+      if (prefixEcosystem !== ecosystem)
+        continue;
+      if (specifier === prefix)
+        return framework;
+      if (ecosystem === "npm" ? specifier.startsWith(`${prefix}/`) : false)
+        return framework;
+      if (ecosystem === "python" && (specifier.startsWith(`${prefix}.`) || specifier.startsWith(`${prefix}_`))) {
         return framework;
       }
     }
   }
   return;
 }
-function unsupportedFrameworkIds(specifiers, facts) {
-  const ids = new Set;
+function unsupportedFrameworkImports(specifiers, facts, language) {
+  const facadeById = new Map;
   for (const specifier of specifiers) {
-    const framework = unsupportedFrameworkForModule(specifier);
+    const framework = unsupportedFrameworkForModule(specifier, language);
     if (framework === undefined)
       continue;
-    const prefix = framework.rulePrefix;
-    if (framework.semanticSupport === "partial" && prefix !== undefined && facts.some((fact) => fact.detectorRuleId.startsWith(prefix))) {
-      continue;
+    const provider = AI_SDK_PROVIDER_BY_MODULE.get(specifier);
+    if (provider !== undefined) {
+      const ruleId = aiSdkRuleId(provider);
+      if (facts.some((fact) => fact.detectorRuleId === ruleId))
+        continue;
     }
-    ids.add(framework.frameworkId);
+    const facade = framework.semanticSupport === "partial" && provider === undefined && !specifier.startsWith("@");
+    facadeById.set(framework.frameworkId, (facadeById.get(framework.frameworkId) ?? true) && facade);
   }
-  return [...ids];
+  return [...facadeById].map(([frameworkId, facade]) => ({ frameworkId, facade }));
 }
 var CONSTRUCTORS_BY_MODULE = {
   openai: {
@@ -10911,6 +10985,45 @@ var AI_SDK_MODEL_METHODS = new Set([
   "experimental_realtime"
 ]);
 var AI_SDK_PROVIDER_BY_MODULE = new Map(AI_SDK_PROVIDERS.map((provider) => [provider.module, provider]));
+function aiSdkRuleId(provider) {
+  return `source.ts.vercel-ai-sdk.${provider.providerId}-model@1`;
+}
+function isBareAssignmentTarget(tokens, index) {
+  if (tokens[index]?.jsx === true)
+    return false;
+  const previous = structuralValue(tokens[index - 1]);
+  return previous !== "." && previous !== "?.";
+}
+function importsAnyValue(tokens, importIndex, fromIndex) {
+  const open = tokens.findIndex((token, index) => index > importIndex && index < fromIndex && structuralValue(token) === "{");
+  const clauseEnd = open >= 0 ? open : fromIndex;
+  for (let index = importIndex + 1;index < clauseEnd; index += 1) {
+    const token = tokens[index];
+    if (token?.kind !== "identifier")
+      continue;
+    if (token.value !== "type" && token.value !== "as")
+      return true;
+  }
+  if (open < 0)
+    return true;
+  const close = matchingIndex(tokens, open, "{", "}");
+  if (close === null || close > fromIndex)
+    return true;
+  let named = 0;
+  for (let index = open + 1;index < close; index += 1) {
+    const token = tokens[index];
+    if (token?.kind !== "identifier")
+      continue;
+    if (token.value === "type") {
+      index += 1;
+      continue;
+    }
+    named += 1;
+    if (tokens[index + 1]?.value === "as")
+      index += 2;
+  }
+  return named > 0 || open + 1 === close;
+}
 function importProvenance(tokens, language) {
   const constructors = new Map;
   const awsCommands = new Map;
@@ -10925,13 +11038,24 @@ function importProvenance(tokens, language) {
   const conflicted = new Set;
   const addAiSdkImport = (moduleName, canonicalName, localName) => {
     const provider = AI_SDK_PROVIDER_BY_MODULE.get(moduleName);
-    if (provider === undefined)
+    if (provider === undefined || conflicted.has(localName))
       return;
-    if (provider.instanceNames.includes(canonicalName)) {
-      aiSdkInstances.set(localName, provider);
-    } else if (provider.factoryNames.includes(canonicalName)) {
-      aiSdkFactories.set(localName, provider);
+    const kind = provider.instanceNames.includes(canonicalName) ? "instance" : provider.factoryNames.includes(canonicalName) ? "factory" : undefined;
+    if (kind === undefined)
+      return;
+    const existingInstance = aiSdkInstances.get(localName);
+    const existingFactory = aiSdkFactories.get(localName);
+    const existing = existingInstance ?? existingFactory;
+    if (existing !== undefined && (existing !== provider || kind === "instance" !== (existingInstance !== undefined))) {
+      aiSdkInstances.delete(localName);
+      aiSdkFactories.delete(localName);
+      conflicted.add(localName);
+      return;
     }
+    if (kind === "instance")
+      aiSdkInstances.set(localName, provider);
+    else
+      aiSdkFactories.set(localName, provider);
   };
   const addConstructor = (moduleName, canonicalName, localName) => {
     const integration = CONSTRUCTORS_BY_MODULE[moduleName]?.[canonicalName];
@@ -10954,6 +11078,20 @@ function importProvenance(tokens, language) {
   };
   if (language === "javascript") {
     for (let index = 0;index < tokens.length; index += 1) {
+      if (isIdentifier(tokens[index], "import") && structuralValue(tokens[index + 1]) === "(" && tokens[index + 2]?.kind === "string") {
+        moduleSpecifiers.add(tokens[index + 2]?.value);
+        continue;
+      }
+      if (isIdentifier(tokens[index], "export") && tokens[index + 1]?.value !== "type") {
+        for (let cursor = index + 1;cursor < Math.min(tokens.length, index + 80); cursor += 1) {
+          if (structuralValue(tokens[cursor]) === ";" || isIdentifier(tokens[cursor], "import") || isIdentifier(tokens[cursor], "export"))
+            break;
+          if (isIdentifier(tokens[cursor], "from") && tokens[cursor + 1]?.kind === "string") {
+            moduleSpecifiers.add(tokens[cursor + 1]?.value);
+            break;
+          }
+        }
+      }
       if (isIdentifier(tokens[index], "import")) {
         let fromIndex = -1;
         let moduleIndex = -1;
@@ -10973,7 +11111,8 @@ function importProvenance(tokens, language) {
           index = moduleIndex;
           continue;
         }
-        moduleSpecifiers.add(moduleName2);
+        if (importsAnyValue(tokens, index, fromIndex))
+          moduleSpecifiers.add(moduleName2);
         const defaultName = DEFAULT_CONSTRUCTOR_BY_MODULE[moduleName2];
         const first = tokens[index + 1];
         if (defaultName !== undefined && first?.kind === "identifier" && first.value !== "type") {
@@ -11067,17 +11206,31 @@ function importProvenance(tokens, language) {
           cursor += local === imported.value ? 1 : 3;
         }
       } else if (isIdentifier(tokens[index], "import") && tokens[index + 1]?.kind === "identifier") {
-        const importedModule = tokens[index + 1]?.value;
-        let dotted = importedModule;
-        for (let cursor = index + 2;tokens[cursor]?.value === "." && tokens[cursor + 1]?.kind === "identifier"; cursor += 2) {
-          dotted += `.${tokens[cursor + 1]?.value}`;
+        const line = tokens[index]?.line;
+        let cursor = index + 1;
+        while (cursor < tokens.length && tokens[cursor]?.line === line) {
+          const importedModule = tokens[cursor]?.value;
+          if (tokens[cursor]?.kind !== "identifier" || importedModule === undefined)
+            break;
+          let dotted = importedModule;
+          let scan = cursor + 1;
+          while (tokens[scan]?.value === "." && tokens[scan + 1]?.kind === "identifier") {
+            dotted += `.${tokens[scan + 1]?.value}`;
+            scan += 2;
+          }
+          moduleSpecifiers.add(dotted);
+          const local = tokens[scan]?.value === "as" && tokens[scan + 1]?.kind === "identifier" ? tokens[scan + 1]?.value : importedModule;
+          if (importedModule === "boto3")
+            boto3Namespaces.add(local);
+          else if (importedModule === "os")
+            pythonOsNamespaces.add(local);
+          if (tokens[scan]?.value === "as")
+            scan += 2;
+          if (structuralValue(tokens[scan]) !== ",")
+            break;
+          cursor = scan + 1;
         }
-        moduleSpecifiers.add(dotted);
-        const local = tokens[index + 2]?.value === "as" && tokens[index + 3]?.kind === "identifier" ? tokens[index + 3]?.value : importedModule;
-        if (importedModule === "boto3")
-          boto3Namespaces.add(local);
-        else if (importedModule === "os")
-          pythonOsNamespaces.add(local);
+        index = cursor;
       }
     }
   }
@@ -11129,7 +11282,7 @@ function importProvenance(tokens, language) {
         shadowed.add(tokens[index - 1]?.value);
       }
     }
-    if (tokens[index]?.kind === "identifier" && importedNames.has(value ?? "") && tokens[index + 1]?.value === "=" && !isIdentifier(tokens[index + 2], "require")) {
+    if (tokens[index]?.kind === "identifier" && importedNames.has(value ?? "") && tokens[index + 1]?.value === "=" && isBareAssignmentTarget(tokens, index) && !isIdentifier(tokens[index + 2], "require")) {
       shadowed.add(value);
     }
     if ((isIdentifier(tokens[index - 1], "class") || isIdentifier(tokens[index - 1], "function")) && importedNames.has(value ?? "")) {
@@ -11280,11 +11433,15 @@ function endpointSignal(tokens) {
     "api_endpoint"
   ]);
   const indices = [];
-  for (let index = 0;index < tokens.length - 2; index += 1) {
+  for (let index = 0;index < tokens.length; index += 1) {
     const property = tokens[index]?.value;
-    if (property !== undefined && endpointProperties.has(property) && isPropertyNameAt(tokens, index, property) && (structuralValue(tokens[index + 1]) === ":" || structuralValue(tokens[index + 1]) === "=")) {
-      indices.push(index + 2);
+    if (property === undefined || !endpointProperties.has(property) || !isPropertyNameAt(tokens, index, property)) {
+      continue;
     }
+    if (structuralValue(tokens[index + 1]) !== ":" && structuralValue(tokens[index + 1]) !== "=") {
+      return { present: true, safe: false };
+    }
+    indices.push(index + 2);
   }
   if (indices.length === 0)
     return { present: false, safe: true };
@@ -11766,6 +11923,26 @@ function directSemanticLiteralSpan(token, resolved) {
     endOffset: startOffset + literalContent.length
   };
 }
+function assignedVariableBefore(tokens, equalsIndex) {
+  let index = equalsIndex - 1;
+  const annotationToken = new Set([".", "<", ">", "|", "&", "[", "]", "?"]);
+  for (let scan = index;scan > 0 && index - scan < 12; scan -= 1) {
+    const value = structuralValue(tokens[scan]);
+    if (value === ":") {
+      index = scan - 1;
+      break;
+    }
+    if (tokens[scan]?.kind === "identifier")
+      continue;
+    if (value !== null && annotationToken.has(value))
+      continue;
+    break;
+  }
+  const token = tokens[index];
+  if (token === undefined || token.kind !== "identifier" || token.jsx === true)
+    return;
+  return isBareAssignmentTarget(tokens, index) ? token.value : undefined;
+}
 function aiSdkFactoryPlatform(provider, arguments_) {
   const endpoint = endpointSignal(arguments_);
   if (!endpoint.safe)
@@ -11808,12 +11985,15 @@ function aiSdkProviderBindings(tokens, imports) {
     const provider = imports.aiSdkFactories.get(tokens[index]?.value ?? "");
     if (provider === undefined || structuralValue(tokens[index + 1]) !== "(")
       continue;
-    if (tokens[index - 1]?.value !== "=" || tokens[index - 2]?.kind !== "identifier")
+    if (tokens[index - 1]?.value !== "=")
+      continue;
+    const variable = assignedVariableBefore(tokens, index - 1);
+    if (variable === undefined)
       continue;
     const close = matchingIndex(tokens, index + 1, "(", ")");
     const arguments_ = close === null ? [] : tokens.slice(index + 2, close);
     setBinding({
-      variable: tokens[index - 2]?.value,
+      variable,
       provider,
       ...aiSdkFactoryPlatform(provider, arguments_)
     });
@@ -11833,15 +12013,22 @@ function aiSdkProviderBindings(tokens, imports) {
   }
   return bindings;
 }
+function opensModelSelector(token) {
+  if (token.kind === "string")
+    return true;
+  if (token.kind === "identifier")
+    return true;
+  return false;
+}
 function detectAiSdkModelCalls(input) {
   const { tokens } = input;
-  const bindings = aiSdkProviderBindings(tokens, input.imports);
   const facts = [];
   const consumed = [];
   const literalSpans = [];
-  if (bindings.size === 0 && input.imports.aiSdkFactories.size === 0) {
+  if (input.imports.aiSdkInstances.size === 0 && input.imports.aiSdkFactories.size === 0) {
     return { facts, consumed, literalSpans };
   }
+  const bindings = aiSdkProviderBindings(tokens, input.imports);
   const occurrenceByAnchor = new Map;
   for (let openIndex = 0;openIndex < tokens.length; openIndex += 1) {
     if (structuralValue(tokens[openIndex]) !== "(")
@@ -11875,7 +12062,7 @@ function detectAiSdkModelCalls(input) {
       continue;
     const valueIndex = openIndex + 1;
     const valueToken = tokens[valueIndex];
-    if (valueToken === undefined || structuralValue(valueToken) === ")")
+    if (valueToken === undefined || !opensModelSelector(valueToken))
       continue;
     const clientBinding = {
       variable: binding.variable,
@@ -11887,7 +12074,7 @@ function detectAiSdkModelCalls(input) {
     };
     const environmentReference = environmentReferenceAt(tokens, valueIndex, "javascript", input.imports, input.shadowedEnvironmentGlobals);
     const resolved = guardIntegrationSelector(clientBinding, resolveTokenValue(tokens, valueIndex, input.constants, binding.provider.selectorKind, environmentReference));
-    const ruleId = `source.ts.vercel-ai-sdk.${binding.provider.providerId}-model@1`;
+    const ruleId = aiSdkRuleId(binding.provider);
     const anchor = anchorChain.join(".");
     const occurrence = occurrenceByAnchor.get(anchor) ?? 0;
     occurrenceByAnchor.set(anchor, occurrence + 1);
@@ -11918,7 +12105,7 @@ function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
       facts: [],
       consumedEnvironmentSelectors: [],
       literalSpans: [],
-      unsupportedFrameworkIds: [],
+      unsupportedFrameworkImports: [],
       tokenizationIssue: tokenization.issue
     };
   }
@@ -12072,7 +12259,7 @@ function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
     facts,
     consumedEnvironmentSelectors,
     literalSpans,
-    unsupportedFrameworkIds: unsupportedFrameworkIds(analyzedClients.imports.moduleSpecifiers, facts)
+    unsupportedFrameworkImports: unsupportedFrameworkImports(analyzedClients.imports.moduleSpecifiers, facts, language)
   };
 }
 function terraformStringAttribute(tokens, valueIndex, blockClose) {
@@ -12572,27 +12759,44 @@ function tokenizationFidelityDiagnostic(path, language, issue) {
     severity: "notice"
   };
 }
-function recordUnsupportedFrameworks(byFramework, frameworkIds, path) {
-  for (const frameworkId of frameworkIds) {
-    const paths = byFramework.get(frameworkId) ?? new Set;
-    paths.add(path);
-    byFramework.set(frameworkId, paths);
+function recordUnsupportedFrameworks(byFramework, imports, path) {
+  for (const { frameworkId, facade } of imports) {
+    const record = byFramework.get(frameworkId) ?? { paths: new Set, facadeOnlyPaths: new Set };
+    record.paths.add(path);
+    if (facade)
+      record.facadeOnlyPaths.add(path);
+    byFramework.set(frameworkId, record);
   }
 }
 var MAX_DIAGNOSTIC_SAMPLE_PATHS = 5;
-function unsupportedFrameworkDiagnostics(byFramework) {
+var UNSUPPORTED_FRAMEWORK_MESSAGE_BUDGET = 700;
+function unsupportedFrameworkDiagnostics(byFramework, facts) {
   const diagnostics = [];
   for (const framework of UNSUPPORTED_INTEGRATION_FRAMEWORKS) {
-    const paths = byFramework.get(framework.frameworkId);
-    if (paths === undefined || paths.size === 0)
+    const record = byFramework.get(framework.frameworkId);
+    if (record === undefined)
       continue;
-    const sorted = [...paths].sort(compareText5);
-    const sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
-    const remaining = sorted.length - sample.length;
+    const prefix = framework.rulePrefix;
+    const readAnywhere = prefix !== undefined && facts.some((fact) => fact.detectorRuleId.startsWith(prefix));
+    const paths = readAnywhere ? [...record.paths].filter((path) => !record.facadeOnlyPaths.has(path)) : [...record.paths];
+    if (paths.length === 0)
+      continue;
+    const sorted = paths.sort(compareText5);
     const cause = framework.semanticSupport === "partial" ? "but no published rule for it resolved a model in those files, so the selector shape is one this " + 'manifest does not read yet (for example a gateway model string such as "openai/gpt-5", or a ' + "provider member outside the published set)" : "and this detector manifest publishes no semantic rule for it";
+    const preamble = `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${cause}. Model selections made that way were assessed by bounded lexical fallback only, so they ` + "cannot block, are reported only as text matches, and produce nothing at all when the " + "selector is dynamic or the model ID is not literal-scan eligible. Files: ";
+    const sample = [];
+    let budget = UNSUPPORTED_FRAMEWORK_MESSAGE_BUDGET - preamble.length;
+    for (const path of sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS)) {
+      const cost = path.length + (sample.length === 0 ? 0 : 2);
+      if (sample.length > 0 && cost > budget)
+        break;
+      budget -= cost;
+      sample.push(path);
+    }
+    const remaining = sorted.length - sample.length;
     diagnostics.push({
       code: `unsupported-integration-import.${framework.frameworkId}@1`,
-      message: `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${cause}. Model selections made that way were assessed by bounded lexical fallback only, so they ` + "cannot block, are reported only as text matches, and produce nothing at all when the " + `selector is dynamic or the model ID is not literal-scan eligible. Files: ${sample.join(", ")}` + `${remaining > 0 ? ` (+${remaining} more)` : ""}.`,
+      message: `${preamble}${sample.join(", ")}${remaining > 0 ? ` (+${remaining} more)` : ""}.`,
       severity: "notice"
     });
   }
@@ -12637,7 +12841,7 @@ function detectSnapshot(snapshot, feed) {
     severity: "partial"
   }));
   let partial = snapshot.scanStatus === "partial";
-  const unsupportedFrameworkPaths = new Map;
+  const unsupportedFrameworkImportsByFramework = new Map;
   for (const entry of snapshot.entries) {
     if (entry.content.state !== "available" || entry.kind === "symlink")
       continue;
@@ -12664,6 +12868,7 @@ function detectSnapshot(snapshot, feed) {
     let literalSpans = [];
     let tokenizationIssue;
     let semanticLanguage;
+    let frameworkImports = [];
     if (JS_EXTENSIONS.has(extension)) {
       semanticLanguage = "javascript";
       const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "javascript", scope, JSX_EXTENSIONS.has(extension));
@@ -12671,7 +12876,7 @@ function detectSnapshot(snapshot, feed) {
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      recordUnsupportedFrameworks(unsupportedFrameworkPaths, detected.unsupportedFrameworkIds, entry.displayPath);
+      frameworkImports = detected.unsupportedFrameworkImports;
     } else if (extension === ".py") {
       semanticLanguage = "python";
       const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
@@ -12679,7 +12884,7 @@ function detectSnapshot(snapshot, feed) {
       literalSpans = detected.literalSpans;
       tokenizationIssue = detected.tokenizationIssue;
       consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      recordUnsupportedFrameworks(unsupportedFrameworkPaths, detected.unsupportedFrameworkIds, entry.displayPath);
+      frameworkImports = detected.unsupportedFrameworkImports;
     } else if (HCL_EXTENSIONS.has(extension)) {
       semanticLanguage = "hcl";
       const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
@@ -12689,6 +12894,7 @@ function detectSnapshot(snapshot, feed) {
     if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
       diagnostics.push(tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue));
     }
+    recordUnsupportedFrameworks(unsupportedFrameworkImportsByFramework, frameworkImports, entry.displayPath);
     const lexical = lexicalFacts(source, entry.displayPath, entry.objectId, candidates, automaton, literalSpans);
     evidence.push(...semantic, ...lexical);
     assertEvidenceBudget(evidence.length);
@@ -12730,7 +12936,7 @@ function detectSnapshot(snapshot, feed) {
     evidence.push(...environmentBindingFacts(assignments, consumedEnvironmentSelectors, feed));
     assertEvidenceBudget(evidence.length);
   }
-  diagnostics.push(...unsupportedFrameworkDiagnostics(unsupportedFrameworkPaths));
+  diagnostics.push(...unsupportedFrameworkDiagnostics(unsupportedFrameworkImportsByFramework, evidence));
   evidence.sort((left, right) => compareText5(left.evidenceId, right.evidenceId));
   return {
     evidence,

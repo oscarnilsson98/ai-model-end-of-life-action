@@ -1036,6 +1036,123 @@ describe("v3 Vercel AI SDK provider rules", () => {
     expect(evidence).toHaveLength(1);
     expect(evidence[0]?.kind).toBe("sdk-argument");
   });
+
+  test("leaves an endpoint it cannot read platform-unresolved", () => {
+    // A shorthand or computed options object names an endpoint whose value is
+    // invisible here, so attributing it to the package's platform would date the
+    // call against a schedule the traffic may never reach.
+    for (const source of [
+      `import { createOpenAI } from "@ai-sdk/openai";\nconst baseURL = process.env.G;\nconst p = createOpenAI({ baseURL });\nexport const m = p("gpt-old");\n`,
+      `import { createOpenAI } from "@ai-sdk/openai";\nexport const m = createOpenAI({ baseURL })("gpt-old");\n`,
+    ]) {
+      expect(providerFact(source), source).toMatchObject({
+        platformResolution: "unknown",
+        policyEligible: false,
+      });
+    }
+  });
+
+  test("keeps the binding through a property named after a provider", () => {
+    // `openai` is an ordinary object key and React prop, so neither spelling is
+    // a reassignment that should discard the import.
+    const cases = [
+      {
+        path: "src/model.ts",
+        source:
+          `import { openai } from "@ai-sdk/openai";\nconst flags = { a: 1 };\nflags.openai = true;\nexport const model = openai("gpt-old");\n`,
+      },
+      {
+        path: "app/page.tsx",
+        source:
+          `import { openai } from "@ai-sdk/openai";\nexport const model = openai("gpt-old");\nexport const C = () => <Row openai="x" />;\n`,
+      },
+    ] as const;
+    for (const testCase of cases) {
+      expect(providerFact(testCase.source, testCase.path), testCase.path).toMatchObject({
+        servingPlatform: "openai",
+        policyEligible: true,
+      });
+    }
+    // A real reassignment is still distrusted.
+    expect(
+      providerFact(`import { openai } from "@ai-sdk/openai";\nopenai = other;\nawait openai("gpt-old");\n`),
+    ).toBeUndefined();
+  });
+
+  test("does not trust two provider packages bound to one local name", () => {
+    // Resolving last-wins would date the call against the wrong platform.
+    for (const source of [
+      `let { openai: model } = require("@ai-sdk/openai");\nif (u) ({ vertex: model } = require("@ai-sdk/google-vertex"));\nmodule.exports = model("gpt-old");\n`,
+      `import { openai as m } from "@ai-sdk/openai";\nimport { anthropic as m } from "@ai-sdk/anthropic";\nawait m("gpt-old");\n`,
+    ]) {
+      expect(providerFact(source), source).toBeUndefined();
+    }
+  });
+
+  test("binds a factory to its variable, not a property or a type name", () => {
+    // `this.client = createOpenAI(...)` must not register the bare name `client`,
+    // or an unrelated call to a function of that name reads as a provider call.
+    expect(
+      providerFact(
+        `import { createOpenAI } from "@ai-sdk/openai";\nclass S { constructor(k) { this.client = createOpenAI({ apiKey: k }); } }\nexport function client(id) { return id; }\nclient("gpt-old");\n`,
+      ),
+    ).toBeUndefined();
+    // A property named after another provider must not re-bind that provider.
+    expect(
+      providerFact(
+        `import { openai } from "@ai-sdk/openai";\nimport { createAnthropic } from "@ai-sdk/anthropic";\nregistry.openai = createAnthropic({});\nawait openai("gpt-old");\n`,
+      ),
+    ).toMatchObject({
+      detectorRuleId: "source.ts.vercel-ai-sdk.openai-model@1",
+      servingPlatform: "openai",
+    });
+    // A TypeScript annotation sits between the declared name and the `=`.
+    expect(
+      providerFact(
+        `import { createOpenAI, type OpenAIProvider } from "@ai-sdk/openai";\nconst openai: OpenAIProvider = createOpenAI({ apiKey: "k" });\nawait openai("gpt-old");\n`,
+      ),
+    ).toMatchObject({ servingPlatform: "openai", policyEligible: true });
+  });
+
+  test("distrusts a provider injected as a parameter in any binder form", () => {
+    const preamble = `import { openai } from "@ai-sdk/openai";\n`;
+    for (
+      const body of [
+        `class F { build(openai) { return openai("gpt-old"); } }\n`,
+        `const o = { build(openai) { return openai("gpt-old"); } };\n`,
+        `const build = function (openai) { return openai("gpt-old"); };\n`,
+        `export const h = async ({ openai }) => openai("gpt-old");\n`,
+        `for (const openai of providers) { await openai("gpt-old"); }\n`,
+        `try { go(); } catch (openai) { openai("gpt-old"); }\n`,
+        `function build(openai) { return openai("gpt-old"); }\n`,
+      ]
+    ) {
+      expect(providerFact(`${preamble}${body}`), body).toBeUndefined();
+    }
+    // An ordinary function that closes over the import still resolves.
+    expect(
+      providerFact(`${preamble}export function make() { return openai("gpt-old"); }\n`),
+    ).toMatchObject({ policyEligible: true });
+  });
+
+  test("reads only a first argument that can be a model selector", () => {
+    // An object, array, or spread argument is not a selector; recording one would
+    // publish a punctuation rawValue and mark an unread shape as read.
+    for (const argument of ["{ id: \"gpt-old\" }", "...args", "() => \"gpt-old\""]) {
+      expect(
+        providerFact(`import { openai } from "@ai-sdk/openai";\nexport const m = openai(${argument});\n`),
+        argument,
+      ).toBeUndefined();
+    }
+    for (const argument of ["\"gpt-old\"", "modelId", "process.env.MODEL_ID", "config.model"]) {
+      expect(
+        providerFact(
+          `import { openai } from "@ai-sdk/openai";\nconst modelId = "gpt-old";\nexport const m = openai(${argument});\n`,
+        ),
+        argument,
+      ).toMatchObject({ detectorRuleId: "source.ts.vercel-ai-sdk.openai-model@1" });
+    }
+  });
 });
 
 describe("v3 unsupported integration notices", () => {
@@ -1159,6 +1276,134 @@ describe("v3 unsupported integration notices", () => {
       "semantic-tokenization-incomplete@1",
     ]);
     expect(result.scanStatus).toBe("complete");
+  });
+
+  test("matches a module prefix only in the ecosystem that publishes it", () => {
+    // `ai` is an npm distribution, so a dotted or underscored Python module of
+    // that name is a local package and a `.js` suffix is a different specifier.
+    for (
+      const testCase of [
+        { path: "app/x.py", source: "import ai.utils\n" },
+        { path: "app/y.py", source: "from ai_helpers import go\n" },
+        { path: "app/z.py", source: "import ai\n" },
+        { path: "src/v.ts", source: `import { h } from "vertexai_helpers";\n` },
+        { path: "src/j.ts", source: `import x from "ai.js";\n` },
+        { path: "src/k.ts", source: `import { h } from "./ai";\n` },
+      ] as const
+    ) {
+      expect(unsupportedNotices({ [testCase.path]: testCase.source }), testCase.path).toEqual([]);
+    }
+    // The Python sibling and submodule forms still match a Python prefix.
+    for (
+      const testCase of [
+        { path: "app/c.py", source: "from langchain_openai import ChatOpenAI\n", id: "langchain" },
+        {
+          path: "app/g.py",
+          source: "import google.generativeai as genai\n",
+          id: "google-generative-ai-legacy",
+        },
+        { path: "src/l.ts", source: `import { OpenAI } from "@llamaindex/openai";\n`, id: "llamaindex" },
+      ] as const
+    ) {
+      expect(
+        unsupportedNotices({ [testCase.path]: testCase.source }).map((notice) => notice.code),
+        testCase.path,
+      ).toEqual([`unsupported-integration-import.${testCase.id}@1`]);
+    }
+  });
+
+  test("reads every clause of a Python import statement", () => {
+    // A framework in any position but the first would otherwise go unreported.
+    for (const source of ["import os, litellm\n", "import litellm, os\n", "import litellm as l, os\n"]) {
+      expect(unsupportedNotices({ "app/m.py": source }).map((notice) => notice.code), source)
+        .toEqual(["unsupported-integration-import.litellm@1"]);
+    }
+    // The namespace bindings the same walk feeds still resolve.
+    expect(
+      detectSnapshot(
+        snapshot(
+          "app/b.py",
+          `import boto3, os\nclient = boto3.client("bedrock-runtime")\nclient.converse(modelId="gpt-old")\n`,
+        ),
+        feed,
+      ).evidence.map((fact) => fact.detectorRuleId),
+    ).toEqual(["source.py.aws-bedrock.converse-model@1"]);
+  });
+
+  test("names a framework reached by re-export or dynamic import", () => {
+    // A barrel file leaves the call site's specifier local, so without these the
+    // provider is neither read nor reported.
+    expect(
+      unsupportedNotices({
+        "lib/providers.ts": `export { openai } from "@ai-sdk/openai";\n`,
+        "src/use.ts": `import { openai } from "./providers";\nawait openai("gpt-old");\n`,
+      }).map((notice) => notice.code),
+    ).toEqual(["unsupported-integration-import.vercel-ai-sdk@1"]);
+    for (
+      const source of [
+        `export * from "@ai-sdk/openai";\n`,
+        `const { openai } = await import("@ai-sdk/openai");\nawait openai("gpt-old");\n`,
+      ]
+    ) {
+      expect(unsupportedNotices({ "src/a.ts": source }), source).toHaveLength(1);
+    }
+    // A re-exported type is erased just as an imported one is.
+    expect(unsupportedNotices({ "src/t.ts": `export type { LanguageModel } from "ai";\n` })).toEqual([]);
+  });
+
+  test("stays silent for an inline type-only specifier", () => {
+    expect(
+      unsupportedNotices({
+        "src/types.ts": `import { type LanguageModel } from "ai";\nexport type M = LanguageModel;\n`,
+      }),
+    ).toEqual([]);
+    // A runtime specifier alongside the type import is still a real import.
+    expect(
+      unsupportedNotices({
+        "src/mixed.ts":
+          `import { generateText, type LanguageModel } from "ai";\nexport type M = LanguageModel;\n`,
+      }),
+    ).toHaveLength(1);
+  });
+
+  test("names an unread provider package beside a read one", () => {
+    // Suppression is per specifier: `@ai-sdk/mistral` has no rule, so a resolved
+    // `@ai-sdk/openai` call in the same file must not buy silence for it.
+    expect(
+      unsupportedNotices({
+        "src/registry.ts":
+          `import { mistral } from "@ai-sdk/mistral";\nimport { openai } from "@ai-sdk/openai";\nexport const a = openai("gpt-old");\nexport const b = mistral(process.env.MODEL_ID);\n`,
+      }).map((notice) => notice.code),
+    ).toEqual(["unsupported-integration-import.vercel-ai-sdk@1"]);
+  });
+
+  test("stays silent when the provider call resolved in another file", () => {
+    // The framework entrypoints select no model themselves, so an `ai` import
+    // whose model came from a provider call elsewhere is not a coverage gap.
+    const result = detectSnapshot(
+      repositorySnapshot({
+        "lib/model.ts": `import { openai } from "@ai-sdk/openai";\nexport const model = openai("gpt-old");\n`,
+        "app/route.ts":
+          `import { streamText } from "ai";\nimport { model } from "../lib/model";\nstreamText({ model });\n`,
+      }),
+      feed,
+    );
+    expect(result.diagnostics).toEqual([]);
+    expect(result.evidence.filter((fact) => fact.policyEligible)).toHaveLength(1);
+  });
+
+  test("keeps the sampled paths inside the published message budget", () => {
+    const files: Record<string, string> = {};
+    for (let index = 0; index < 7; index += 1) {
+      files[`packages/backend-services/src/features/assistant/providers/gateway-${index}.ts`] =
+        `import { generateText } from "ai";\nawait generateText({ model: "openai/gpt-old" });\n`;
+    }
+    const message = unsupportedNotices(files)[0]?.message ?? "";
+    // The publisher compacts a diagnostic message to 800 code points, so the
+    // sample is trimmed to whole paths rather than cut mid-path by the cap.
+    expect(message.length).toBeLessThanOrEqual(800);
+    expect(message).toContain("is imported by 7 tracked file(s)");
+    expect(message.endsWith(" more).")).toBe(true);
   });
 });
 
