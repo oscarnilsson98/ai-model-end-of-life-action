@@ -163,6 +163,128 @@ describe("v3 detectors", () => {
     expect(result.evidence.some((fact) => fact.kind === "lexical")).toBe(false);
   });
 
+  /**
+   * Every chain `methodRule` accepts, in the syntax qualified against openai 7.4.0 (npm)
+   * and 2.46.0 (PyPI). Most of these had no test at all, so a provider reshaping one of
+   * them degraded detection to the lexical fallback — lower confidence, unable to block —
+   * while coverage still reported `complete` and nothing failed. These lock the accepted
+   * set so the next major bump is a test run rather than a manual read of the type surface.
+   */
+  describe("every accepted OpenAI model-selector chain", () => {
+    const javascript: ReadonlyArray<readonly [chain: string, call: string]> = [
+      ["responses.create", `client.responses.create({ model: "gpt-old", input: "hi" })`],
+      ["responses.stream", `client.responses.stream({ model: "gpt-old", input: "hi" })`],
+      [
+        "chat.completions.create",
+        `client.chat.completions.create({ model: "gpt-old", messages: [] })`,
+      ],
+      [
+        "chat.completions.stream",
+        `client.chat.completions.stream({ model: "gpt-old", messages: [] })`,
+      ],
+      ["embeddings.create", `client.embeddings.create({ model: "gpt-old", input: "hi" })`],
+      ["images.generate", `client.images.generate({ model: "gpt-old", prompt: "hi" })`],
+      ["images.edit", `client.images.edit({ model: "gpt-old", image: file, prompt: "hi" })`],
+      ["audio.speech.create", `client.audio.speech.create({ model: "gpt-old", input: "hi", voice: "alloy" })`],
+      [
+        "audio.transcriptions.create",
+        `client.audio.transcriptions.create({ model: "gpt-old", file })`,
+      ],
+      [
+        "audio.translations.create",
+        `client.audio.translations.create({ model: "gpt-old", file })`,
+      ],
+    ];
+
+    for (const [chain, call] of javascript) {
+      test(`resolves ${chain} in TypeScript`, () => {
+        const result = detectSnapshot(
+          snapshot(
+            "src/chat.ts",
+            `import OpenAI from "openai";\nconst client = new OpenAI({ apiKey: key });\nawait ${call};\n`,
+          ),
+          feed,
+        );
+        expect(result.evidence.find((fact) => fact.kind === "sdk-argument")).toMatchObject({
+          detectorRuleId: "source.ts.openai.request-model@1",
+          modelId: "gpt-old",
+          servingPlatform: "openai",
+          confidence: "high",
+          policyEligible: true,
+        });
+        // A resolved semantic fact must suppress the lexical span for the same literal.
+        expect(result.evidence.filter((fact) => fact.modelId === "gpt-old")).toHaveLength(1);
+      });
+    }
+
+    const python: ReadonlyArray<readonly [chain: string, call: string]> = [
+      ["responses.create", `client.responses.create(model="gpt-old", input="hi")`],
+      [
+        "chat.completions.create",
+        `client.chat.completions.create(model="gpt-old", messages=[])`,
+      ],
+      ["embeddings.create", `client.embeddings.create(model="gpt-old", input="hi")`],
+      ["images.generate", `client.images.generate(model="gpt-old", prompt="hi")`],
+      ["audio.speech.create", `client.audio.speech.create(model="gpt-old", input="hi", voice="alloy")`],
+      [
+        "audio.transcriptions.create",
+        `client.audio.transcriptions.create(model="gpt-old", file=handle)`,
+      ],
+    ];
+
+    for (const [chain, call] of python) {
+      test(`resolves ${chain} in Python`, () => {
+        const result = detectSnapshot(
+          snapshot(
+            "src/chat.py",
+            `from openai import OpenAI\nclient = OpenAI()\n${call}\n`,
+          ),
+          feed,
+        );
+        expect(result.evidence.find((fact) => fact.kind === "sdk-argument")).toMatchObject({
+          detectorRuleId: "source.py.openai.request-model@1",
+          modelId: "gpt-old",
+          servingPlatform: "openai",
+          confidence: "high",
+        });
+        expect(result.evidence.filter((fact) => fact.modelId === "gpt-old")).toHaveLength(1);
+      });
+    }
+
+    test("distinguishes the Azure constructor's deployment name from an OpenAI model ID", () => {
+      // AzureOpenAI still extends OpenAI and is still exported from "openai" in v7. Its
+      // `model` argument names an Azure deployment rather than a model, so the selector
+      // kind differs and the fact cannot block on its own.
+      const azure = detectSnapshot(
+        snapshot(
+          "src/chat.ts",
+          `import { AzureOpenAI } from "openai";\nconst client = new AzureOpenAI({ apiKey: key });\nawait client.chat.completions.create({ model: "gpt-old", messages: [] });\n`,
+        ),
+        feed,
+      );
+      expect(azure.evidence.find((fact) => fact.kind === "sdk-argument")).toMatchObject({
+        detectorRuleId: "source.ts.openai.request-model@1",
+        servingPlatform: "azure",
+        platformResolution: "resolved",
+        selectorKind: "deployment-name",
+        policyEligible: false,
+      });
+
+      const openai = detectSnapshot(
+        snapshot(
+          "src/chat.ts",
+          `import { OpenAI } from "openai";\nconst client = new OpenAI({ apiKey: key });\nawait client.chat.completions.create({ model: "gpt-old", messages: [] });\n`,
+        ),
+        feed,
+      );
+      expect(openai.evidence.find((fact) => fact.kind === "sdk-argument")).toMatchObject({
+        servingPlatform: "openai",
+        selectorKind: "model-id",
+        policyEligible: true,
+      });
+    });
+  });
+
   test("deduplicates lexical fallback evidence by the exact semantic literal span", () => {
     const python = detectSnapshot(
       snapshot(
@@ -2043,6 +2165,31 @@ client.invoke_model_with_response_stream(modelId="gpt-old", body=b"{}")
       policyEligible: false,
     });
     expect(fact?.modelId).toBeUndefined();
+  });
+
+  test("carries any Azure model format, not only OpenAI", () => {
+    // azurerm 5.0 documents `format` values including AI21 Labs, Black Forest Labs,
+    // Cohere, Core42, DeepSeek, Meta, Microsoft, Mistral AI, OpenAI and xAI. The rule is
+    // deliberately format-agnostic: it records the tuple and leaves resolution to policy,
+    // so a family the registry does not know yet still produces deployment evidence.
+    for (const format of ["Mistral AI", "DeepSeek", "Meta"]) {
+      const result = detectSnapshot(
+        snapshot(
+          "deploy/main.tf",
+          `resource "azurerm_cognitive_deployment" "chat" {\n  model {\n    format  = "${format}"\n    name    = "some-model"\n    version = "1"\n  }\n}\n`,
+        ),
+        feed,
+      );
+      const facts = result.evidence.filter(
+        (fact) => fact.detectorRuleId === "deploy.hcl.azure.cognitive-deployment-model@1",
+      );
+      expect(facts).toHaveLength(1);
+      expect(facts[0]).toMatchObject({
+        servingPlatform: "azure",
+        rawValue: `["${format}","some-model","1"]`,
+        selectorKind: "deployment-name",
+      });
+    }
   });
 
   test("keeps an omitted Azure Terraform model version as an unresolved tuple", () => {

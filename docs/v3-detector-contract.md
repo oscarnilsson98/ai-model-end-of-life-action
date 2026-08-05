@@ -137,7 +137,7 @@ Support is syntax-based because the action does not install repository dependenc
 
 | Ecosystem | Qualified package | Qualified version |
 | --- | --- | --- |
-| npm | `openai` | `6.49.0` |
+| npm | `openai` | `7.4.0` |
 | PyPI | `openai` | `2.46.0` |
 | npm | `@anthropic-ai/sdk` | `0.112.4` |
 | PyPI | `anthropic` | `0.117.0` |
@@ -145,7 +145,7 @@ Support is syntax-based because the action does not install repository dependenc
 | PyPI | `google-genai` | `2.13.0` |
 | npm | `@aws-sdk/client-bedrock-runtime` | `3.1096.0` |
 | PyPI | `boto3` | `1.43.51` |
-| Terraform provider | `hashicorp/azurerm` | `4.79.0` |
+| Terraform provider | `hashicorp/azurerm` | `5.0.1` |
 | npm | `ai` | `7.0.49` |
 | npm | `@ai-sdk/openai` | `4.0.27` |
 | npm | `@ai-sdk/anthropic` | `4.0.27` |
