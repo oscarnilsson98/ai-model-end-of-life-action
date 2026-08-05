@@ -53,3 +53,27 @@ With release immutability enabled, GitHub has already locked the `vX.Y.Z` tag at
 point. If validation fails, `vX` remains on the previous good release. Rerun the
 workflow for a transient failure; for a real defect, fix it and publish the next patch
 version because the failed version must not be reused.
+
+## Scheduled contract monitoring
+
+The **Upstream feed contract** workflow runs daily and is the only place drift outside
+this repository becomes visible. Nothing it observes fails a consumer's run, by design:
+the adapter ignores upstream fields it does not read, quarantines malformed rows, and
+falls back to lexical evidence when a semantic rule no longer matches. That tolerance is
+what makes an explicit monitor necessary — without it, drift is silent.
+
+The job opens one issue titled `Upstream contract drift detected`, commenting on the
+existing issue rather than filing duplicates while drift is unreviewed. It reports:
+
+- **Upstream feed drift** — fields or serving platforms the source has started or stopped
+  publishing, compared against `.github/upstream-contract-baseline.json`. Review the
+  change, then update that baseline in the same commit. A new field may be worth reading;
+  a withdrawn platform may mean the source stopped covering something.
+- **Detector qualification major drift** — a provider SDK whose *major* version moved past
+  the version its rules were qualified against, from `DETECTOR_QUALIFICATION`. Within-major
+  updates are logged but never reported, because a patch release rarely reshapes a call
+  surface and a daily stream of them would train maintainers to ignore the job.
+
+Re-qualifying means checking the new major's model-selector call shapes against the
+published rules, updating `DETECTOR_QUALIFICATION`, and adding cases to
+`test/detection/detectors.test.ts` for anything that changed.

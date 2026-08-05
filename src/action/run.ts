@@ -174,10 +174,52 @@ function unavailableFeed(): FeedIdentity {
 
 type FeedFreshness = {
   readonly generatedAt: string;
-  readonly ageDays: number;
+  readonly ageDays: number | null;
   readonly maxAgeDays: number | null;
   readonly stale: boolean;
 };
+
+/**
+ * An empty feed standing in for one that could not be fetched or decoded. Every downstream
+ * stage then runs normally against zero lifecycle records, and the carried diagnostic
+ * degrades declared coverage to partial — so a warning-only run reports the outage instead
+ * of failing, while an enforcing run still fails closed through `partial-disallowed`.
+ */
+function unavailableLoadedFeed(reason: string): LoadedV3Feed {
+  return {
+    index: {
+      envelope: {
+        schemaVersion: 3,
+        adapter: {
+          id: "unavailable",
+          version: "unavailable",
+          sourceSha256: UNAVAILABLE_SHA256,
+        },
+        generatedAt: "",
+        records: [],
+      },
+      recordById: new Map(),
+      modelPairByIdentity: new Map(),
+      modelPairs: [],
+      lexicalModelPairs: [],
+      activeRecords: [],
+      activeNonModelRecords: [],
+      supersededRecordIds: [],
+      diagnostics: [{ kind: "feed-unavailable", reason: compact(reason, 500) }],
+    },
+    digests: {
+      sourceFeedSha256: UNAVAILABLE_SHA256,
+      normalizedFeedSha256: UNAVAILABLE_SHA256,
+      activeRecordsSha256: UNAVAILABLE_SHA256,
+      feedAdapterManifestSha256: UNAVAILABLE_SHA256,
+    },
+  };
+}
+
+/** Freshness cannot be measured without a feed; the unavailability diagnostic carries it. */
+function unavailableFreshness(maxAgeDays: number | null): FeedFreshness {
+  return { generatedAt: "", ageDays: null, maxAgeDays, stale: false };
+}
 
 /**
  * Measure the loaded feed against the configured freshness horizon. A frozen upstream keeps
@@ -227,6 +269,21 @@ function feedDiagnostics(
         severity: "notice",
       };
     }
+    if (diagnostic.kind === "feed-unavailable") {
+      return {
+        code: diagnostic.kind,
+        message: `The upstream lifecycle feed could not be loaded, so no lifecycle records were available and this run cannot report on model deprecations: ${diagnostic.reason}`,
+        severity: "partial",
+      };
+    }
+    if (diagnostic.kind === "feed-invalid-record") {
+      const reasons = diagnostic.reasons.slice(0, 5).join(" ");
+      return {
+        code: diagnostic.kind,
+        message: `The lifecycle feed carried ${diagnostic.skippedRecordCount} row(s) this adapter could not turn into records, so those rows were quarantined and the rest of the feed was assessed${reasons === "" ? "" : `: ${reasons}`}`,
+        severity: "partial",
+      };
+    }
     const providers = diagnostic.providers.slice(0, 10).join(", ");
     return {
       code: diagnostic.kind,
@@ -238,9 +295,10 @@ function feedDiagnostics(
 }
 
 /**
- * Only an unusable provider label degrades coverage. A newly published upstream row, or a
- * row on a provider that has no canonical slug yet, is carried as unsupported nonblocking
- * evidence and therefore does not make the scan partial.
+ * An unusable provider label or a quarantined row degrades coverage: in both cases the
+ * feed no longer describes every lifecycle the upstream source published. A newly
+ * published upstream row, or a row on a provider that has no canonical slug yet, is
+ * carried as unsupported nonblocking evidence and therefore does not make the scan partial.
  */
 function applyFeedCoverage(
   detection: DetectionResult,
@@ -248,7 +306,10 @@ function applyFeedCoverage(
 ): DetectionResult {
   if (
     !feed.index.diagnostics.some(
-      (diagnostic) => diagnostic.kind === "feed-unresolved-provider",
+      (diagnostic) =>
+        diagnostic.kind === "feed-unresolved-provider" ||
+        diagnostic.kind === "feed-invalid-record" ||
+        diagnostic.kind === "feed-unavailable",
     )
   ) {
     return detection;
@@ -505,8 +566,14 @@ async function assess(
       });
 
     stage = "feed";
-    feed = await (dependencies.loadFeed?.() ?? loadLifecycleFeed());
-    freshness = feedFreshness(feed, inputs.maxFeedAgeDays, evaluatedAtMs);
+    try {
+      feed = await (dependencies.loadFeed?.() ?? loadLifecycleFeed());
+      freshness = feedFreshness(feed, inputs.maxFeedAgeDays, evaluatedAtMs);
+    } catch (error) {
+      // An unreachable or undecodable upstream feed is a coverage problem, not a crash.
+      feed = unavailableLoadedFeed(safeMessage(error));
+      freshness = unavailableFreshness(inputs.maxFeedAgeDays);
+    }
 
     const readSnapshot =
       dependencies.readSnapshot ??

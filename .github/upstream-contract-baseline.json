@@ -1,0 +1,28 @@
+{
+  "$comment": "Last-reviewed shape of the untyped upstream feed. The adapter ignores fields it does not read and quarantines rows it cannot parse, so drift here is informational: it tells the maintainer the source changed and something may be worth reading or classifying. Update this file in the same change that reviews the drift.",
+  "reviewedFields": [
+    "announcement_date",
+    "content_hash",
+    "deprecation_context",
+    "deprecation_date",
+    "first_observed",
+    "last_observed",
+    "model_id",
+    "provider",
+    "replacement_models",
+    "scraped_at",
+    "shutdown_date",
+    "url"
+  ],
+  "reviewedPlatforms": [
+    "anthropic",
+    "aws-bedrock",
+    "azure",
+    "cohere",
+    "google",
+    "google-vertex",
+    "groq",
+    "openai",
+    "xai"
+  ]
+}

@@ -158,9 +158,19 @@ export type DetectionResult = {
   scanStatus: ScanStatus;
 };
 
+/**
+ * Raised when a scan would exceed the aggregate fact budget. Thrown rather than handled at
+ * each guard because the guards sit inside nested loops, where a `break` would only leave
+ * the innermost one and keep accumulating. `detectSnapshot` catches it at the phase
+ * boundary and declares the coverage it actually achieved.
+ */
+class EvidenceBudgetExceededError extends Error {}
+
 function assertEvidenceBudget(count: number): void {
   if (count > MAX_EVIDENCE_FACTS) {
-    throw new Error(`Detector evidence exceeds the aggregate ${MAX_EVIDENCE_FACTS}-fact budget.`);
+    throw new EvidenceBudgetExceededError(
+      `Detector evidence exceeds the aggregate ${MAX_EVIDENCE_FACTS}-fact budget.`,
+    );
   }
 }
 
@@ -4386,140 +4396,152 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
   let partial = snapshot.scanStatus === "partial";
   const unsupportedFrameworkImportsByFramework =
     new Map<string, UnsupportedFrameworkImportRecord>();
-  for (const entry of snapshot.entries) {
-    if (entry.content.state !== "available" || entry.kind === "symlink") continue;
-    if (isClaimDocument(entry.displayPath)) continue;
-    let source: string;
-    try {
-      source = new TextDecoder("utf-8", { fatal: true }).decode(entry.content.bytes);
-    } catch {
-      if (supportedSemanticPath(entry.displayPath)) {
-        partial = true;
-        diagnostics.push({
-          code: "invalid-detector-encoding",
-          message: "A published semantic detector could not process this non-UTF-8 blob.",
-          path: entry.displayPath,
-          severity: "partial",
-        });
-      }
-      continue;
-    }
-    const scope = classifyEvidenceScope(entry.displayPath, true);
-    const extension = extname(entry.displayPath.toLowerCase());
-    let semantic: EvidenceFact[] = [];
-    let literalSpans: SemanticLiteralSpan[] = [];
-    let tokenizationIssue: TokenizationIssue | undefined;
-    let semanticLanguage: "javascript" | "python" | "hcl" | undefined;
-    let moduleSpecifiers: ReadonlySet<string> = new Set();
-    if (JS_EXTENSIONS.has(extension)) {
-      semanticLanguage = "javascript";
-      const detected = detectSdkCalls(
-        source,
-        entry.displayPath,
-        entry.objectId,
-        "javascript",
-        scope,
-        JSX_EXTENSIONS.has(extension),
-      );
-      semantic = detected.facts;
-      literalSpans = detected.literalSpans;
-      tokenizationIssue = detected.tokenizationIssue;
-      consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      moduleSpecifiers = detected.moduleSpecifiers;
-    } else if (extension === ".py") {
-      semanticLanguage = "python";
-      const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
-      semantic = detected.facts;
-      literalSpans = detected.literalSpans;
-      tokenizationIssue = detected.tokenizationIssue;
-      consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      moduleSpecifiers = detected.moduleSpecifiers;
-    } else if (HCL_EXTENSIONS.has(extension)) {
-      semanticLanguage = "hcl";
-      const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
-      semantic = detected.facts;
-      tokenizationIssue = detected.tokenizationIssue;
-    }
-    if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
-      diagnostics.push(
-        tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue),
-      );
-    }
-    if (semanticLanguage === "javascript" || semanticLanguage === "python") {
-      recordUnsupportedFrameworks(
-        unsupportedFrameworkImportsByFramework,
-        unsupportedFrameworkImports(moduleSpecifiers, semantic, semanticLanguage),
-        entry.displayPath,
-      );
-    }
-    const lexical = lexicalFacts(
-      source,
-      entry.displayPath,
-      entry.objectId,
-      candidates,
-      automaton,
-      literalSpans,
-    );
-    evidence.push(...semantic, ...lexical);
-    assertEvidenceBudget(evidence.length);
-  }
-
-  if (consumedEnvironmentSelectors.length > 0) {
-    const consumedNames = new Set(
-      consumedEnvironmentSelectors.map((consumer) => consumer.variable),
-    );
-    const activeModelIds = new Set(
-      feed.modelPairs
-        .filter((pair) => pair.activeLifecycles.length > 0)
-        .map((pair) => pair.modelId),
-    );
-    const assignments: EnvironmentAssignment[] = [];
+  // Budget exhaustion truncates the scan and declares partial coverage rather than
+  // failing the run: a bounded-but-honest assessment beats no assessment at all.
+  try {
     for (const entry of snapshot.entries) {
       if (entry.content.state !== "available" || entry.kind === "symlink") continue;
-      const dotenv = DOTENV_PATH.test(entry.displayPath);
-      const workflow = GITHUB_WORKFLOW_PATH.test(entry.displayPath);
-      if (!dotenv && !workflow) continue;
+      if (isClaimDocument(entry.displayPath)) continue;
       let source: string;
       try {
         source = new TextDecoder("utf-8", { fatal: true }).decode(entry.content.bytes);
       } catch {
+        if (supportedSemanticPath(entry.displayPath)) {
+          partial = true;
+          diagnostics.push({
+            code: "invalid-detector-encoding",
+            message: "A published semantic detector could not process this non-UTF-8 blob.",
+            path: entry.displayPath,
+            severity: "partial",
+          });
+        }
         continue;
       }
-      if (dotenv) {
-        assignments.push(
-          ...parseDotenvAssignments(
+      const scope = classifyEvidenceScope(entry.displayPath, true);
+      const extension = extname(entry.displayPath.toLowerCase());
+      let semantic: EvidenceFact[] = [];
+      let literalSpans: SemanticLiteralSpan[] = [];
+      let tokenizationIssue: TokenizationIssue | undefined;
+      let semanticLanguage: "javascript" | "python" | "hcl" | undefined;
+      let moduleSpecifiers: ReadonlySet<string> = new Set();
+      if (JS_EXTENSIONS.has(extension)) {
+        semanticLanguage = "javascript";
+        const detected = detectSdkCalls(
+          source,
+          entry.displayPath,
+          entry.objectId,
+          "javascript",
+          scope,
+          JSX_EXTENSIONS.has(extension),
+        );
+        semantic = detected.facts;
+        literalSpans = detected.literalSpans;
+        tokenizationIssue = detected.tokenizationIssue;
+        consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
+        moduleSpecifiers = detected.moduleSpecifiers;
+      } else if (extension === ".py") {
+        semanticLanguage = "python";
+        const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
+        semantic = detected.facts;
+        literalSpans = detected.literalSpans;
+        tokenizationIssue = detected.tokenizationIssue;
+        consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
+        moduleSpecifiers = detected.moduleSpecifiers;
+      } else if (HCL_EXTENSIONS.has(extension)) {
+        semanticLanguage = "hcl";
+        const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
+        semantic = detected.facts;
+        tokenizationIssue = detected.tokenizationIssue;
+      }
+      if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
+        diagnostics.push(
+          tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue),
+        );
+      }
+      if (semanticLanguage === "javascript" || semanticLanguage === "python") {
+        recordUnsupportedFrameworks(
+          unsupportedFrameworkImportsByFramework,
+          unsupportedFrameworkImports(moduleSpecifiers, semantic, semanticLanguage),
+          entry.displayPath,
+        );
+      }
+      const lexical = lexicalFacts(
+        source,
+        entry.displayPath,
+        entry.objectId,
+        candidates,
+        automaton,
+        literalSpans,
+      );
+      evidence.push(...semantic, ...lexical);
+      assertEvidenceBudget(evidence.length);
+    }
+
+    if (consumedEnvironmentSelectors.length > 0) {
+      const consumedNames = new Set(
+        consumedEnvironmentSelectors.map((consumer) => consumer.variable),
+      );
+      const activeModelIds = new Set(
+        feed.modelPairs
+          .filter((pair) => pair.activeLifecycles.length > 0)
+          .map((pair) => pair.modelId),
+      );
+      const assignments: EnvironmentAssignment[] = [];
+      for (const entry of snapshot.entries) {
+        if (entry.content.state !== "available" || entry.kind === "symlink") continue;
+        const dotenv = DOTENV_PATH.test(entry.displayPath);
+        const workflow = GITHUB_WORKFLOW_PATH.test(entry.displayPath);
+        if (!dotenv && !workflow) continue;
+        let source: string;
+        try {
+          source = new TextDecoder("utf-8", { fatal: true }).decode(entry.content.bytes);
+        } catch {
+          continue;
+        }
+        if (dotenv) {
+          assignments.push(
+            ...parseDotenvAssignments(
+              source,
+              entry.displayPath,
+              entry.objectId,
+              consumedNames,
+              activeModelIds,
+            ),
+          );
+        } else {
+          const parsed = parseGithubWorkflowAssignments(
             source,
             entry.displayPath,
             entry.objectId,
             consumedNames,
             activeModelIds,
-          ),
-        );
-      } else {
-        const parsed = parseGithubWorkflowAssignments(
-          source,
-          entry.displayPath,
-          entry.objectId,
-          consumedNames,
-          activeModelIds,
-        );
-        assignments.push(...parsed.assignments);
-        if (parsed.invalid) {
-          partial = true;
-          diagnostics.push({
-            code: "invalid-github-actions-yaml",
-            message: "A tracked GitHub workflow could not be parsed for static environment bindings.",
-            path: entry.displayPath,
-            severity: "partial",
-          });
+          );
+          assignments.push(...parsed.assignments);
+          if (parsed.invalid) {
+            partial = true;
+            diagnostics.push({
+              code: "invalid-github-actions-yaml",
+              message: "A tracked GitHub workflow could not be parsed for static environment bindings.",
+              path: entry.displayPath,
+              severity: "partial",
+            });
+          }
         }
+        assertEvidenceBudget(assignments.length);
       }
-      assertEvidenceBudget(assignments.length);
+      evidence.push(
+        ...environmentBindingFacts(assignments, consumedEnvironmentSelectors, feed),
+      );
+      assertEvidenceBudget(evidence.length);
     }
-    evidence.push(
-      ...environmentBindingFacts(assignments, consumedEnvironmentSelectors, feed),
-    );
-    assertEvidenceBudget(evidence.length);
+  } catch (error) {
+    if (!(error instanceof EvidenceBudgetExceededError)) throw error;
+    partial = true;
+    diagnostics.push({
+      code: "evidence-budget-exceeded",
+      message: `Detector evidence reached the aggregate ${String(MAX_EVIDENCE_FACTS)}-fact budget, so the remainder of the tree was not scanned.`,
+      severity: "partial",
+    });
   }
   diagnostics.push(
     ...unsupportedFrameworkDiagnostics(unsupportedFrameworkImportsByFramework, evidence),

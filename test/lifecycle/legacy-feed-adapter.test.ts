@@ -49,6 +49,27 @@ describe("legacy feed adapter", () => {
     return adaptLegacyFeed(sourceBytes(value), selectedManifest, now);
   }
 
+  /**
+   * A malformed row is quarantined rather than fatal, so the assertion is on the emitted
+   * diagnostic instead of a thrown error. Returns the surviving envelope.
+   */
+  function expectQuarantined(
+    value: unknown,
+    reason: RegExp,
+    selectedManifest: LegacyFeedAdapterManifest = manifest,
+    now = Date.parse("2026-08-02T00:00:00Z"),
+  ) {
+    const result = adapt(value, selectedManifest, now);
+    const invalid = result.diagnostics.find(
+      (diagnostic) => diagnostic.kind === "feed-invalid-record",
+    );
+    if (invalid?.kind !== "feed-invalid-record") {
+      throw new Error("expected a feed-invalid-record diagnostic");
+    }
+    expect(invalid.reasons.join("\n")).toMatch(reason);
+    return result;
+  }
+
   test("classifies every record explicitly", () => {
     const bytes = sourceBytes(payload);
     const envelope = adaptLegacyFeed(bytes, manifest, Date.parse("2026-08-02T00:00:00Z"));
@@ -153,28 +174,35 @@ describe("legacy feed adapter", () => {
     );
   });
 
-  test("still rejects duplicate source pairs", () => {
-    expect(() => adapt([payload[0], payload[0]])).toThrow(/duplicate source provider/);
+  test("quarantines a duplicate source pair and keeps the first occurrence", () => {
+    const result = expectQuarantined(
+      [payload[0], payload[0]],
+      /duplicates source provider\/identifier pair/,
+    );
+    expect(result.envelope.records).toHaveLength(1);
   });
 
-  test("strictly validates every row it admits", () => {
-    expect(() =>
-      adapt([
-        ...payload,
-        { ...payload[0], model_id: "new-model", unexpected_field: true },
-      ]),
-    ).toThrow(/unreviewed field/);
-    expect(() =>
-      adapt([
-        ...payload,
-        {
-          ...payload[0],
-          model_id: "new-model",
-          deprecation_date: "2027-02-01",
-          shutdown_date: "2027-01-01",
-        },
-      ]),
-    ).toThrow(/deprecation_date after shutdown_date/);
+  test("ignores fields it does not read instead of rejecting the document", () => {
+    // An additive upstream column must never cost a consumer their run.
+    const result = adapt([
+      ...payload,
+      { ...payload[0], model_id: "new-model", unexpected_field: true },
+    ]);
+    expect(result.diagnostics).toEqual([]);
+    expect(result.envelope.records).toHaveLength(3);
+    expect(
+      result.envelope.records.some(
+        (record) => record.recordKind === "model" && record.modelId === "new-model",
+      ),
+    ).toBe(true);
+  });
+
+  test("quarantines a row whose own values are malformed", () => {
+    const result = expectQuarantined(
+      [...payload, { ...payload[0], model_id: "new-model", scraped_at: "not-a-timestamp" }],
+      /scraped_at/,
+    );
+    expect(result.envelope.records).toHaveLength(2);
   });
 
   test("derives generatedAt and lifecycle digests from every admitted row", () => {
@@ -247,16 +275,17 @@ describe("legacy feed adapter", () => {
       ["last_observed", null, /last_observed must be a non-empty string/],
       ["last_observed", "2026-13-01", /last_observed must be a real YYYY-MM-DD date/],
     ];
+    // Each bad metadata shape costs its own row and nothing else: the two well-formed
+    // rows still make it into the envelope.
     for (const [field, value, message] of invalidValues) {
-      expect(() =>
-        adapt([
-          ...payload,
-          { ...payload[0], model_id: `added-${field}`, [field]: value },
-        ]),
-      ).toThrow(message);
+      const quarantined = expectQuarantined(
+        [...payload, { ...payload[0], model_id: `added-${field}`, [field]: value }],
+        message,
+      );
+      expect(quarantined.envelope.records).toHaveLength(2);
     }
-    expect(() =>
-      adapt([
+    expectQuarantined(
+      [
         ...payload,
         {
           ...payload[0],
@@ -264,8 +293,9 @@ describe("legacy feed adapter", () => {
           first_observed: "2026-08-02",
           last_observed: "2026-08-01",
         },
-      ]),
-    ).toThrow(/first_observed must be on or before .*last_observed/);
+      ],
+      /first_observed must be on or before .*last_observed/,
+    );
   });
 
   test("bounds unresolved-provider previews while retaining exact counts", () => {
@@ -279,7 +309,12 @@ describe("legacy feed adapter", () => {
     expect(result.diagnostics).toEqual([
       expect.objectContaining({ skippedRecordCount: 60, providerCount: 60 }),
     ]);
-    expect(result.diagnostics[0]?.providers).toHaveLength(50);
+    const unresolved = result.diagnostics.find(
+      (diagnostic) => diagnostic.kind === "feed-unresolved-provider",
+    );
+    expect(unresolved?.kind).toBe("feed-unresolved-provider");
+    if (unresolved?.kind !== "feed-unresolved-provider") throw new Error("unreachable");
+    expect(unresolved.providers).toHaveLength(50);
   });
 
   test("keeps classification order-independent without normalizing source identifiers", () => {
@@ -287,7 +322,8 @@ describe("legacy feed adapter", () => {
       "agent",
       "model",
     ]);
-    expect(() => adapt([{ ...payload[0], model_id: " gpt-old " }, payload[1]])).toThrow(
+    expectQuarantined(
+      [{ ...payload[0], model_id: " gpt-old " }, payload[1]],
       /must not have leading or trailing whitespace/,
     );
   });
@@ -310,7 +346,7 @@ describe("legacy feed adapter", () => {
     expect(envelope.envelope.records[0]).toMatchObject({ lifecycleStatus: "shutdown-scheduled" });
   });
 
-  test("rejects naive, impossible, unknown-offset, and excessively future timestamps", () => {
+  test("quarantines naive, impossible, unknown-offset, and excessively future timestamps", () => {
     const invalidTimestamps = [
       "2026-08-01T00:00:00",
       "2026-02-30T00:00:00Z",
@@ -318,17 +354,12 @@ describe("legacy feed adapter", () => {
       "2026-08-01T00:00:00-00:00",
     ];
     for (const scrapedAt of invalidTimestamps) {
-      expect(() => adapt([{ ...payload[0], scraped_at: scrapedAt }, payload[1]])).toThrow(
-        /scraped_at/,
-      );
+      expectQuarantined([{ ...payload[0], scraped_at: scrapedAt }, payload[1]], /scraped_at/);
     }
-    expect(() =>
-      adapt(
-        [{ ...payload[0], scraped_at: "2026-08-03T00:00:00.001Z" }, payload[1]],
-        manifest,
-        Date.parse("2026-08-02T00:00:00Z"),
-      ),
-    ).toThrow(/further ahead.*one day/);
+    expectQuarantined(
+      [{ ...payload[0], scraped_at: "2026-08-03T00:00:00.001Z" }, payload[1]],
+      /further ahead.*one day/,
+    );
   });
 
   test("treats a classification the source no longer publishes as inert", () => {

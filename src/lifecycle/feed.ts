@@ -216,7 +216,35 @@ export type FeedUnresolvedProviderDiagnostic = {
   readonly providers: readonly string[];
 };
 
-export type FeedDiagnostic = FeedConflictDiagnostic | FeedUnresolvedProviderDiagnostic;
+/**
+ * Rows the adapter could not turn into records. Quarantining the row rather than
+ * rejecting the document is deliberate: a single upstream data-quality slip would
+ * otherwise fail every consumer's run at once, which is a far worse outcome than
+ * assessing the other several thousand rows and declaring coverage partial.
+ */
+export type FeedInvalidRecordDiagnostic = {
+  readonly kind: "feed-invalid-record";
+  readonly skippedRecordCount: number;
+  /** Bounded, deterministically sorted preview; the count remains complete. */
+  readonly reasons: readonly string[];
+};
+
+/**
+ * The upstream feed could not be fetched or decoded at all. Carried as a diagnostic on an
+ * empty index rather than raised as an error: an upstream outage must degrade this run's
+ * declared coverage to partial, not fail every consumer's job outright. Enforcement still
+ * fails closed on partial coverage through the usual policy path.
+ */
+export type FeedUnavailableDiagnostic = {
+  readonly kind: "feed-unavailable";
+  readonly reason: string;
+};
+
+export type FeedDiagnostic =
+  | FeedConflictDiagnostic
+  | FeedUnresolvedProviderDiagnostic
+  | FeedInvalidRecordDiagnostic
+  | FeedUnavailableDiagnostic;
 
 export type V3FeedIndex = {
   readonly envelope: FeedEnvelope;
@@ -1179,7 +1207,7 @@ export function loadAdaptedV3Feed(
   sourceBytes: Uint8Array,
   envelopePayload: unknown,
   adapterManifest: ReviewedFeedAdapterManifest,
-  additionalDiagnostics: readonly FeedUnresolvedProviderDiagnostic[] = [],
+  additionalDiagnostics: readonly FeedDiagnostic[] = [],
 ): LoadedV3Feed {
   const bytes = rawFeedBytes(sourceBytes);
   const envelope = validateV3Feed(envelopePayload);

@@ -9,7 +9,8 @@ import {
   resolveSourcePlatformSlug,
   type FeedEnvelope,
   type FeedRecord,
-  type FeedUnresolvedProviderDiagnostic,
+  type FeedDiagnostic,
+  type FeedInvalidRecordDiagnostic,
   type LoadedV3Feed,
   type NonModelRecordKind,
 } from "./feed.ts";
@@ -33,20 +34,8 @@ const NON_MODEL_RECORD_KINDS: ReadonlySet<NonModelRecordKind> = new Set([
   "agent",
   "other",
 ]);
-const LEGACY_FIELDS = new Set([
-  "provider",
-  "model_id",
-  "shutdown_date",
-  "deprecation_date",
-  "announcement_date",
-  "replacement_models",
-  "deprecation_context",
-  "url",
-  "content_hash",
-  "scraped_at",
-  "first_observed",
-  "last_observed",
-]);
+/** Bounded preview of quarantined-row reasons carried on the coverage diagnostic. */
+const MAX_INVALID_RECORD_REASON_PREVIEWS = 20;
 
 export type LegacyNonModelClassification = {
   provider: string;
@@ -312,10 +301,11 @@ function validateManifestClassifications(
 function parseLegacyRecord(value: unknown, index: number, now: number): LegacyRecord {
   const label = `Legacy feed record ${index}`;
   const source = object(value, label);
-  const unknown = Object.keys(source).filter((key) => !LEGACY_FIELDS.has(key));
-  if (unknown.length > 0) {
-    throw new Error(`${label} has unreviewed field(s): ${unknown.sort().join(", ")}.`);
-  }
+  // Fields this adapter does not read are ignored rather than rejected. Rejecting them
+  // meant one additive upstream column failed every consumer's run simultaneously until a
+  // maintainer cut a release, which is the opposite of what a monitoring action should do.
+  // Field-set drift is surfaced by the scheduled upstream-contract job instead.
+  //
   // A provider absent from the canonical mapping is not an error. Slug resolution happens
   // in adaptDecodedLegacyFeed so an added provider degrades to nonblocking evidence
   // instead of failing the whole document.
@@ -454,17 +444,50 @@ function adaptDecodedLegacyFeed(
   sourceBytes: Uint8Array,
   manifest: LegacyFeedAdapterManifest = DEFAULT_LEGACY_ADAPTER_MANIFEST,
   now: number = Date.now(),
-): { envelope: FeedEnvelope; diagnostics: readonly FeedUnresolvedProviderDiagnostic[] } {
+): { envelope: FeedEnvelope; diagnostics: readonly FeedDiagnostic[] } {
   if (!Number.isFinite(now)) throw new Error("Legacy feed evaluation time must be finite.");
   if (!Array.isArray(payload) || payload.length === 0 || payload.length > MAX_LEGACY_RECORDS) {
     throw new Error(`Legacy feed must be a non-empty array of at most ${MAX_LEGACY_RECORDS} records.`);
   }
-  const records = payload.map((value, index) => parseLegacyRecord(value, index, now));
-  const receivedPairIdentities = new Set(
-    records.map((record) => pairIdentity(record.provider, record.modelId)),
-  );
-  if (receivedPairIdentities.size !== records.length) {
-    throw new Error("Legacy feed contains duplicate source provider/identifier pairs.");
+  // A malformed row is quarantined, not fatal. The whole-document throw this replaces
+  // turned any single upstream slip into a simultaneous failure for every consumer.
+  const records: LegacyRecord[] = [];
+  const invalidReasons: string[] = [];
+  const seenPairIdentities = new Set<string>();
+  for (const [index, value] of payload.entries()) {
+    let record: LegacyRecord;
+    try {
+      record = parseLegacyRecord(value, index, now);
+    } catch (error) {
+      invalidReasons.push(error instanceof Error ? error.message : String(error));
+      continue;
+    }
+    // A duplicate pair is quarantined the same way: the first occurrence stands, so the
+    // downstream index keeps its one-record-per-pair invariant without losing the feed.
+    const identity = pairIdentity(record.provider, record.modelId);
+    if (seenPairIdentities.has(identity)) {
+      invalidReasons.push(
+        `Legacy feed record ${index} duplicates source provider/identifier pair ${identity}.`,
+      );
+      continue;
+    }
+    seenPairIdentities.add(identity);
+    records.push(record);
+  }
+  const invalidRecordDiagnostics: FeedInvalidRecordDiagnostic[] =
+    invalidReasons.length === 0
+      ? []
+      : [
+          {
+            kind: "feed-invalid-record",
+            skippedRecordCount: invalidReasons.length,
+            reasons: [...invalidReasons]
+              .sort(compareText)
+              .slice(0, MAX_INVALID_RECORD_REASON_PREVIEWS),
+          },
+        ];
+  if (records.length === 0) {
+    throw new Error("Legacy feed contains no well-formed records.");
   }
   const classifications = validateManifestClassifications(manifest);
 
@@ -481,19 +504,21 @@ function adaptDecodedLegacyFeed(
     resolved.push({ record, servingPlatform });
   }
   const skippedRecordCount = records.length - resolved.length;
-  const diagnostics: FeedUnresolvedProviderDiagnostic[] =
-    skippedRecordCount === 0
+  const diagnostics: FeedDiagnostic[] = [
+    ...invalidRecordDiagnostics,
+    ...(skippedRecordCount === 0
       ? []
       : [
           {
-            kind: "feed-unresolved-provider",
+            kind: "feed-unresolved-provider" as const,
             skippedRecordCount,
             providerCount: unresolvedProviders.size,
             providers: [...unresolvedProviders]
               .sort(compareText)
               .slice(0, MAX_PROVIDER_DIAGNOSTIC_PREVIEWS),
           },
-        ];
+        ]),
+  ];
   if (resolved.length === 0) {
     throw new Error("Legacy feed contains no records with a resolvable serving platform.");
   }
@@ -570,7 +595,7 @@ export function adaptLegacyFeed(
   sourceBytes: Uint8Array,
   manifest: LegacyFeedAdapterManifest = DEFAULT_LEGACY_ADAPTER_MANIFEST,
   now: number = Date.now(),
-): { envelope: FeedEnvelope; diagnostics: readonly FeedUnresolvedProviderDiagnostic[] } {
+): { envelope: FeedEnvelope; diagnostics: readonly FeedDiagnostic[] } {
   if (sourceBytes.byteLength > V3_FEED_LIMITS.maxDocumentBytes) {
     throw new Error(
       `Legacy feed document exceeds ${V3_FEED_LIMITS.maxDocumentBytes} bytes.`,
