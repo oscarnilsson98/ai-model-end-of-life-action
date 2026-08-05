@@ -678,9 +678,22 @@ describe("v3 production orchestration", () => {
     expect(report.diagnostics).not.toContainEqual(expect.objectContaining({
       code: "semantic-tokenization-incomplete@1",
     }));
+    // `useChat` from "ai/react" has no per-SDK rule, so this used to be lexical evidence
+    // only. The generic model-selector key resolves it without knowing the framework at
+    // all, which is the whole point: framework coverage no longer needs a release.
+    const keyed = report.evidenceFacts.find(
+      (fact) => fact.kind === "model-selector-key" && fact.modelId === "gpt-old",
+    );
+    expect(keyed).toMatchObject({
+      detectorRuleId: "source.ts.generic.model-selector@1",
+      confidence: "medium",
+      selectorKind: "model-id",
+      platformResolution: "ambiguous",
+    });
+    // One literal yields one fact: the keyed tier suppresses the lexical span.
     expect(
-      report.evidenceFacts.some((fact) => fact.kind === "lexical" && fact.modelId === "gpt-old"),
-    ).toBe(true);
+      report.evidenceFacts.filter((fact) => fact.modelId === "gpt-old"),
+    ).toHaveLength(1);
     expect(outputs(fixture.outputPath)).toMatchObject({
       "scan-status": "complete",
       "exit-reason": "none",

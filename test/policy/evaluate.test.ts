@@ -115,6 +115,16 @@ function fact(overrides: Partial<EvidenceFact> = {}): EvidenceFact {
   };
 }
 
+/** `exactOptionalPropertyTypes` forbids passing an optional key as undefined. */
+function factWithout(
+  omit: readonly (keyof EvidenceFact)[],
+  overrides: Partial<EvidenceFact> = {},
+): EvidenceFact {
+  const built: Record<string, unknown> = { ...fact(overrides) };
+  for (const key of omit) delete built[key];
+  return built as EvidenceFact;
+}
+
 describe("v3 lifecycle evaluation", () => {
   test("warns for ordinary semantic application evidence", () => {
     const result = evaluateEvidence({
@@ -140,6 +150,78 @@ describe("v3 lifecycle evaluation", () => {
     expect(result.result).toBe("blocking");
   });
 
+  describe("feed-established platform for keyed evidence", () => {
+    const enforced = { ...defaultPolicy(), failWithinDays: 30 };
+    const keyed = (overrides: Partial<EvidenceFact> = {}) =>
+      factWithout(["servingPlatform"], {
+        kind: "model-selector-key",
+        confidence: "medium",
+        detectorRuleId: "source.ts.generic.model-selector@1",
+        platformResolution: "ambiguous",
+        environment: "production",
+        ...overrides,
+      });
+
+    test("blocks when the feed publishes the model for exactly one platform", () => {
+      const result = evaluateEvidence({
+        evidence: [keyed()],
+        feed,
+        policy: enforced,
+        now: NOW,
+        scanStatus: "complete",
+      });
+      expect(result.result).toBe("blocking");
+      expect(result.findings[0]).toMatchObject({
+        outcome: "breach",
+        servingPlatform: "openai",
+      });
+    });
+
+    test("stays advisory when the feed spreads the model across platforms", () => {
+      // Three platforms publish shared-mini with three different shutdown dates. Nothing
+      // establishes which one runs here, so the earliest date warns and cannot fail a job.
+      const result = evaluateEvidence({
+        evidence: [keyed({ rawValue: "shared-mini", modelId: "shared-mini" })],
+        feed: multiPlatformFeed,
+        policy: enforced,
+        now: NOW,
+        scanStatus: "complete",
+      });
+      expect(result.result).toBe("advisory");
+      expect(result.findings[0]?.outcome).toBe("warning");
+    });
+
+    test("keeps an SDK fact with a dynamic endpoint advisory even when feed-unique", () => {
+      // An sdk-argument is ambiguous because its client endpoint was dynamic, which usually
+      // means a proxy or gateway. Feed uniqueness must not launder that into a block.
+      const result = evaluateEvidence({
+        evidence: [
+          factWithout(["servingPlatform"], {
+            environment: "production",
+            platformResolution: "ambiguous",
+          }),
+        ],
+        feed,
+        policy: enforced,
+        now: NOW,
+        scanStatus: "complete",
+      });
+      expect(result.result).toBe("advisory");
+      expect(result.findings[0]?.outcome).toBe("warning");
+    });
+
+    test("keeps a keyed literal outside production advisory", () => {
+      const result = evaluateEvidence({
+        evidence: [keyed({ environment: "unknown" })],
+        feed,
+        policy: enforced,
+        now: NOW,
+        scanStatus: "complete",
+      });
+      expect(result.result).toBe("advisory");
+    });
+  });
+
   test("covers every independent v3 blocking-eligibility condition", () => {
     const enforced = { ...defaultPolicy(), failWithinDays: 30 };
     const eligibleOrigins: Array<{
@@ -147,6 +229,17 @@ describe("v3 lifecycle evaluation", () => {
       overrides: Partial<EvidenceFact>;
     }> = [
       { name: "policy-eligible repository SDK evidence", overrides: {} },
+      {
+        // Tier A: no SDK was inspected, so the platform is ambiguous on the fact. The feed
+        // publishes gpt-old for exactly one platform, which is what establishes it.
+        name: "keyed model-selector literal with a feed-resolved platform",
+        overrides: {
+          kind: "model-selector-key",
+          confidence: "medium",
+          detectorRuleId: "source.ts.generic.model-selector@1",
+          platformResolution: "ambiguous",
+        },
+      },
       {
         name: "current manual assertion",
         overrides: {
@@ -200,7 +293,7 @@ describe("v3 lifecycle evaluation", () => {
     }> = [
       { name: "enforcement disabled", policy: defaultPolicy() },
       { name: "fact not marked policy eligible", overrides: { policyEligible: false } },
-      { name: "medium confidence", overrides: { confidence: "medium" } },
+      { name: "low confidence", overrides: { confidence: "low" } },
       { name: "application environment not production", overrides: { environment: "staging" } },
       { name: "unknown scope", overrides: { scope: "unknown" } },
       { name: "protected documentation scope", overrides: { scope: "documentation" } },

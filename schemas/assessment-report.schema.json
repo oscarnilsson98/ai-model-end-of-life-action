@@ -238,6 +238,7 @@
         "kind": {
           "enum": [
             "sdk-argument",
+            "model-selector-key",
             "structured-config",
             "deployment-resource",
             "env-binding",

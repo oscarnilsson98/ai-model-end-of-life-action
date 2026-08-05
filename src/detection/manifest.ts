@@ -3,7 +3,12 @@ import { canonicalSha256 } from "../shared/status.ts";
 export type DetectorRuleManifestEntry = {
   ruleId: string;
   languages: string[];
-  confidence: "high" | "low";
+  /**
+   * `high` is a proven provider call, `medium` a model-selector key matched without SDK
+   * knowledge, `low` bounded prose. The middle tier is what survives an SDK reshaping its
+   * call surface.
+   */
+  confidence: "high" | "medium" | "low";
   policyEligible: boolean;
 };
 
@@ -14,7 +19,7 @@ export type DetectorQualificationEntry = {
   sourceUrl: string;
 };
 
-export const DETECTOR_MANIFEST_VERSION = "3.0.0-6";
+export const DETECTOR_MANIFEST_VERSION = "4.0.0-1";
 
 /** Syntax baselines reviewed for the v3.0 rule set; repository packages are never installed. */
 export const DETECTOR_QUALIFICATION: readonly DetectorQualificationEntry[] =
@@ -259,6 +264,27 @@ export const DETECTOR_RULES: readonly DetectorRuleManifestEntry[] = Object.freez
     languages: ["hcl"],
     confidence: "high",
     policyEligible: false,
+  },
+  // Provider-agnostic keyed-literal rules. Declared per language rather than as one shared
+  // ID so a repository can trust or distrust each carrier independently through
+  // `scopeRules.detectorRuleIds`.
+  {
+    ruleId: "source.ts.generic.model-selector@1",
+    languages: ["javascript", "typescript"],
+    confidence: "medium",
+    policyEligible: true,
+  },
+  {
+    ruleId: "source.py.generic.model-selector@1",
+    languages: ["python"],
+    confidence: "medium",
+    policyEligible: true,
+  },
+  {
+    ruleId: "config.hcl.generic.model-selector@1",
+    languages: ["hcl"],
+    confidence: "medium",
+    policyEligible: true,
   },
   {
     ruleId: "binding.env.consumed-model@1",

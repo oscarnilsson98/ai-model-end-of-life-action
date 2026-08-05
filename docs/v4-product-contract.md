@@ -1,6 +1,6 @@
-# V3 Product Contract
+# V4 Product Contract
 
-Status: implemented v3.0 behavioral contract.
+Status: implemented v4.0 behavioral contract.
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to be interpreted as requirements.
 
@@ -114,7 +114,7 @@ For an assessment with a trustworthy policy outcome, result precedence is:
 
 An unsupported file format is diagnostic only unless the file was classified as likely model-bearing input for a published detector. An intentionally dynamic selector is an unresolved evidence fact; it does not by itself make the scanner operationally partial.
 
-Coverage and fidelity are separate concerns. `scan-status` reports coverage: whether every eligible input reached an applicable detector or its fallback. It does not report which detector tier succeeded. A blob a published semantic detector could not tokenize is still assessed by the bounded lexical fallback, exactly as a language with no published semantic detector is, so it is reported as a `semantic-tokenization-incomplete@1` notice and declared coverage stays `complete`. The lost fidelity is already carried by the surviving facts: lexical evidence keeps lexical confidence and is never policy eligible, so it cannot block. A blob no detector assessed at all — over the published per-blob limit, unavailable, or not decodable as UTF-8 — is still a coverage blind spot and still makes coverage partial. This keeps `allow-partial` a decision about genuine blind spots rather than a switch a repository must flip because a valid construct such as JSX is outside the published tokenizers.
+Coverage and fidelity are separate concerns. `scan-status` reports coverage: whether every eligible input reached an applicable detector or its fallback. It does not report which detector tier succeeded. A blob a published semantic detector could not tokenize is still assessed by the bounded lexical fallback, exactly as a language with no published semantic detector is, so it is reported as a `semantic-tokenization-incomplete@1` notice and declared coverage stays `complete`. The lost fidelity is already carried by the surviving facts: a model selection still held by a model-selector key resolves at `medium` confidence without a proven platform, and only text outside that tier keeps lexical confidence, which is never policy eligible and cannot block. A blob no detector assessed at all — over the published per-blob limit, unavailable, or not decodable as UTF-8 — is still a coverage blind spot and still makes coverage partial. This keeps `allow-partial` a decision about genuine blind spots rather than a switch a repository must flip because a valid construct such as JSX is outside the published tokenizers.
 
 `failed` includes typed-feed schema validation failures, missing or invalid target Git objects, malformed Git object metadata, invalid trusted policy/evidence documents, internal invariant failures, or inability to produce the required bounded outputs. Detail-output compaction is independent of assessment coverage and MUST NOT make a scan partial or failed.
 
@@ -589,11 +589,13 @@ Invalid trusted base/default-branch evidence fails the assessment. Invalid targe
 
 ## Feed and serving-platform contract
 
-The single normative feed schema, launch platform registry, source-provider mapping, duplicate/conflict behavior, and alias ownership rules are defined in [v3-detector-contract.md](v3-detector-contract.md). Only records explicitly typed `model` enter model detection or lifecycle joins. V3 MUST NOT use a token-shaped regular expression to distinguish models from features, APIs, prompts, tools, or products.
+The single normative feed schema, launch platform registry, source-provider mapping, duplicate/conflict behavior, and alias ownership rules are defined in [v4-detector-contract.md](v4-detector-contract.md). Only records explicitly typed `model` enter model detection or lifecycle joins. V3 MUST NOT use a token-shaped regular expression to distinguish models from features, APIs, prompts, tools, or products.
 
 An untyped default feed requires a versioned adapter that strictly parses every raw row and classifies the source's non-model rows by kind. The adapter MUST NOT gate lifecycle authority on an allowlist of reviewed source pairs: a published deprecation MUST be able to reach a run without an intervening action release, because a review gate that stalls makes newly published shutdowns invisible, which is the exact failure this feed exists to surface. Every well-formed row MUST enter normalized feed records.
 
-Authority is bounded by platform, not by review. A row whose serving platform is registered carries blocking authority; a row on an unregistered platform MUST be retained as unsupported, nonblocking evidence, exactly as for an unregistered typed-feed slug. A provider label the source adds MUST resolve to a platform slug mechanically rather than being rejected, so new providers are carried out of the box. Promotion of a derived platform to blocking authority remains a deliberate registry, display-name and detector change. Adds, renames and withdrawals MUST NOT by themselves make `scan-status: partial`.
+Authority is bounded by evidence strength and by whether the serving platform is established, not by a platform registry. A row on any platform the feed publishes carries blocking authority once evidence reaches the policy bar; the canonical registry governs display names and semantic platform proof only. A provider label the source adds MUST resolve to a platform slug mechanically rather than being rejected, so a provider the upstream source adds becomes enforceable on the run that first sees it rather than waiting for an action release. Adds, renames and withdrawals MUST NOT by themselves make `scan-status: partial`.
+
+A fact that does not itself prove a serving platform MAY still block when the feed publishes its model ID for exactly one platform, because a model served elsewhere under a different lifecycle would carry its own upstream row. That inference is available only to facts whose platform is unknown because nothing inspected an SDK — a model-selector key or a structured configuration resource. An `sdk-argument` fact whose platform is ambiguous is ambiguous for the opposite reason, a dynamic or unrecognized client endpoint, which commonly indicates a proxy or gateway; those MUST keep the conservative downgrade to advisory.
 
 ### Upstream freshness
 

@@ -141,9 +141,12 @@ describe("strict v3 feed validation", () => {
     expect(index.lexicalModelPairs.map((pair) => pair.modelId)).toEqual([
       "Case-Sensitive-Model",
     ]);
+    // `platformSupport` still records that no detector or display name is registered for
+    // the slug, but it no longer gates blocking authority. `lexicalScanEligible` stays
+    // false here because the record itself opted out of literal scanning.
     expect(getV3ModelPair(index, "future-platform", "ordinary-word")).toMatchObject({
       platformSupport: "unsupported",
-      blockingJoinEligible: false,
+      blockingJoinEligible: true,
       lexicalScanEligible: false,
     });
     expect(
