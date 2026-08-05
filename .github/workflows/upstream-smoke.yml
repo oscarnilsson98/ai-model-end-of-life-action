@@ -1,8 +1,11 @@
 name: Upstream feed contract
 
+# Daily rather than weekly: this job is the only place the maintainer learns that the
+# upstream source or a provider SDK changed shape. A weekly cadence left a seven-day
+# window in which detection could have silently degraded.
 on:
   schedule:
-    - cron: "37 6 * * 2"
+    - cron: "37 6 * * *"
   workflow_dispatch:
 
 permissions:
@@ -17,6 +20,10 @@ jobs:
     name: Validate reviewed live feed adapter
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Drift opens an issue, so this job needs to write issues but nothing else.
+    permissions:
+      contents: read
+      issues: write
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -29,4 +36,52 @@ jobs:
           bun-version-file: package.json
 
       - name: Validate the reviewed v3 upstream contract
+        id: feed
         run: bun .github/scripts/assert-live-feed.ts
+
+      - name: Compare detector qualification pins with published releases
+        id: pins
+        run: bun .github/scripts/check-detector-pins.ts
+
+      - name: Open an issue for reviewed-contract drift
+        if: steps.feed.outputs.drift != '' || steps.pins.outputs.drift != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FEED_DRIFT: ${{ steps.feed.outputs.drift }}
+          PIN_DRIFT: ${{ steps.pins.outputs.drift }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Upstream contract drift detected"
+          # One open issue at a time. Re-running daily must not file a duplicate for drift
+          # nobody has reviewed yet; the run link below always points at the newest evidence.
+          existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          {
+            echo "The scheduled upstream-contract job observed drift from the reviewed baseline."
+            echo
+            if [[ -n "${FEED_DRIFT}" ]]; then
+              echo "## Upstream feed"
+              echo
+              echo "${FEED_DRIFT}" | sed 's/^/- /'
+              echo
+              echo "Review the drift, then update \`.github/upstream-contract-baseline.json\` in the same change."
+              echo
+            fi
+            if [[ -n "${PIN_DRIFT}" ]]; then
+              echo "## Detector qualification pins"
+              echo
+              echo "${PIN_DRIFT}" | sed 's/^/- /'
+              echo
+              echo "Re-qualify the detector rules against the new release, then update \`DETECTOR_QUALIFICATION\`."
+              echo
+            fi
+            echo "Neither condition fails a consumer's run: the adapter tolerates unknown fields and"
+            echo "quarantines malformed rows, and unmatched SDK call shapes fall back to lexical evidence."
+            echo
+            echo "Run: ${RUN_URL}"
+          } > body.md
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --body-file body.md
+          else
+            gh issue create --title "${title}" --body-file body.md
+          fi
