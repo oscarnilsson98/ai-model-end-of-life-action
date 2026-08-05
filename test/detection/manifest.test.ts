@@ -18,7 +18,7 @@ describe("v3 detector manifest", () => {
   });
 
   test("publishes a unique, versioned rule and SDK qualification contract", () => {
-    expect(DETECTOR_MANIFEST_VERSION).toMatch(/^3\.0\.0-[1-9][0-9]*$/);
+    expect(DETECTOR_MANIFEST_VERSION).toMatch(/^4\.0\.0-[1-9][0-9]*$/);
     expect(new Set(DETECTOR_RULES.map((rule) => rule.ruleId)).size).toBe(
       DETECTOR_RULES.length,
     );

@@ -3405,6 +3405,8 @@ function detectSdkCalls(
   literalSpans: SemanticLiteralSpan[];
   /** Every module this file imports, for the caller's framework-coverage pass. */
   moduleSpecifiers: ReadonlySet<string>;
+  /** Reused by the generic model-selector pass rather than tokenizing the blob twice. */
+  tokens: readonly Token[];
   tokenizationIssue?: TokenizationIssue;
 } {
   const tokenization = tokenize(source, language, jsx);
@@ -3416,6 +3418,7 @@ function detectSdkCalls(
       consumedEnvironmentSelectors: [],
       literalSpans: [],
       moduleSpecifiers: new Set(),
+      tokens: [],
       tokenizationIssue: tokenization.issue,
     };
   }
@@ -3619,6 +3622,7 @@ function detectSdkCalls(
     consumedEnvironmentSelectors,
     literalSpans,
     moduleSpecifiers: analyzedClients.imports.moduleSpecifiers,
+    tokens,
   };
 }
 
@@ -3655,10 +3659,14 @@ function detectTerraform(
   path: string,
   blobOid: string,
   scope: EvidenceScope,
-): { facts: EvidenceFact[]; tokenizationIssue?: TokenizationIssue } {
+): {
+  facts: EvidenceFact[];
+  tokens: readonly Token[];
+  tokenizationIssue?: TokenizationIssue;
+} {
   const tokenization = tokenize(source, "hcl");
   if (tokenization.issue !== undefined) {
-    return { facts: [], tokenizationIssue: tokenization.issue };
+    return { facts: [], tokens: [], tokenizationIssue: tokenization.issue };
   }
   const tokens = tokenization.tokens;
   const facts: EvidenceFact[] = [];
@@ -3733,7 +3741,7 @@ function detectTerraform(
     });
     assertEvidenceBudget(facts.length);
   }
-  return { facts };
+  return { facts, tokens };
 }
 
 function pathSegments(path: string): string[] {
@@ -3842,6 +3850,59 @@ function characterBefore(source: string, index: number): string | undefined {
   return characterAt(source, start);
 }
 
+/**
+ * Key names that select a model, normalized by lowercasing and dropping `_`/`-`. Every
+ * provider SDK converges on the parameter name rather than on a call shape — `methodRule`
+ * has a branch per integration and every one of them reads `model` or `modelId` — so this
+ * table is what the whole ecosystem agrees on, including frameworks and SDK majors that do
+ * not exist yet.
+ *
+ * `deployment` maps to `deployment-name` because an Azure deployment is an arbitrary user
+ * string that only sometimes equals a model ID, and the policy layer already treats a
+ * non-`model-id` selector as weaker.
+ */
+const MODEL_SELECTOR_KEYS: ReadonlyMap<string, ModelSelectorKind> = new Map([
+  ["model", "model-id"],
+  ["modelid", "model-id"],
+  ["modelname", "model-id"],
+  ["embeddingmodel", "model-id"],
+  ["engine", "model-id"],
+  ["deployment", "deployment-name"],
+  ["deploymentname", "deployment-name"],
+  ["azuredeployment", "deployment-name"],
+]);
+
+function normalizeSelectorKey(value: string): string {
+  return value.toLowerCase().replace(/[_-]/g, "");
+}
+
+/**
+ * The selector kind for a key token at `index`, when it is a key in value position. The
+ * preceding-token guard mirrors `isPropertyNameAt`, but unlike `propertyValueIndex` this
+ * matches at any nesting depth: `{ llm: { config: { model: "…" } } }` is exactly the
+ * config shape the rule exists to catch.
+ */
+function modelSelectorKeyAt(
+  tokens: readonly Token[],
+  index: number,
+): ModelSelectorKind | undefined {
+  const token = tokens[index];
+  if (token === undefined) return undefined;
+  if (token.kind !== "identifier" && token.kind !== "string") return undefined;
+  const separator = structuralValue(tokens[index + 1]);
+  if (separator !== ":" && separator !== "=") return undefined;
+  const previousToken = tokens[index - 1];
+  const previous = structuralValue(previousToken);
+  const opensKey =
+    previousToken === undefined ||
+    previousToken.line < token.line ||
+    previous === "{" ||
+    previous === "," ||
+    previous === "(";
+  if (!opensKey) return undefined;
+  return MODEL_SELECTOR_KEYS.get(normalizeSelectorKey(token.value));
+}
+
 function lexicalFacts(
   source: string,
   path: string,
@@ -3928,6 +3989,103 @@ function lexicalFacts(
     }
   }
   return facts;
+}
+
+function selectorKeyRuleId(language: "javascript" | "python" | "hcl"): string {
+  if (language === "javascript") return "source.ts.generic.model-selector@1";
+  if (language === "python") return "source.py.generic.model-selector@1";
+  return "config.hcl.generic.model-selector@1";
+}
+
+/**
+ * Tier A: static literals held by a model-selector key, resolved without any SDK knowledge.
+ *
+ * The value must match a feed model ID exactly, so this rule can never invent a finding —
+ * it only names a model the feed already says is dying. That gate is also why it emits no
+ * unresolved-reference diagnostics: a generic `model:` with a dynamic value would fire in
+ * every repository that has a `model` key anywhere, and the per-SDK rules already report
+ * dynamic selectors where they have the context to be sure.
+ *
+ * Platform is deliberately left ambiguous. Nothing here proves a serving platform, and
+ * pretending otherwise is what `sdk-argument` is for. The feed resolves it downstream when
+ * the model ID belongs to exactly one platform.
+ */
+function modelSelectorKeyFacts(input: {
+  tokens: readonly Token[];
+  language: "javascript" | "python" | "hcl";
+  path: string;
+  blobOid: string;
+  scope: EvidenceScope;
+  feedModelIds: ReadonlySet<string>;
+  consumedSpans: ReadonlySet<string>;
+}): { facts: EvidenceFact[]; literalSpans: SemanticLiteralSpan[] } {
+  const { tokens, language, path, blobOid, scope, feedModelIds } = input;
+  const facts: EvidenceFact[] = [];
+  const literalSpans: SemanticLiteralSpan[] = [];
+  const ruleId = selectorKeyRuleId(language);
+  // HCL has no constant-folding pass here, matching `detectTerraform`, which also accepts
+  // only direct string literals. Folding stays exactly as trustworthy as the semantic rules.
+  const constants: ReadonlyMap<string, string> =
+    language === "hcl"
+      ? new Map()
+      : collectConstants(tokens, language, analyzeTokens(tokens, language));
+  for (let index = 0; index < tokens.length - 2; index += 1) {
+    const selectorKind = modelSelectorKeyAt(tokens, index);
+    if (selectorKind === undefined) continue;
+    const valueIndex = index + 2;
+    const valueToken = tokens[valueIndex];
+    if (valueToken === undefined) continue;
+    const resolved = staticAtom(tokens, valueIndex, constants);
+    if (resolved === undefined) continue;
+    // Only an exact feed identifier qualifies, on any platform the feed publishes it for.
+    if (!feedModelIds.has(resolved.modelId)) continue;
+    const span = directSemanticLiteralSpan(valueToken, {
+      rawValue: resolved.modelId,
+      modelId: resolved.modelId,
+      modelResolution: "resolved",
+      selectorKind,
+      trace: resolved.trace,
+    });
+    // A per-SDK rule that already claimed this literal wins: it proved a platform too.
+    if (span !== undefined) {
+      if (input.consumedSpans.has(JSON.stringify([span.modelId, span.startOffset, span.endOffset]))) {
+        continue;
+      }
+      literalSpans.push(span);
+    }
+    facts.push({
+      evidenceId: makeEvidenceId(ruleId, path, `key:${valueToken.line}`, resolved.modelId, facts.length),
+      origin: "repository",
+      kind: "model-selector-key",
+      // The empty middle tier: a proven provider call is high, prose is low, and a keyed
+      // literal sits honestly between them.
+      confidence: "medium",
+      scope,
+      environment: scope === "test" ? "test" : "unknown",
+      detectorRuleId: ruleId,
+      detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
+      rawValue: resolved.modelId,
+      modelId: resolved.modelId,
+      modelResolution: "resolved",
+      selectorKind,
+      platformResolution: "ambiguous",
+      policyEligible:
+        selectorKind === "model-id" &&
+        scope !== "test" &&
+        scope !== "example" &&
+        scope !== "documentation" &&
+        scope !== "unknown",
+      locations: [
+        { path, line: valueToken.line, column: valueToken.column, blobOid },
+      ],
+      resolutionTrace: [
+        { kind: "detector", detail: `model-selector key in ${language} source` },
+        ...resolved.trace,
+      ],
+    });
+    assertEvidenceBudget(facts.length);
+  }
+  return { facts, literalSpans };
 }
 
 function parseDotenvLiteral(
@@ -4309,10 +4467,11 @@ function unsupportedFrameworkDiagnostics(
     const sorted = paths.sort(compareText);
     const preamble =
       `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` +
-      `${prefix === undefined ? NO_SUPPORT_CAUSE : PARTIAL_SUPPORT_CAUSE}. Model selections made that way ` +
-      "were assessed by bounded lexical fallback only, so they cannot block, are reported only as text " +
-      "matches, and produce nothing at all when the selector is dynamic or the model ID is not " +
-      "literal-scan eligible. Files: ";
+      `${prefix === undefined ? NO_SUPPORT_CAUSE : PARTIAL_SUPPORT_CAUSE}. A model selection made that ` +
+      "way is still resolved when it sits in a model-selector key, at medium confidence and without a " +
+      "proven serving platform; otherwise it falls to the bounded lexical fallback, which cannot block, " +
+      "is reported only as a text match, and produces nothing at all when the selector is dynamic or the " +
+      "model ID is not literal-scan eligible. Files: ";
     // The sample is the only actionable part, so whole paths are dropped until it
     // fits the publisher's message cap rather than being cut mid-path by it.
     let sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
@@ -4382,6 +4541,10 @@ function isClaimDocument(path: string): boolean {
 
 export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): DetectionResult {
   const candidates = lexicalCandidates(feed);
+  // Built once. The keyed pass consults it per match, and every model the feed publishes is
+  // eligible here regardless of `literalScanEligible`, which bounds prose matching only:
+  // a short ambiguous ID is unambiguous when it sits in a model-selector key.
+  const feedModelIds = new Set(feed.modelPairs.map((pair) => pair.modelId));
   const automaton = buildAutomaton(candidates);
   const evidence: EvidenceFact[] = [];
   const consumedEnvironmentSelectors: ConsumedEnvironmentSelector[] = [];
@@ -4421,6 +4584,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
       const extension = extname(entry.displayPath.toLowerCase());
       let semantic: EvidenceFact[] = [];
       let literalSpans: SemanticLiteralSpan[] = [];
+      let semanticTokens: readonly Token[] = [];
       let tokenizationIssue: TokenizationIssue | undefined;
       let semanticLanguage: "javascript" | "python" | "hcl" | undefined;
       let moduleSpecifiers: ReadonlySet<string> = new Set();
@@ -4436,6 +4600,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
         );
         semantic = detected.facts;
         literalSpans = detected.literalSpans;
+        semanticTokens = detected.tokens;
         tokenizationIssue = detected.tokenizationIssue;
         consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
         moduleSpecifiers = detected.moduleSpecifiers;
@@ -4444,6 +4609,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
         const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
         semantic = detected.facts;
         literalSpans = detected.literalSpans;
+        semanticTokens = detected.tokens;
         tokenizationIssue = detected.tokenizationIssue;
         consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
         moduleSpecifiers = detected.moduleSpecifiers;
@@ -4451,6 +4617,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
         semanticLanguage = "hcl";
         const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
         semantic = detected.facts;
+        semanticTokens = detected.tokens;
         tokenizationIssue = detected.tokenizationIssue;
       }
       if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
@@ -4465,6 +4632,27 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
           entry.displayPath,
         );
       }
+      // semantic -> keyed literal -> lexical. Each tier suppresses the source spans the
+      // previous one already claimed, so one literal yields one fact at its strongest tier.
+      let keyed: EvidenceFact[] = [];
+      if (semanticLanguage !== undefined && semanticTokens.length > 0) {
+        const consumedSpans = new Set(
+          literalSpans.map((span) =>
+            JSON.stringify([span.modelId, span.startOffset, span.endOffset]),
+          ),
+        );
+        const detected = modelSelectorKeyFacts({
+          tokens: semanticTokens,
+          language: semanticLanguage,
+          path: entry.displayPath,
+          blobOid: entry.objectId,
+          scope,
+          feedModelIds,
+          consumedSpans,
+        });
+        keyed = detected.facts;
+        literalSpans = [...literalSpans, ...detected.literalSpans];
+      }
       const lexical = lexicalFacts(
         source,
         entry.displayPath,
@@ -4473,7 +4661,7 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
         automaton,
         literalSpans,
       );
-      evidence.push(...semantic, ...lexical);
+      evidence.push(...semantic, ...keyed, ...lexical);
       assertEvidenceBudget(evidence.length);
     }
 

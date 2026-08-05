@@ -7701,7 +7701,7 @@ function indexValidatedFeed(envelope) {
       activeLifecycles,
       conflict,
       lexicalScanEligible: !conflict && onlyLifecycle !== undefined && onlyLifecycle.literalScanEligible,
-      blockingJoinEligible: !conflict && onlyLifecycle !== undefined && platformSupport === "canonical"
+      blockingJoinEligible: !conflict && onlyLifecycle !== undefined
     };
     modelPairs.push(indexedPair);
     if (conflict) {
@@ -7977,7 +7977,7 @@ function alertFingerprint(findings) {
 }
 
 // src/detection/manifest.ts
-var DETECTOR_MANIFEST_VERSION = "3.0.0-6";
+var DETECTOR_MANIFEST_VERSION = "4.0.0-1";
 var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
@@ -8214,6 +8214,24 @@ var DETECTOR_RULES = Object.freeze([
     languages: ["hcl"],
     confidence: "high",
     policyEligible: false
+  },
+  {
+    ruleId: "source.ts.generic.model-selector@1",
+    languages: ["javascript", "typescript"],
+    confidence: "medium",
+    policyEligible: true
+  },
+  {
+    ruleId: "source.py.generic.model-selector@1",
+    languages: ["python"],
+    confidence: "medium",
+    policyEligible: true
+  },
+  {
+    ruleId: "config.hcl.generic.model-selector@1",
+    languages: ["hcl"],
+    confidence: "medium",
+    policyEligible: true
   },
   {
     ruleId: "binding.env.consumed-model@1",
@@ -8903,6 +8921,7 @@ function applyResolutions(evidence, policy, now) {
 var PROTECTED_SCOPES = new Set(["documentation", "test", "example"]);
 var REPOSITORY_BLOCKING_KINDS = new Set([
   "sdk-argument",
+  "model-selector-key",
   "structured-config",
   "deployment-resource"
 ]);
@@ -9014,7 +9033,8 @@ function policyOutcome(input) {
       outcome = "warning";
     reasons.push("The feed has conflicting active lifecycle signatures for this exact pair.");
   }
-  const breachEligible = policy.failWithinDays !== null && daysUntilShutdown !== null && daysUntilShutdown <= policy.failWithinDays && originAndKindCanBlock(fact) && fact.policyEligible && fact.confidence === "high" && (fact.scope === "deployment" || fact.scope === "application" && fact.environment === "production") && fact.modelResolution === "resolved" && fact.platformResolution === "resolved" && fact.selectorKind === "model-id" && exactPlatform && pair.blockingJoinEligible && !pair.conflict && (fact.evidenceHealth === undefined || fact.evidenceHealth === "current");
+  const confidenceCanBlock = fact.confidence === "high" || fact.confidence === "medium";
+  const breachEligible = policy.failWithinDays !== null && daysUntilShutdown !== null && daysUntilShutdown <= policy.failWithinDays && originAndKindCanBlock(fact) && fact.policyEligible && confidenceCanBlock && (fact.scope === "deployment" || fact.scope === "application" && fact.environment === "production") && fact.modelResolution === "resolved" && fact.selectorKind === "model-id" && exactPlatform && pair.blockingJoinEligible && !pair.conflict && (fact.evidenceHealth === undefined || fact.evidenceHealth === "current");
   if (breachEligible) {
     outcome = "breach";
     reasons.push(`Definite evidence breaches failWithinDays=${policy.failWithinDays}.`);
@@ -9126,6 +9146,11 @@ function collapseAmbiguousCandidates(candidates, restrictedTo) {
     reasons
   };
 }
+function feedResolvesPlatform(fact, pairs) {
+  if (fact.kind !== "model-selector-key" && fact.kind !== "structured-config")
+    return false;
+  return new Set(pairs.map((pair) => pair.servingPlatform)).size === 1;
+}
 function joinFact(fact, feed, policy, now) {
   if (fact.modelResolution !== "resolved" || fact.modelId === undefined)
     return [];
@@ -9138,6 +9163,7 @@ function joinFact(fact, feed, policy, now) {
     exactPlatform = true;
   } else if (fact.platformResolution === "ambiguous") {
     pairs = feed.modelPairs.filter((pair) => pair.modelId === fact.modelId);
+    exactPlatform = feedResolvesPlatform(fact, pairs);
   }
   const restrictedTo = policy.servingPlatforms.length > 0 && !platformIsProven(fact) ? policy.servingPlatforms : [];
   if (restrictedTo.length > 0) {
@@ -12082,6 +12108,7 @@ function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
       consumedEnvironmentSelectors: [],
       literalSpans: [],
       moduleSpecifiers: new Set,
+      tokens: [],
       tokenizationIssue: tokenization.issue
     };
   }
@@ -12234,7 +12261,8 @@ function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
     facts,
     consumedEnvironmentSelectors,
     literalSpans,
-    moduleSpecifiers: analyzedClients.imports.moduleSpecifiers
+    moduleSpecifiers: analyzedClients.imports.moduleSpecifiers,
+    tokens
   };
 }
 function terraformStringAttribute(tokens, valueIndex, blockClose) {
@@ -12255,7 +12283,7 @@ function terraformStringAttribute(tokens, valueIndex, blockClose) {
 function detectTerraform(source, path, blobOid, scope) {
   const tokenization = tokenize(source, "hcl");
   if (tokenization.issue !== undefined) {
-    return { facts: [], tokenizationIssue: tokenization.issue };
+    return { facts: [], tokens: [], tokenizationIssue: tokenization.issue };
   }
   const tokens = tokenization.tokens;
   const facts = [];
@@ -12321,7 +12349,7 @@ function detectTerraform(source, path, blobOid, scope) {
     });
     assertEvidenceBudget(facts.length);
   }
-  return { facts };
+  return { facts, tokens };
 }
 function pathSegments(path) {
   return path.toLowerCase().split("/");
@@ -12413,6 +12441,35 @@ function characterBefore(source, index) {
     start -= 1;
   return characterAt(source, start);
 }
+var MODEL_SELECTOR_KEYS = new Map([
+  ["model", "model-id"],
+  ["modelid", "model-id"],
+  ["modelname", "model-id"],
+  ["embeddingmodel", "model-id"],
+  ["engine", "model-id"],
+  ["deployment", "deployment-name"],
+  ["deploymentname", "deployment-name"],
+  ["azuredeployment", "deployment-name"]
+]);
+function normalizeSelectorKey(value) {
+  return value.toLowerCase().replace(/[_-]/g, "");
+}
+function modelSelectorKeyAt(tokens, index) {
+  const token = tokens[index];
+  if (token === undefined)
+    return;
+  if (token.kind !== "identifier" && token.kind !== "string")
+    return;
+  const separator = structuralValue(tokens[index + 1]);
+  if (separator !== ":" && separator !== "=")
+    return;
+  const previousToken = tokens[index - 1];
+  const previous = structuralValue(previousToken);
+  const opensKey = previousToken === undefined || previousToken.line < token.line || previous === "{" || previous === "," || previous === "(";
+  if (!opensKey)
+    return;
+  return MODEL_SELECTOR_KEYS.get(normalizeSelectorKey(token.value));
+}
 function lexicalFacts(source, path, blobOid, candidates, automaton, semanticLiteralSpans = []) {
   const scope = classifyEvidenceScope(path);
   const facts = [];
@@ -12478,6 +12535,72 @@ function lexicalFacts(source, path, blobOid, candidates, automaton, semanticLite
     }
   }
   return facts;
+}
+function selectorKeyRuleId(language) {
+  if (language === "javascript")
+    return "source.ts.generic.model-selector@1";
+  if (language === "python")
+    return "source.py.generic.model-selector@1";
+  return "config.hcl.generic.model-selector@1";
+}
+function modelSelectorKeyFacts(input) {
+  const { tokens, language, path, blobOid, scope, feedModelIds } = input;
+  const facts = [];
+  const literalSpans = [];
+  const ruleId = selectorKeyRuleId(language);
+  const constants = language === "hcl" ? new Map : collectConstants(tokens, language, analyzeTokens(tokens, language));
+  for (let index = 0;index < tokens.length - 2; index += 1) {
+    const selectorKind = modelSelectorKeyAt(tokens, index);
+    if (selectorKind === undefined)
+      continue;
+    const valueIndex = index + 2;
+    const valueToken = tokens[valueIndex];
+    if (valueToken === undefined)
+      continue;
+    const resolved = staticAtom(tokens, valueIndex, constants);
+    if (resolved === undefined)
+      continue;
+    if (!feedModelIds.has(resolved.modelId))
+      continue;
+    const span = directSemanticLiteralSpan(valueToken, {
+      rawValue: resolved.modelId,
+      modelId: resolved.modelId,
+      modelResolution: "resolved",
+      selectorKind,
+      trace: resolved.trace
+    });
+    if (span !== undefined) {
+      if (input.consumedSpans.has(JSON.stringify([span.modelId, span.startOffset, span.endOffset]))) {
+        continue;
+      }
+      literalSpans.push(span);
+    }
+    facts.push({
+      evidenceId: makeEvidenceId(ruleId, path, `key:${valueToken.line}`, resolved.modelId, facts.length),
+      origin: "repository",
+      kind: "model-selector-key",
+      confidence: "medium",
+      scope,
+      environment: scope === "test" ? "test" : "unknown",
+      detectorRuleId: ruleId,
+      detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
+      rawValue: resolved.modelId,
+      modelId: resolved.modelId,
+      modelResolution: "resolved",
+      selectorKind,
+      platformResolution: "ambiguous",
+      policyEligible: selectorKind === "model-id" && scope !== "test" && scope !== "example" && scope !== "documentation" && scope !== "unknown",
+      locations: [
+        { path, line: valueToken.line, column: valueToken.column, blobOid }
+      ],
+      resolutionTrace: [
+        { kind: "detector", detail: `model-selector key in ${language} source` },
+        ...resolved.trace
+      ]
+    });
+    assertEvidenceBudget(facts.length);
+  }
+  return { facts, literalSpans };
 }
 function parseDotenvLiteral(tail) {
   if (tail === "")
@@ -12759,7 +12882,7 @@ function unsupportedFrameworkDiagnostics(byFramework, facts) {
     if (paths.length === 0)
       continue;
     const sorted = paths.sort(compareText5);
-    const preamble = `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${prefix === undefined ? NO_SUPPORT_CAUSE : PARTIAL_SUPPORT_CAUSE}. Model selections made that way ` + "were assessed by bounded lexical fallback only, so they cannot block, are reported only as text " + "matches, and produce nothing at all when the selector is dynamic or the model ID is not " + "literal-scan eligible. Files: ";
+    const preamble = `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${prefix === undefined ? NO_SUPPORT_CAUSE : PARTIAL_SUPPORT_CAUSE}. A model selection made that ` + "way is still resolved when it sits in a model-selector key, at medium confidence and without a " + "proven serving platform; otherwise it falls to the bounded lexical fallback, which cannot block, " + "is reported only as a text match, and produces nothing at all when the selector is dynamic or the " + "model ID is not literal-scan eligible. Files: ";
     let sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
     while (sample.length > 1 && preamble.length + sample.join(", ").length > UNSUPPORTED_FRAMEWORK_MESSAGE_BUDGET) {
       sample = sample.slice(0, -1);
@@ -12802,6 +12925,7 @@ function isClaimDocument(path) {
 }
 function detectSnapshot(snapshot, feed) {
   const candidates = lexicalCandidates(feed);
+  const feedModelIds = new Set(feed.modelPairs.map((pair) => pair.modelId));
   const automaton = buildAutomaton(candidates);
   const evidence = [];
   const consumedEnvironmentSelectors = [];
@@ -12838,6 +12962,7 @@ function detectSnapshot(snapshot, feed) {
       const extension = import_node_path.extname(entry.displayPath.toLowerCase());
       let semantic = [];
       let literalSpans = [];
+      let semanticTokens = [];
       let tokenizationIssue;
       let semanticLanguage;
       let moduleSpecifiers = new Set;
@@ -12846,6 +12971,7 @@ function detectSnapshot(snapshot, feed) {
         const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "javascript", scope, JSX_EXTENSIONS.has(extension));
         semantic = detected.facts;
         literalSpans = detected.literalSpans;
+        semanticTokens = detected.tokens;
         tokenizationIssue = detected.tokenizationIssue;
         consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
         moduleSpecifiers = detected.moduleSpecifiers;
@@ -12854,6 +12980,7 @@ function detectSnapshot(snapshot, feed) {
         const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
         semantic = detected.facts;
         literalSpans = detected.literalSpans;
+        semanticTokens = detected.tokens;
         tokenizationIssue = detected.tokenizationIssue;
         consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
         moduleSpecifiers = detected.moduleSpecifiers;
@@ -12861,6 +12988,7 @@ function detectSnapshot(snapshot, feed) {
         semanticLanguage = "hcl";
         const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
         semantic = detected.facts;
+        semanticTokens = detected.tokens;
         tokenizationIssue = detected.tokenizationIssue;
       }
       if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
@@ -12869,8 +12997,23 @@ function detectSnapshot(snapshot, feed) {
       if (semanticLanguage === "javascript" || semanticLanguage === "python") {
         recordUnsupportedFrameworks(unsupportedFrameworkImportsByFramework, unsupportedFrameworkImports(moduleSpecifiers, semantic, semanticLanguage), entry.displayPath);
       }
+      let keyed = [];
+      if (semanticLanguage !== undefined && semanticTokens.length > 0) {
+        const consumedSpans = new Set(literalSpans.map((span) => JSON.stringify([span.modelId, span.startOffset, span.endOffset])));
+        const detected = modelSelectorKeyFacts({
+          tokens: semanticTokens,
+          language: semanticLanguage,
+          path: entry.displayPath,
+          blobOid: entry.objectId,
+          scope,
+          feedModelIds,
+          consumedSpans
+        });
+        keyed = detected.facts;
+        literalSpans = [...literalSpans, ...detected.literalSpans];
+      }
       const lexical = lexicalFacts(source, entry.displayPath, entry.objectId, candidates, automaton, literalSpans);
-      evidence.push(...semantic, ...lexical);
+      evidence.push(...semantic, ...keyed, ...lexical);
       assertEvidenceBudget(evidence.length);
     }
     if (consumedEnvironmentSelectors.length > 0) {

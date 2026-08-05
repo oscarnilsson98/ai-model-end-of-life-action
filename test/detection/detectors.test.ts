@@ -285,6 +285,170 @@ describe("v3 detectors", () => {
     });
   });
 
+  describe("generic model-selector keys", () => {
+    const keyed = (path: string, source: string) =>
+      detectSnapshot(snapshot(path, source), feed).evidence.filter(
+        (evidenceFact) => evidenceFact.kind === "model-selector-key",
+      );
+
+    test("resolves a keyed literal with no SDK knowledge at all", () => {
+      // No import, no client, no recognized framework. This is the shape that survives an
+      // SDK reshaping its call surface, and any framework nobody has written a rule for.
+      const facts = keyed("src/config.ts", `export const llm = { model: "gpt-old" };\n`);
+      expect(facts).toHaveLength(1);
+      expect(facts[0]).toMatchObject({
+        detectorRuleId: "source.ts.generic.model-selector@1",
+        confidence: "medium",
+        modelId: "gpt-old",
+        selectorKind: "model-id",
+        platformResolution: "ambiguous",
+        policyEligible: true,
+      });
+      expect(facts[0]?.servingPlatform).toBeUndefined();
+    });
+
+    test("accepts every spelling of the selector key", () => {
+      for (const key of [
+        "model",
+        "modelId",
+        "model_id",
+        "modelName",
+        "model_name",
+        "embeddingModel",
+        "engine",
+      ]) {
+        const facts = keyed("src/config.ts", `const c = { ${key}: "gpt-old" };\n`);
+        expect(facts.map((f) => f.selectorKind), key).toEqual(["model-id"]);
+      }
+      for (const key of ["deployment", "deploymentName", "azure_deployment"]) {
+        const facts = keyed("src/config.ts", `const c = { ${key}: "gpt-old" };\n`);
+        expect(facts.map((f) => f.selectorKind), key).toEqual(["deployment-name"]);
+        // A deployment name is an arbitrary user string, so it never blocks on its own.
+        expect(facts[0]?.policyEligible, key).toBe(false);
+      }
+    });
+
+    test("matches at any nesting depth", () => {
+      const facts = keyed(
+        "src/config.ts",
+        `export default { llm: { providers: [{ config: { model: "gpt-old" } }] } };\n`,
+      );
+      expect(facts).toHaveLength(1);
+    });
+
+    test("resolves Python keyword arguments and dict literals", () => {
+      expect(keyed("src/app.py", `cfg = {"model": "gpt-old"}\n`)).toHaveLength(1);
+      expect(keyed("src/app.py", `run(model="gpt-old")\n`)).toMatchObject([
+        { detectorRuleId: "source.py.generic.model-selector@1", modelId: "gpt-old" },
+      ]);
+    });
+
+    test("resolves a Terraform attribute outside the Azure resource rule", () => {
+      const facts = keyed(
+        "deploy/main.tf",
+        `resource "some_other_ai_service" "chat" {\n  model = "gpt-old"\n}\n`,
+      );
+      expect(facts).toMatchObject([
+        {
+          detectorRuleId: "config.hcl.generic.model-selector@1",
+          modelId: "gpt-old",
+          scope: "deployment",
+        },
+      ]);
+    });
+
+    test("requires an exact feed identifier, so it cannot invent a finding", () => {
+      expect(keyed("src/config.ts", `const c = { model: "not-in-the-feed" };\n`)).toEqual([]);
+      // A dynamic value yields nothing rather than an unresolved reference: a generic key
+      // would otherwise fire in every repository that has a `model` key anywhere.
+      expect(keyed("src/config.ts", `const c = { model: process.env.MODEL };\n`)).toEqual([]);
+    });
+
+    test("does not fire on a key that is not in value position", () => {
+      // A type annotation has no static string to fold, so it self-defuses.
+      expect(keyed("src/types.ts", `interface C { model: string }\n`)).toEqual([]);
+      // A bare string equal to a model ID is lexical evidence, not a keyed selector.
+      expect(keyed("src/config.ts", `const c = ["gpt-old"];\n`)).toEqual([]);
+    });
+
+    test("yields to a per-SDK rule that already claimed the literal", () => {
+      const result = detectSnapshot(
+        snapshot(
+          "src/chat.ts",
+          `import OpenAI from "openai";\nconst client = new OpenAI({ apiKey: key });\nawait client.responses.create({ model: "gpt-old" });\n`,
+        ),
+        feed,
+      );
+      // The semantic rule proved a platform too, so it wins the span outright.
+      expect(result.evidence.filter((f) => f.modelId === "gpt-old")).toHaveLength(1);
+      expect(result.evidence[0]).toMatchObject({ kind: "sdk-argument" });
+    });
+
+    test("suppresses the lexical span it claims", () => {
+      const result = detectSnapshot(
+        snapshot("src/config.ts", `export const llm = { model: "gpt-old" };\n`),
+        feed,
+      );
+      expect(result.evidence).toHaveLength(1);
+      expect(result.evidence[0]).toMatchObject({ kind: "model-selector-key" });
+    });
+
+    test("resolves a model ID that is too ambiguous for prose matching", () => {
+      // `literalScanEligible: false` keeps a short identifier from substring-matching
+      // unrelated prose. That caution is unnecessary in a model-selector key, where the
+      // key itself disambiguates — so the keyed tier covers IDs the lexical tier must skip.
+      const shortIdFeed = buildV3FeedIndex({
+        schemaVersion: 3,
+        adapter: { id: "fixture", version: "1", sourceSha256: "a".repeat(64) },
+        generatedAt: "2026-08-01T00:00:00Z",
+        records: [
+          {
+            recordId: "short",
+            servingPlatform: "openai",
+            primarySourceUrl: "https://example.com/short",
+            supersedesRecordIds: [],
+            recordKind: "model",
+            modelId: "o1",
+            literalScanEligible: false,
+            lifecycleStatus: "shutdown-scheduled",
+            shutdownDate: "2027-01-01",
+            replacementModels: [],
+          },
+        ],
+      });
+
+      const keyedResult = detectSnapshot(
+        snapshot("src/config.ts", `const c = { model: "o1" };\n`),
+        shortIdFeed,
+      );
+      expect(keyedResult.evidence).toMatchObject([
+        { kind: "model-selector-key", modelId: "o1" },
+      ]);
+
+      // The same identifier in prose still produces nothing at all.
+      const proseResult = detectSnapshot(
+        snapshot("src/notes.ts", `const note = "the o1 visit was rescheduled";\n`),
+        shortIdFeed,
+      );
+      expect(proseResult.evidence).toEqual([]);
+    });
+
+    test("keeps protected scopes out of policy eligibility", () => {
+      const protectedPaths = [
+        ["test/config.test.ts", "test"],
+        ["docs/guide.ts", "documentation"],
+        ["examples/demo.ts", "example"],
+      ] as const;
+      for (const [path, scope] of protectedPaths) {
+        const facts = keyed(path, `const c = { model: "gpt-old" };\n`);
+        // Asserted rather than skipped: a protected path must still produce the fact, so the
+        // finding stays visible, and be excluded from policy eligibility rather than hidden.
+        expect(facts, path).toHaveLength(1);
+        expect(facts[0], path).toMatchObject({ scope, policyEligible: false });
+      }
+    });
+  });
+
   test("deduplicates lexical fallback evidence by the exact semantic literal span", () => {
     const python = detectSnapshot(
       snapshot(

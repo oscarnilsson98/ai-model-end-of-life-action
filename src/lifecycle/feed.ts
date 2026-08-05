@@ -1041,8 +1041,12 @@ function indexValidatedFeed(envelope: FeedEnvelope): V3FeedIndex {
       conflict,
       lexicalScanEligible:
         !conflict && onlyLifecycle !== undefined && onlyLifecycle.literalScanEligible,
-      blockingJoinEligible:
-        !conflict && onlyLifecycle !== undefined && platformSupport === "canonical",
+      // No canonical-registry requirement. Gating blocking authority on a hand-maintained
+      // platform registry meant a provider the upstream source added could never become
+      // enforceable without an action release, which is the treadmill this source exists to
+      // avoid. Authority is instead bounded by evidence strength and by whether the feed
+      // resolves the model ID to a single platform, both decided in the policy layer.
+      blockingJoinEligible: !conflict && onlyLifecycle !== undefined,
     };
     modelPairs.push(indexedPair);
     if (conflict) {

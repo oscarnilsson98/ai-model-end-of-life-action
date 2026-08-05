@@ -28,6 +28,13 @@ export type EvidenceHealth =
 export type EvidenceOrigin = "repository" | "external-source" | "manual-claim";
 export type EvidenceKind =
   | "sdk-argument"
+  /**
+   * A static literal held by a key whose name selects a model (`model`, `modelId`,
+   * `deployment`, …), matched without any SDK knowledge. Deliberately distinct from
+   * `sdk-argument`: no provider call was proven, so it must not claim to be one. This is
+   * what keeps coverage alive when an SDK reshapes its call surface.
+   */
+  | "model-selector-key"
   | "structured-config"
   | "deployment-resource"
   | "env-binding"

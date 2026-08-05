@@ -99,7 +99,7 @@ describe("legacy feed adapter", () => {
     expect(removed.diagnostics).toEqual([]);
   });
 
-  test("derives a slug for an unregistered provider and never blocks on it", () => {
+  test("derives a slug for an unregistered provider and keeps it join-eligible", () => {
     const result = adapt([
       ...payload,
       { ...payload[0], provider: "Mistral", model_id: "mistral-large-2" },
@@ -124,8 +124,14 @@ describe("legacy feed adapter", () => {
       manifest,
     );
     const derived = loaded.index.modelPairs.find((pair) => pair.servingPlatform === "mistral");
-    expect(derived).toMatchObject({ platformSupport: "unsupported", blockingJoinEligible: false });
-    // Nonblocking, but still real coverage: lexical matching stays available.
+    // Still flagged as outside the detector's registry, because that governs display names
+    // and semantic platform proof. It no longer governs blocking authority: a provider the
+    // upstream source adds is enforceable on the run that first sees it, given evidence
+    // strong enough to reach the policy layer's own bar.
+    expect(derived).toMatchObject({
+      platformSupport: "unsupported",
+      blockingJoinEligible: true,
+    });
     expect(derived?.lexicalScanEligible).toBe(true);
     const canonical = loaded.index.modelPairs.find((pair) => pair.servingPlatform === "openai");
     expect(canonical).toMatchObject({ platformSupport: "canonical", blockingJoinEligible: true });

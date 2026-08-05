@@ -59,9 +59,9 @@ policy:
 
 Setting `failWithinDays` turns enforcement on. The built-in 180-day warning horizon and fail-closed handling for partial coverage remain in effect unless the policy explicitly overrides them.
 
-Warnings and failures measure different dates. The warning horizon opens at the earliest published lifecycle date, so a model whose deprecation date has already passed is advisory even when its shutdown is a year out — some providers stop serving at the deprecation date. Enforcement stays keyed to the shutdown date, so an early deprecation warns loudly without failing the job. See [lifecycle date precedence](docs/v3-product-contract.md#lifecycle-date-precedence).
+Warnings and failures measure different dates. The warning horizon opens at the earliest published lifecycle date, so a model whose deprecation date has already passed is advisory even when its shutdown is a year out — some providers stop serving at the deprecation date. Enforcement stays keyed to the shutdown date, so an early deprecation warns loudly without failing the job. See [lifecycle date precedence](docs/v4-product-contract.md#lifecycle-date-precedence).
 
-Only resolved deployment evidence, or resolved application evidence established as production, can block. Ordinary SDK calls remain advisory because source code alone does not prove where it is deployed. If a known application path is production, add this top-level `scopeRules` section to the same policy file, using the relevant stable rule ID from [the detector contract](docs/v3-detector-contract.md):
+Only resolved deployment evidence, or resolved application evidence established as production, can block. Ordinary SDK calls remain advisory because source code alone does not prove where it is deployed. If a known application path is production, add this top-level `scopeRules` section to the same policy file, using the relevant stable rule ID from [the detector contract](docs/v4-detector-contract.md):
 
 ```yaml
 scopeRules:
@@ -103,13 +103,17 @@ The action detects static model values in these supported integrations:
 - Azure Cognitive Services model deployments in Terraform
 - model-valued environment bindings connected to supported calls
 
-Other tracked UTF-8 files are checked for exact eligible model IDs from the lifecycle feed. Those text-only matches, documentation, examples, tests, dynamic selectors, and ambiguous serving platforms can warn or appear as notices, but never block.
+Beyond those named integrations, any static string held by a key that selects a model is read — `model`, `modelId`, `model_name`, `embeddingModel`, `engine`, and the `deployment` family — at any nesting depth, in JavaScript, TypeScript, Python and Terraform. No import, client, or recognized framework is needed. Every AI SDK converges on the parameter name rather than the call shape, so this is what covers a framework nobody has written a rule for, and what keeps working when an SDK reshapes its call surface in a new major.
+
+The value must equal a lifecycle-feed model ID exactly, so this can never invent a finding — it only names a model the feed already reports. It resolves the model but not the serving platform, so it is reported at medium confidence and blocks only when the feed publishes that model ID for exactly one platform, alongside the usual production or deployment scope requirement.
+
+Other tracked UTF-8 files are checked for exact eligible model IDs from the lifecycle feed. Those text-only matches, documentation, examples, tests, and dynamic selectors can warn or appear as notices, but never block.
 
 For the Vercel AI SDK, a provider call is read wherever it appears — `generateText({ model: openai("gpt-5") })`, a `const model = openai(id)` held for later, or a middleware wrapper — because the provider call itself is what selects the model. The provider package pins the serving platform, so these resolve and can block on the same terms as the official SDKs. `azure(...)` names a deployment and `bedrock(...)` is polymorphic, so both need a trusted resolution before they block, exactly as their official-SDK counterparts do.
 
 The supported parsers do not accept every construct in the languages they cover. JSX and TSX element syntax is read, but a residual gap remains — JSX inside a template-literal substitution, and an opening tag longer than the lookahead. Such a file falls back to the same text-only matching an unsupported language gets, and a notice names it. Because the file is still assessed, `scan-status` stays `complete` — a repository is never pushed into partial coverage, and so into `allowPartial: true`, by a parser gap.
 
-Integrations that still route model selection through their own abstraction — LangChain, LlamaIndex, LiteLLM, the legacy Google generative SDKs, and AI SDK provider packages outside the published rules such as `@ai-sdk/mistral` — are reported as an `unsupported-integration-import.<framework>@1` notice naming the framework and the files that import it, so an unread integration is not left silent. A re-export barrel and a dynamic `import(...)` count as importing it; a type-only import does not. Coverage stays `complete` and enforcement is unaffected; the notice exists because model choices made that way reach the assessment only as low-confidence text matches, which are named in Slack as text matches but can never block.
+Integrations that still route model selection through their own abstraction — LangChain, LlamaIndex, LiteLLM, the legacy Google generative SDKs, and AI SDK provider packages outside the published rules such as `@ai-sdk/mistral` — are reported as an `unsupported-integration-import.<framework>@1` notice naming the framework and the files that import it, so an unread integration is not left silent. A re-export barrel and a dynamic `import(...)` count as importing it; a type-only import does not. Coverage stays `complete` and enforcement is unaffected. The notice exists because these integrations are read at the generic tier rather than by a rule that understands them: a selection held by a model-selector key still resolves at medium confidence without a proven platform, and anything outside that — a selection passed positionally, wrapped, or computed — reaches the assessment only as a low-confidence text match that can never block.
 
 A text match does not say which provider serves the model, so one occurrence of a model ID that several providers publish is reported once — as a single finding naming every candidate platform and the earliest of their shutdown dates — not once per provider. If the repository only uses some platforms, declare them and the rest stop matching text at all:
 
@@ -126,7 +130,7 @@ The declaration applies only where the evidence itself did not establish a platf
 
 Static evidence has limits. Remote databases, secrets, provider consoles, external deployment repositories, and runtime routers are outside it. A clean result means only that no actionable lifecycle risk was found in the evidence actually assessed. [Checked-in claims](#optional-runtime-only-claims) can represent known runtime-only facts; they do not prove complete coverage.
 
-The exact support matrix and stable rule IDs are published in [the detector contract](docs/v3-detector-contract.md).
+The exact support matrix and stable rule IDs are published in [the detector contract](docs/v4-detector-contract.md).
 
 ## Reading the result
 
@@ -204,7 +208,7 @@ For generated deployment or runtime snapshots, check strict JSON evidence docume
 
 Review-overdue, stale, and expired evidence stays visible. It becomes advisory and makes declared coverage partial instead of silently disappearing.
 
-The strict policy, evidence, lifecycle-feed, and assessment-report contracts are published in [the v3 schemas](schemas/README.md); their behavioral semantics in [the v3 product contract](docs/v3-product-contract.md).
+The strict policy, evidence, lifecycle-feed, and assessment-report contracts are published in [the v3 schemas](schemas/README.md); their behavioral semantics in [the v3 product contract](docs/v4-product-contract.md).
 
 ## Inputs
 
@@ -303,7 +307,7 @@ Publication is bounded separately:
 
 The current public upstream feed is not typed. The action wraps it with an adapter manifest that classifies the source's few non-model rows by kind, so entries such as reusable prompts and agent builders never enter model matching, and that marks a small set of short ambiguous identifiers ineligible for literal scanning.
 
-Every well-formed upstream row enters the normalized lifecycle feed as soon as the source publishes it. The adapter holds no allowlist: a newly published deprecation is visible on the next run, with no action release required. Authority is bounded by platform rather than by review — a row on a registered serving platform can block an enforced run, while a row on a platform the detector does not know yet is carried as unsupported, nonblocking evidence that can warn but never fail a build. Providers the upstream source adds are supported out of the box: their platform slug is derived from the provider label, and promoting one to blocking authority remains a deliberate registry, display-name and detector change.
+Every well-formed upstream row enters the normalized lifecycle feed as soon as the source publishes it. The adapter holds no allowlist: a newly published deprecation is visible on the next run, with no action release required. Authority is bounded by how strong the evidence is and whether the serving platform is established, not by a platform registry. A provider the upstream source adds is enforceable on the run that first sees it: its platform slug is derived from the provider label, and the registry now governs only display names and the platform proof that a per-provider rule supplies. Where nothing proves the platform, the feed can: a model ID the feed publishes for exactly one platform is established by that fact alone, since a model served elsewhere on a different timeline would carry its own upstream row.
 
 Fields the adapter does not read are ignored, so an additive upstream column never fails a run. Malformed rows and duplicate pairs are quarantined one row at a time with a diagnostic and make `scan-status: partial`, so one bad row costs that row rather than the whole feed. Invalid adapter metadata and schema failures still produce `unknown + failed`. A provider label that yields no valid platform slug at all has its rows skipped with a diagnostic and makes `scan-status: partial`; if no row resolves a platform, or no row is well formed at all, the non-empty feed contract fails.
 
@@ -341,4 +345,4 @@ bun run build
 
 `dist/index.js` is committed and must match `src/main.ts`.
 
-The detailed behavioral guarantees are captured in [the product contract](docs/v3-product-contract.md) and [detector contract](docs/v3-detector-contract.md). See [GitHub Releases](https://github.com/oscarnilsson98/ai-model-end-of-life-action/releases) for release history. Maintainers should follow [the release runbook](docs/releasing.md) when publishing a version.
+The detailed behavioral guarantees are captured in [the product contract](docs/v4-product-contract.md) and [detector contract](docs/v4-detector-contract.md). See [GitHub Releases](https://github.com/oscarnilsson98/ai-model-end-of-life-action/releases) for release history. Maintainers should follow [the release runbook](docs/releasing.md) when publishing a version.

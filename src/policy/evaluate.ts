@@ -173,6 +173,10 @@ function applyResolutions(
 const PROTECTED_SCOPES = new Set<EvidenceScope>(["documentation", "test", "example"]);
 const REPOSITORY_BLOCKING_KINDS = new Set<EvidenceFact["kind"]>([
   "sdk-argument",
+  // A keyed literal is definite about which model, and the scope and platform requirements
+  // below decide the rest. Excluding it would leave enforcement dependent on per-SDK rules,
+  // so an SDK reshaping its call surface would silently disable the gate.
+  "model-selector-key",
   "structured-config",
   "deployment-resource",
 ]);
@@ -347,18 +351,23 @@ function policyOutcome(input: {
   // Enforcement deliberately stays keyed to the shutdown date. The warning horizon may
   // open early on a deprecation, but failing a job is the irreversible direction and
   // `failWithinDays` is contracted against the date the model stops being served.
+  // A keyed literal blocks on the same terms as a proven provider call. It resolves an
+  // exact feed identifier, so it is definite about *which* model; what it does not prove is
+  // where that model runs, and `exactPlatform` is what settles that. Prose stays advisory.
+  const confidenceCanBlock = fact.confidence === "high" || fact.confidence === "medium";
   const breachEligible =
     policy.failWithinDays !== null &&
     daysUntilShutdown !== null &&
     daysUntilShutdown <= policy.failWithinDays &&
     originAndKindCanBlock(fact) &&
     fact.policyEligible &&
-    fact.confidence === "high" &&
+    confidenceCanBlock &&
     (fact.scope === "deployment" ||
       (fact.scope === "application" && fact.environment === "production")) &&
     fact.modelResolution === "resolved" &&
-    fact.platformResolution === "resolved" &&
     fact.selectorKind === "model-id" &&
+    // Either the evidence resolved the platform, or the feed did by publishing the ID for
+    // exactly one platform. `joinFact` decides which sources of ambiguity qualify.
     exactPlatform &&
     pair.blockingJoinEligible &&
     !pair.conflict &&
@@ -557,6 +566,27 @@ function collapseAmbiguousCandidates(
   };
 }
 
+/**
+ * Whether the feed itself establishes this fact's serving platform.
+ *
+ * A model ID the feed publishes for exactly one platform is resolved by the feed as
+ * definitively as any registry entry would resolve it: if the same ID were served
+ * elsewhere with a different lifecycle, upstream would carry that row too.
+ *
+ * Deliberately restricted to facts whose platform is unknown because nothing inspected an
+ * SDK — a keyed literal or a config resource. An `sdk-argument` fact is ambiguous for the
+ * opposite reason: its client had a dynamic endpoint, which usually means a proxy or
+ * gateway, so the model behind it may not be this platform's model at all. Those keep the
+ * conservative downgrade.
+ */
+function feedResolvesPlatform(
+  fact: EvidenceFact,
+  pairs: readonly IndexedModelPair[],
+): boolean {
+  if (fact.kind !== "model-selector-key" && fact.kind !== "structured-config") return false;
+  return new Set(pairs.map((pair) => pair.servingPlatform)).size === 1;
+}
+
 function joinFact(fact: EvidenceFact, feed: V3FeedIndex, policy: Policy, now: number): LifecycleFinding[] {
   if (fact.modelResolution !== "resolved" || fact.modelId === undefined) return [];
   let pairs: IndexedModelPair[] = [];
@@ -567,6 +597,7 @@ function joinFact(fact: EvidenceFact, feed: V3FeedIndex, policy: Policy, now: nu
     exactPlatform = true;
   } else if (fact.platformResolution === "ambiguous") {
     pairs = feed.modelPairs.filter((pair) => pair.modelId === fact.modelId);
+    exactPlatform = feedResolvesPlatform(fact, pairs);
   }
   // A declared platform set narrows only the platforms the evidence left open,
   // so a declaration can never hide a finding that could have blocked.
