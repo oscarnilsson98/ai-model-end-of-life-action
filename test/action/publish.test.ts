@@ -147,6 +147,42 @@ test("one collapsed finding annotates once and names every candidate platform", 
   expect(suppressionLine).toContain("azure or openai");
 });
 
+test("annotates degraded coverage so an upstream outage is not a silent green check", () => {
+  const report = cleanReport();
+  // An unavailable feed produces no findings at all, so the coverage diagnostic is the
+  // only thing that can make the degradation visible in the Checks UI.
+  report.scanStatus = "partial";
+  report.diagnostics = [
+    {
+      code: "feed-unavailable",
+      message: "The upstream lifecycle feed could not be loaded.",
+      severity: "partial",
+    },
+    { code: "some-notice", message: "Informational only.", severity: "notice" },
+  ];
+
+  const lines: string[] = [];
+  publishAnnotations(report, (line: string) => lines.push(line));
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("::warning");
+  expect(lines[0]).toContain("feed-unavailable");
+});
+
+test("collapses coverage annotations beyond the published bound", () => {
+  const report = cleanReport();
+  report.scanStatus = "partial";
+  report.diagnostics = Array.from({ length: 7 }, (_, index) => ({
+    code: `blind-spot-${index}`,
+    message: "A blob no detector assessed.",
+    severity: "partial" as const,
+  }));
+
+  const lines: string[] = [];
+  publishAnnotations(report, (line: string) => lines.push(line));
+  expect(lines.filter((line) => line.startsWith("::warning"))).toHaveLength(5);
+  expect(lines.at(-1)).toContain("2 additional coverage diagnostic(s)");
+});
+
 test("the summary names the deprecation date when it is the nearer deadline", () => {
   const report = cleanReport();
   report.result = "advisory";

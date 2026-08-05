@@ -884,7 +884,49 @@ describe("v3 production orchestration", () => {
 
   test("leaves feed freshness outputs empty when the feed never loaded", async () => {
     const fixture = fixtureEnvironment();
-    await rejectedReport(
+    await run(
+      dependencies(fixture, {
+        loadFeed: async () => {
+          throw new Error("fixture feed unavailable");
+        },
+      }),
+    );
+    expect(outputs(fixture.outputPath)).toMatchObject({
+      "feed-generated-at": "",
+      "feed-age-days": "",
+      "scan-status": "partial",
+    });
+  });
+
+  test("degrades to partial without failing a warning-only run when the feed cannot be loaded", async () => {
+    const fixture = fixtureEnvironment();
+    // An upstream outage must not break every consumer's job. Coverage degrades, the
+    // outage is reported, and only an enforcing run fails closed on it.
+    const report = await run(
+      dependencies(fixture, {
+        loadFeed: async () => {
+          throw new Error("fixture feed schema failed");
+        },
+      }),
+    );
+
+    expect(report).toMatchObject({
+      scanStatus: "partial",
+      exitReason: "none",
+    });
+    expect(report.diagnostics).toContainEqual(
+      expect.objectContaining({ code: "feed-unavailable", severity: "partial" }),
+    );
+    expect(reportFrom(fixture.reportPath)).toEqual(report);
+    expect(outputs(fixture.outputPath)).toMatchObject({
+      "scan-status": "partial",
+      "exit-reason": "none",
+    });
+  });
+
+  test("fails closed on an unavailable feed once enforcement is enabled", async () => {
+    const fixture = fixtureEnvironment({ "INPUT_FAIL-WITHIN-DAYS": "30" });
+    const report = await rejectedReport(
       run(
         dependencies(fixture, {
           loadFeed: async () => {
@@ -893,38 +935,9 @@ describe("v3 production orchestration", () => {
         }),
       ),
     );
-    expect(outputs(fixture.outputPath)).toMatchObject({
-      "feed-generated-at": "",
-      "feed-age-days": "",
-      "scan-status": "failed",
-    });
-  });
-
-  test("publishes unknown plus failed when the feed cannot be loaded", async () => {
-    const fixture = fixtureEnvironment();
-    const report = await rejectedReport(
-      run(
-        dependencies(fixture, {
-          loadFeed: async () => {
-            throw new Error("fixture feed schema failed");
-          },
-        }),
-      ),
-    );
-
     expect(report).toMatchObject({
-      result: "unknown",
-      scanStatus: "failed",
-      exitReason: "assessment-failed",
-    });
-    expect(report.diagnostics).toContainEqual(
-      expect.objectContaining({ code: "feed-failed", severity: "failed" }),
-    );
-    expect(reportFrom(fixture.reportPath)).toEqual(report);
-    expect(outputs(fixture.outputPath)).toMatchObject({
-      result: "unknown",
-      "scan-status": "failed",
-      "exit-reason": "assessment-failed",
+      scanStatus: "partial",
+      exitReason: "partial-disallowed",
     });
   });
 
@@ -1060,13 +1073,23 @@ describe("v3 release-gate exit and orchestration matrix", () => {
         },
       },
       {
-        name: "operational feed failure",
+        name: "operational feed failure degrades warning-only coverage",
+        feedFailure: true,
+        expected: {
+          result: "no-actionable-risk",
+          scanStatus: "partial",
+          exitReason: "none",
+        },
+      },
+      {
+        name: "operational feed failure fails closed under enforcement",
+        inputs: { "INPUT_FAIL-WITHIN-DAYS": "30" },
         feedFailure: true,
         shouldReject: true,
         expected: {
-          result: "unknown",
-          scanStatus: "failed",
-          exitReason: "assessment-failed",
+          result: "no-actionable-risk",
+          scanStatus: "partial",
+          exitReason: "partial-disallowed",
         },
       },
       {

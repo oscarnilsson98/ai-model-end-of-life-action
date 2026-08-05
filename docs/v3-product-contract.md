@@ -116,7 +116,15 @@ An unsupported file format is diagnostic only unless the file was classified as 
 
 Coverage and fidelity are separate concerns. `scan-status` reports coverage: whether every eligible input reached an applicable detector or its fallback. It does not report which detector tier succeeded. A blob a published semantic detector could not tokenize is still assessed by the bounded lexical fallback, exactly as a language with no published semantic detector is, so it is reported as a `semantic-tokenization-incomplete@1` notice and declared coverage stays `complete`. The lost fidelity is already carried by the surviving facts: lexical evidence keeps lexical confidence and is never policy eligible, so it cannot block. A blob no detector assessed at all — over the published per-blob limit, unavailable, or not decodable as UTF-8 — is still a coverage blind spot and still makes coverage partial. This keeps `allow-partial` a decision about genuine blind spots rather than a switch a repository must flip because a valid construct such as JSX is outside the published tokenizers.
 
-`failed` includes feed/schema validation failures, missing or invalid target Git objects, malformed Git object metadata, aggregate evidence-scan budget exhaustion, invalid trusted policy/evidence documents, internal invariant failures, or inability to produce the required bounded outputs. Detail-output compaction is independent of assessment coverage and MUST NOT make a scan partial or failed.
+`failed` includes typed-feed schema validation failures, missing or invalid target Git objects, malformed Git object metadata, invalid trusted policy/evidence documents, internal invariant failures, or inability to produce the required bounded outputs. Detail-output compaction is independent of assessment coverage and MUST NOT make a scan partial or failed.
+
+Three upstream and scale conditions are deliberately `partial` rather than `failed`, because each is a bounded loss of coverage the run can still describe, and failing the step would turn a third-party problem into a simultaneous outage for every consumer:
+
+- the upstream lifecycle feed could not be fetched or decoded at all, so no lifecycle records were available;
+- individual upstream rows were quarantined because the adapter could not turn them into records;
+- the aggregate evidence-scan budget was exhausted, so the remainder of the tree was not scanned.
+
+In every case the run publishes the specific diagnostic, declares `partial`, and leaves the decision to policy: enforcement still fails closed through `partial-disallowed` unless trusted policy sets `allow-partial: true`, while a warning-only run reports the condition without failing.
 
 `comparison-status: available` requires complete fact-extraction coverage for the base and target trees. An identified base blob/parser blind spot makes comparison `partial`, not unavailable: readable facts are still classified, but a potentially new target blocker is conservatively marked `comparison-unknown`, advisory at most, and never blocking. That partial comparison also makes run `scan-status: partial`. Evidence freshness debt alone does not hide base facts and therefore does not degrade comparison status. A missing/unreadable base tree or unavailable required base-policy object makes comparison `unavailable` and follows the `unknown + partial` diagnostic fallback. A present but malformed trusted base policy is instead a schema failure: `unknown + failed`.
 
@@ -126,7 +134,8 @@ Enforcement is enabled when the effective trusted policy sets `fail-within-days`
 
 | Condition | `result` | `scan-status` | Step |
 | --- | --- | --- | --- |
-| Feed, trusted schema, target snapshot, aggregate scan budget, or internal failure | `unknown` | `failed` | Fail |
+| Typed-feed schema, trusted schema, target snapshot, or internal failure | `unknown` | `failed` | Fail |
+| Upstream feed unavailable, rows quarantined, or aggregate scan budget exhausted | per evidence | `partial` | Fail closed only under enforcement |
 | Required PR/merge-group comparison authority unavailable after diagnostic fallback | `unknown` | `partial` | Fail closed |
 | No actionable evidence and complete assessment | `no-actionable-risk` | `complete` | Succeed |
 | Advisory evidence and complete assessment | `advisory` | `complete` | Succeed |
@@ -249,7 +258,7 @@ Implementations MUST use equivalent safe operations to:
 - diagnose symlink blobs, submodule gitlinks, Git LFS pointers, missing partial-clone objects, and unavailable blobs;
 - classify tracked generated and bundled files instead of blindly excluding paths such as `dist/`.
 
-Regular and executable Git blobs are eligible content. Symlinks are identified as link-text blobs and are never followed or semantically scanned. Gitlinks and valid LFS pointers are declared repository boundaries, not errors by themselves. An unknown tree-entry mode, malformed object response, or inconsistent object type fails the assessment. A published per-blob limit may produce an identified partial blind spot; exhausting the published aggregate assessment budget is a failure, not a green partial result.
+Regular and executable Git blobs are eligible content. Symlinks are identified as link-text blobs and are never followed or semantically scanned. Gitlinks and valid LFS pointers are declared repository boundaries, not errors by themselves. An unknown tree-entry mode, malformed object response, or inconsistent object type fails the assessment. A published per-blob limit may produce an identified partial blind spot; exhausting the published aggregate assessment budget truncates the scan and is reported as an identified partial blind spot with its own diagnostic, never as a green complete result.
 
 Event-to-tree selection is exact:
 
@@ -299,7 +308,7 @@ The feed additionally limits adapter IDs to 128 Unicode code points, adapter ver
 
 Policy fields limit stable IDs to 128 Unicode code points, model IDs to 256, platform slugs to 63, timestamps to 64, detector rule IDs to 256, path or raw-value list entries to 1,024, and other free text to 4,096. Evidence documents use the same 128-code-point stable-ID, 256-code-point model-ID, 63-code-point platform, 64-code-point timestamp, and 4,096-code-point free-text limits.
 
-A Git blob above 2 MiB is retained as an identified `partial` blind spot. Exhausting an aggregate Git budget, the event, feed, detector-fact, or report budget, or a trusted policy/evidence document budget fails closed with `unknown + failed`. An over-limit target-only PR policy or evidence document follows the monotonic invalid-target contract instead: it is excluded from authority and reported as an advisory configuration change.
+A Git blob above 2 MiB is retained as an identified `partial` blind spot. Exhausting the aggregate detector-fact budget truncates the scan and is reported as an identified `partial` blind spot. Exhausting an aggregate Git budget, the event, feed, or report budget, or a trusted policy/evidence document budget fails closed with `unknown + failed`. An over-limit target-only PR policy or evidence document follows the monotonic invalid-target contract instead: it is excluded from authority and reported as an advisory configuration change.
 
 Network operations are bounded too. Each lifecycle-feed attempt has a 15-second timeout and there are at most three attempts including retries. Slack has one 15-second attempt and is never retried because a failed response might still have delivered the message.
 
@@ -592,9 +601,9 @@ A frozen upstream is indistinguishable from a healthy one at the row level: ever
 
 Every run MUST measure the feed envelope's `generatedAt` against the effective `max-feed-age-days` horizon. Beyond the horizon the run MUST emit a bounded `feed-stale` diagnostic and MUST make `scan-status: partial`, which carries the standard consequences: warning-only evaluation succeeds with a visible signal, enforcement fails closed unless `allowPartial: true`. Feed age MUST NOT by itself change `result`, since staleness is a coverage property rather than a lifecycle finding, and MUST NOT degrade `comparison-status`, since both comparison sides share one feed snapshot.
 
-`generatedAt` is the only freshness signal both feed paths carry: a typed producer states it directly, and the reviewed adapter derives it from the newest reviewed `scraped_at`. The stale diagnostic MUST state the production instant and the configured horizon rather than the elapsed day count, so that a persistent outage yields a stable `scan-fingerprint` instead of churning daily. The measured age and instant MUST be published as `feed-age-days` and `feed-generated-at`, and MUST be empty when the feed never loaded — a feed that fails to load is already `unknown + failed` and needs no separate freshness claim.
+`generatedAt` is the only freshness signal both feed paths carry: a typed producer states it directly, and the reviewed adapter derives it from the newest reviewed `scraped_at`. The stale diagnostic MUST state the production instant and the configured horizon rather than the elapsed day count, so that a persistent outage yields a stable `scan-fingerprint` instead of churning daily. The measured age and instant MUST be published as `feed-age-days` and `feed-generated-at`, and MUST be empty when the feed never loaded — a feed that fails to load already carries its own `feed-unavailable` diagnostic and needs no separate freshness claim.
 
-Duplicate source pairs, malformed rows, unknown fields, invalid adapter metadata, and typed-feed schema failures produce `unknown + failed`. A provider label yielding no syntactically valid platform slug has its rows skipped with a bounded diagnostic and makes `scan-status: partial`; a source in which no row resolves a platform also fails the non-empty feed contract. A syntactically valid but detector-unsupported platform remains visible as unsupported, nonblocking evidence; it does not invalidate an otherwise valid feed.
+Fields the adapter does not read are ignored, so an additive upstream column is ordinary operation rather than a simultaneous failure for every consumer; field-set drift is surfaced by the scheduled upstream-contract job instead. Duplicate source pairs and malformed rows are quarantined individually with a bounded diagnostic and make `scan-status: partial`, keeping the first occurrence of a duplicated pair. Invalid adapter metadata and typed-feed schema failures still produce `unknown + failed`. A provider label yielding no syntactically valid platform slug has its rows skipped with a bounded diagnostic and makes `scan-status: partial`; a source in which no row resolves a platform, or in which no row is well formed at all, also fails the non-empty feed contract. A syntactically valid but detector-unsupported platform remains visible as unsupported, nonblocking evidence; it does not invalidate an otherwise valid feed.
 
 ## Scheduled visibility and notifications
 

@@ -20,6 +20,8 @@ const MAX_DETAIL_OUTPUT_BYTES = 120 * 1024;
 const MAX_TOTAL_OUTPUT_BYTES = 700 * 1024;
 const MAX_REPORT_BYTES = 25 * 1024 * 1024;
 const MAX_ANNOTATIONS = 10;
+/** Bounded separately from findings so a degraded scan cannot crowd out lifecycle risk. */
+const MAX_COVERAGE_ANNOTATIONS = 5;
 
 /**
  * Neutralize repository-derived text for the Markdown job summary. Beyond HTML
@@ -276,6 +278,31 @@ export function publishAnnotations(report: AssessmentReport, log: Log = console.
     emitCommand(
       "notice",
       `${actionable.length - emitted} additional lifecycle annotation(s) were collapsed into the summary and report.`,
+      log,
+    );
+  }
+  publishCoverageAnnotations(report, log);
+}
+
+/**
+ * Degraded coverage must be visible in the Checks UI, not only in the job summary. A run
+ * whose feed was unavailable has no findings to annotate, so without this an outage would
+ * present as an unannotated green check — the silent all-clear this action exists to avoid.
+ */
+function publishCoverageAnnotations(report: AssessmentReport, log: Log): void {
+  const degraded = report.diagnostics.filter(
+    (diagnostic) => diagnostic.severity === "partial" || diagnostic.severity === "failed",
+  );
+  let emitted = 0;
+  for (const diagnostic of degraded) {
+    if (emitted >= MAX_COVERAGE_ANNOTATIONS) break;
+    emitCommand("warning", compact(`${diagnostic.code}: ${diagnostic.message}`, 2_000), log);
+    emitted += 1;
+  }
+  if (degraded.length > emitted) {
+    emitCommand(
+      "notice",
+      `${degraded.length - emitted} additional coverage diagnostic(s) were collapsed into the summary and report.`,
       log,
     );
   }

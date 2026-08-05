@@ -9688,9 +9688,12 @@ var JSX_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".tsx"]);
 var HCL_EXTENSIONS = new Set([".tf", ".hcl"]);
 var IDENTIFIER_CHARACTER = /^[\p{L}\p{N}\p{M}._:/-]$/u;
 var DIRECT_POLICY_RULES = new Set(DETECTOR_RULES.filter((rule) => rule.policyEligible).map((rule) => rule.ruleId));
+
+class EvidenceBudgetExceededError extends Error {
+}
 function assertEvidenceBudget(count) {
   if (count > MAX_EVIDENCE_FACTS) {
-    throw new Error(`Detector evidence exceeds the aggregate ${MAX_EVIDENCE_FACTS}-fact budget.`);
+    throw new EvidenceBudgetExceededError(`Detector evidence exceeds the aggregate ${MAX_EVIDENCE_FACTS}-fact budget.`);
   }
 }
 function compareText5(left, right) {
@@ -12810,101 +12813,112 @@ function detectSnapshot(snapshot, feed) {
   }));
   let partial = snapshot.scanStatus === "partial";
   const unsupportedFrameworkImportsByFramework = new Map;
-  for (const entry of snapshot.entries) {
-    if (entry.content.state !== "available" || entry.kind === "symlink")
-      continue;
-    if (isClaimDocument(entry.displayPath))
-      continue;
-    let source;
-    try {
-      source = new TextDecoder("utf-8", { fatal: true }).decode(entry.content.bytes);
-    } catch {
-      if (supportedSemanticPath(entry.displayPath)) {
-        partial = true;
-        diagnostics.push({
-          code: "invalid-detector-encoding",
-          message: "A published semantic detector could not process this non-UTF-8 blob.",
-          path: entry.displayPath,
-          severity: "partial"
-        });
-      }
-      continue;
-    }
-    const scope = classifyEvidenceScope(entry.displayPath, true);
-    const extension = import_node_path.extname(entry.displayPath.toLowerCase());
-    let semantic = [];
-    let literalSpans = [];
-    let tokenizationIssue;
-    let semanticLanguage;
-    let moduleSpecifiers = new Set;
-    if (JS_EXTENSIONS.has(extension)) {
-      semanticLanguage = "javascript";
-      const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "javascript", scope, JSX_EXTENSIONS.has(extension));
-      semantic = detected.facts;
-      literalSpans = detected.literalSpans;
-      tokenizationIssue = detected.tokenizationIssue;
-      consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      moduleSpecifiers = detected.moduleSpecifiers;
-    } else if (extension === ".py") {
-      semanticLanguage = "python";
-      const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
-      semantic = detected.facts;
-      literalSpans = detected.literalSpans;
-      tokenizationIssue = detected.tokenizationIssue;
-      consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
-      moduleSpecifiers = detected.moduleSpecifiers;
-    } else if (HCL_EXTENSIONS.has(extension)) {
-      semanticLanguage = "hcl";
-      const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
-      semantic = detected.facts;
-      tokenizationIssue = detected.tokenizationIssue;
-    }
-    if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
-      diagnostics.push(tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue));
-    }
-    if (semanticLanguage === "javascript" || semanticLanguage === "python") {
-      recordUnsupportedFrameworks(unsupportedFrameworkImportsByFramework, unsupportedFrameworkImports(moduleSpecifiers, semantic, semanticLanguage), entry.displayPath);
-    }
-    const lexical = lexicalFacts(source, entry.displayPath, entry.objectId, candidates, automaton, literalSpans);
-    evidence.push(...semantic, ...lexical);
-    assertEvidenceBudget(evidence.length);
-  }
-  if (consumedEnvironmentSelectors.length > 0) {
-    const consumedNames = new Set(consumedEnvironmentSelectors.map((consumer) => consumer.variable));
-    const activeModelIds = new Set(feed.modelPairs.filter((pair) => pair.activeLifecycles.length > 0).map((pair) => pair.modelId));
-    const assignments = [];
+  try {
     for (const entry of snapshot.entries) {
       if (entry.content.state !== "available" || entry.kind === "symlink")
         continue;
-      const dotenv = DOTENV_PATH.test(entry.displayPath);
-      const workflow = GITHUB_WORKFLOW_PATH.test(entry.displayPath);
-      if (!dotenv && !workflow)
+      if (isClaimDocument(entry.displayPath))
         continue;
       let source;
       try {
         source = new TextDecoder("utf-8", { fatal: true }).decode(entry.content.bytes);
       } catch {
-        continue;
-      }
-      if (dotenv) {
-        assignments.push(...parseDotenvAssignments(source, entry.displayPath, entry.objectId, consumedNames, activeModelIds));
-      } else {
-        const parsed = parseGithubWorkflowAssignments(source, entry.displayPath, entry.objectId, consumedNames, activeModelIds);
-        assignments.push(...parsed.assignments);
-        if (parsed.invalid) {
+        if (supportedSemanticPath(entry.displayPath)) {
           partial = true;
           diagnostics.push({
-            code: "invalid-github-actions-yaml",
-            message: "A tracked GitHub workflow could not be parsed for static environment bindings.",
+            code: "invalid-detector-encoding",
+            message: "A published semantic detector could not process this non-UTF-8 blob.",
             path: entry.displayPath,
             severity: "partial"
           });
         }
+        continue;
       }
-      assertEvidenceBudget(assignments.length);
+      const scope = classifyEvidenceScope(entry.displayPath, true);
+      const extension = import_node_path.extname(entry.displayPath.toLowerCase());
+      let semantic = [];
+      let literalSpans = [];
+      let tokenizationIssue;
+      let semanticLanguage;
+      let moduleSpecifiers = new Set;
+      if (JS_EXTENSIONS.has(extension)) {
+        semanticLanguage = "javascript";
+        const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "javascript", scope, JSX_EXTENSIONS.has(extension));
+        semantic = detected.facts;
+        literalSpans = detected.literalSpans;
+        tokenizationIssue = detected.tokenizationIssue;
+        consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
+        moduleSpecifiers = detected.moduleSpecifiers;
+      } else if (extension === ".py") {
+        semanticLanguage = "python";
+        const detected = detectSdkCalls(source, entry.displayPath, entry.objectId, "python", scope);
+        semantic = detected.facts;
+        literalSpans = detected.literalSpans;
+        tokenizationIssue = detected.tokenizationIssue;
+        consumedEnvironmentSelectors.push(...detected.consumedEnvironmentSelectors);
+        moduleSpecifiers = detected.moduleSpecifiers;
+      } else if (HCL_EXTENSIONS.has(extension)) {
+        semanticLanguage = "hcl";
+        const detected = detectTerraform(source, entry.displayPath, entry.objectId, scope);
+        semantic = detected.facts;
+        tokenizationIssue = detected.tokenizationIssue;
+      }
+      if (tokenizationIssue !== undefined && semanticLanguage !== undefined) {
+        diagnostics.push(tokenizationFidelityDiagnostic(entry.displayPath, semanticLanguage, tokenizationIssue));
+      }
+      if (semanticLanguage === "javascript" || semanticLanguage === "python") {
+        recordUnsupportedFrameworks(unsupportedFrameworkImportsByFramework, unsupportedFrameworkImports(moduleSpecifiers, semantic, semanticLanguage), entry.displayPath);
+      }
+      const lexical = lexicalFacts(source, entry.displayPath, entry.objectId, candidates, automaton, literalSpans);
+      evidence.push(...semantic, ...lexical);
+      assertEvidenceBudget(evidence.length);
     }
-    evidence.push(...environmentBindingFacts(assignments, consumedEnvironmentSelectors, feed));
-    assertEvidenceBudget(evidence.length);
+    if (consumedEnvironmentSelectors.length > 0) {
+      const consumedNames = new Set(consumedEnvironmentSelectors.map((consumer) => consumer.variable));
+      const activeModelIds = new Set(feed.modelPairs.filter((pair) => pair.activeLifecycles.length > 0).map((pair) => pair.modelId));
+      const assignments = [];
+      for (const entry of snapshot.entries) {
+        if (entry.content.state !== "available" || entry.kind === "symlink")
+          continue;
+        const dotenv = DOTENV_PATH.test(entry.displayPath);
+        const workflow = GITHUB_WORKFLOW_PATH.test(entry.displayPath);
+        if (!dotenv && !workflow)
+          continue;
+        let source;
+        try {
+          source = new TextDecoder("utf-8", { fatal: true }).decode(entry.content.bytes);
+        } catch {
+          continue;
+        }
+        if (dotenv) {
+          assignments.push(...parseDotenvAssignments(source, entry.displayPath, entry.objectId, consumedNames, activeModelIds));
+        } else {
+          const parsed = parseGithubWorkflowAssignments(source, entry.displayPath, entry.objectId, consumedNames, activeModelIds);
+          assignments.push(...parsed.assignments);
+          if (parsed.invalid) {
+            partial = true;
+            diagnostics.push({
+              code: "invalid-github-actions-yaml",
+              message: "A tracked GitHub workflow could not be parsed for static environment bindings.",
+              path: entry.displayPath,
+              severity: "partial"
+            });
+          }
+        }
+        assertEvidenceBudget(assignments.length);
+      }
+      evidence.push(...environmentBindingFacts(assignments, consumedEnvironmentSelectors, feed));
+      assertEvidenceBudget(evidence.length);
+    }
+  } catch (error) {
+    if (!(error instanceof EvidenceBudgetExceededError))
+      throw error;
+    partial = true;
+    diagnostics.push({
+      code: "evidence-budget-exceeded",
+      message: `Detector evidence reached the aggregate ${String(MAX_EVIDENCE_FACTS)}-fact budget, so the remainder of the tree was not scanned.`,
+      severity: "partial"
+    });
   }
   diagnostics.push(...unsupportedFrameworkDiagnostics(unsupportedFrameworkImportsByFramework, evidence));
   evidence.sort((left, right) => compareText5(left.evidenceId, right.evidenceId));
@@ -14013,20 +14027,7 @@ var NON_MODEL_RECORD_KINDS2 = new Set([
   "agent",
   "other"
 ]);
-var LEGACY_FIELDS = new Set([
-  "provider",
-  "model_id",
-  "shutdown_date",
-  "deprecation_date",
-  "announcement_date",
-  "replacement_models",
-  "deprecation_context",
-  "url",
-  "content_hash",
-  "scraped_at",
-  "first_observed",
-  "last_observed"
-]);
+var MAX_INVALID_RECORD_REASON_PREVIEWS = 20;
 var DEFAULT_LEGACY_ADAPTER_MANIFEST = Object.freeze({
   id: "deprecations-info-v1-adapter",
   version: "2026-08-04.1",
@@ -14179,10 +14180,6 @@ function validateManifestClassifications(manifest) {
 function parseLegacyRecord(value, index, now) {
   const label = `Legacy feed record ${index}`;
   const source = object3(value, label);
-  const unknown = Object.keys(source).filter((key) => !LEGACY_FIELDS.has(key));
-  if (unknown.length > 0) {
-    throw new Error(`${label} has unreviewed field(s): ${unknown.sort().join(", ")}.`);
-  }
   const provider = text2(source.provider, `${label}.provider`, 100);
   const modelId2 = text2(source.model_id, `${label}.model_id`, 2048);
   const shutdownDate = optionalDate(source.shutdown_date, `${label}.shutdown_date`);
@@ -14280,10 +14277,34 @@ function adaptDecodedLegacyFeed(payload, sourceBytes, manifest = DEFAULT_LEGACY_
   if (!Array.isArray(payload) || payload.length === 0 || payload.length > MAX_LEGACY_RECORDS) {
     throw new Error(`Legacy feed must be a non-empty array of at most ${MAX_LEGACY_RECORDS} records.`);
   }
-  const records = payload.map((value, index) => parseLegacyRecord(value, index, now));
-  const receivedPairIdentities = new Set(records.map((record) => pairIdentity(record.provider, record.modelId)));
-  if (receivedPairIdentities.size !== records.length) {
-    throw new Error("Legacy feed contains duplicate source provider/identifier pairs.");
+  const records = [];
+  const invalidReasons = [];
+  const seenPairIdentities = new Set;
+  for (const [index, value] of payload.entries()) {
+    let record;
+    try {
+      record = parseLegacyRecord(value, index, now);
+    } catch (error) {
+      invalidReasons.push(error instanceof Error ? error.message : String(error));
+      continue;
+    }
+    const identity = pairIdentity(record.provider, record.modelId);
+    if (seenPairIdentities.has(identity)) {
+      invalidReasons.push(`Legacy feed record ${index} duplicates source provider/identifier pair ${identity}.`);
+      continue;
+    }
+    seenPairIdentities.add(identity);
+    records.push(record);
+  }
+  const invalidRecordDiagnostics = invalidReasons.length === 0 ? [] : [
+    {
+      kind: "feed-invalid-record",
+      skippedRecordCount: invalidReasons.length,
+      reasons: [...invalidReasons].sort(compareText6).slice(0, MAX_INVALID_RECORD_REASON_PREVIEWS)
+    }
+  ];
+  if (records.length === 0) {
+    throw new Error("Legacy feed contains no well-formed records.");
   }
   const classifications = validateManifestClassifications(manifest);
   const resolved = [];
@@ -14297,13 +14318,16 @@ function adaptDecodedLegacyFeed(payload, sourceBytes, manifest = DEFAULT_LEGACY_
     resolved.push({ record, servingPlatform });
   }
   const skippedRecordCount = records.length - resolved.length;
-  const diagnostics = skippedRecordCount === 0 ? [] : [
-    {
-      kind: "feed-unresolved-provider",
-      skippedRecordCount,
-      providerCount: unresolvedProviders.size,
-      providers: [...unresolvedProviders].sort(compareText6).slice(0, MAX_PROVIDER_DIAGNOSTIC_PREVIEWS)
-    }
+  const diagnostics = [
+    ...invalidRecordDiagnostics,
+    ...skippedRecordCount === 0 ? [] : [
+      {
+        kind: "feed-unresolved-provider",
+        skippedRecordCount,
+        providerCount: unresolvedProviders.size,
+        providers: [...unresolvedProviders].sort(compareText6).slice(0, MAX_PROVIDER_DIAGNOSTIC_PREVIEWS)
+      }
+    ]
   ];
   if (resolved.length === 0) {
     throw new Error("Legacy feed contains no records with a resolvable serving platform.");
@@ -14737,6 +14761,7 @@ var MAX_DETAIL_OUTPUT_BYTES = 120 * 1024;
 var MAX_TOTAL_OUTPUT_BYTES = 700 * 1024;
 var MAX_REPORT_BYTES = 25 * 1024 * 1024;
 var MAX_ANNOTATIONS = 10;
+var MAX_COVERAGE_ANNOTATIONS = 5;
 function escapeHtml(value) {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/#/g, "&#35;").replace(/\\/g, "&#92;").replace(/\|/g, "&#124;").replace(/`/g, "&#96;").replace(/\[/g, "&#91;").replace(/\]/g, "&#93;").replace(/!/g, "&#33;").replace(/\(/g, "&#40;").replace(/\)/g, "&#41;").replace(/\*/g, "&#42;").replace(/_/g, "&#95;").replace(/~/g, "&#126;").replace(/@/g, "&#64;").replace(/:/g, "&#58;").replace(/\./g, "&#46;").replace(/[\r\n]+/g, "<br>");
 }
@@ -14844,6 +14869,20 @@ function publishAnnotations(report, log = console.log) {
   }
   if (actionable.length > emitted) {
     emitCommand("notice", `${actionable.length - emitted} additional lifecycle annotation(s) were collapsed into the summary and report.`, log);
+  }
+  publishCoverageAnnotations(report, log);
+}
+function publishCoverageAnnotations(report, log) {
+  const degraded = report.diagnostics.filter((diagnostic) => diagnostic.severity === "partial" || diagnostic.severity === "failed");
+  let emitted = 0;
+  for (const diagnostic of degraded) {
+    if (emitted >= MAX_COVERAGE_ANNOTATIONS)
+      break;
+    emitCommand("warning", compact(`${diagnostic.code}: ${diagnostic.message}`, 2000), log);
+    emitted += 1;
+  }
+  if (degraded.length > emitted) {
+    emitCommand("notice", `${degraded.length - emitted} additional coverage diagnostic(s) were collapsed into the summary and report.`, log);
   }
 }
 function boundedJson(values) {
@@ -15504,6 +15543,39 @@ function unavailableFeed() {
     ageDays: null
   };
 }
+function unavailableLoadedFeed(reason) {
+  return {
+    index: {
+      envelope: {
+        schemaVersion: 3,
+        adapter: {
+          id: "unavailable",
+          version: "unavailable",
+          sourceSha256: UNAVAILABLE_SHA256
+        },
+        generatedAt: "",
+        records: []
+      },
+      recordById: new Map,
+      modelPairByIdentity: new Map,
+      modelPairs: [],
+      lexicalModelPairs: [],
+      activeRecords: [],
+      activeNonModelRecords: [],
+      supersededRecordIds: [],
+      diagnostics: [{ kind: "feed-unavailable", reason: compact(reason, 500) }]
+    },
+    digests: {
+      sourceFeedSha256: UNAVAILABLE_SHA256,
+      normalizedFeedSha256: UNAVAILABLE_SHA256,
+      activeRecordsSha256: UNAVAILABLE_SHA256,
+      feedAdapterManifestSha256: UNAVAILABLE_SHA256
+    }
+  };
+}
+function unavailableFreshness(maxAgeDays) {
+  return { generatedAt: "", ageDays: null, maxAgeDays, stale: false };
+}
 function feedFreshness(feed, maxAgeDays, nowMs) {
   const generatedAt = feed.index.envelope.generatedAt;
   const ageDays = feedAgeInDays(generatedAt, nowMs);
@@ -15533,6 +15605,21 @@ function feedDiagnostics(feed, freshness) {
         severity: "notice"
       };
     }
+    if (diagnostic.kind === "feed-unavailable") {
+      return {
+        code: diagnostic.kind,
+        message: `The upstream lifecycle feed could not be loaded, so no lifecycle records were available and this run cannot report on model deprecations: ${diagnostic.reason}`,
+        severity: "partial"
+      };
+    }
+    if (diagnostic.kind === "feed-invalid-record") {
+      const reasons = diagnostic.reasons.slice(0, 5).join(" ");
+      return {
+        code: diagnostic.kind,
+        message: `The lifecycle feed carried ${diagnostic.skippedRecordCount} row(s) this adapter could not turn into records, so those rows were quarantined and the rest of the feed was assessed${reasons === "" ? "" : `: ${reasons}`}`,
+        severity: "partial"
+      };
+    }
     const providers = diagnostic.providers.slice(0, 10).join(", ");
     return {
       code: diagnostic.kind,
@@ -15543,7 +15630,7 @@ function feedDiagnostics(feed, freshness) {
   return [...upstream, ...staleness];
 }
 function applyFeedCoverage(detection, feed) {
-  if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-unresolved-provider")) {
+  if (!feed.index.diagnostics.some((diagnostic) => diagnostic.kind === "feed-unresolved-provider" || diagnostic.kind === "feed-invalid-record" || diagnostic.kind === "feed-unavailable")) {
     return detection;
   }
   return detection.scanStatus === "partial" ? detection : { ...detection, scanStatus: "partial" };
@@ -15688,8 +15775,13 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
       ...dependencies.eventPayload === undefined ? {} : { eventPayload: dependencies.eventPayload }
     });
     stage = "feed";
-    feed = await (dependencies.loadFeed?.() ?? loadLifecycleFeed());
-    freshness = feedFreshness(feed, inputs.maxFeedAgeDays, evaluatedAtMs);
+    try {
+      feed = await (dependencies.loadFeed?.() ?? loadLifecycleFeed());
+      freshness = feedFreshness(feed, inputs.maxFeedAgeDays, evaluatedAtMs);
+    } catch (error) {
+      feed = unavailableLoadedFeed(safeMessage(error));
+      freshness = unavailableFreshness(inputs.maxFeedAgeDays);
+    }
     const readSnapshot = dependencies.readSnapshot ?? ((path, treeish) => readGitTreeSnapshot({ repositoryPath: path, treeish }));
     const detector = dependencies.detect ?? detectSnapshot;
     const policyInspector = dependencies.inspectPolicy ?? inspectSnapshotPolicy;

@@ -147,7 +147,10 @@ Which combinations pass and which fail:
 | Definite policy breach | Fails |
 | Partial scan with enforcement and `allowPartial: false` | Fails closed |
 | Upstream feed older than `max-feed-age-days` | Partial: succeeds with a warning, or fails closed under enforcement |
-| Feed, trusted schema, target snapshot, resource-budget, or internal failure | Fails with `unknown + failed` |
+| Upstream feed unreachable or undecodable | Partial: succeeds with a warning, or fails closed under enforcement |
+| Individual upstream rows quarantined as malformed | Partial: succeeds with a warning, or fails closed under enforcement |
+| Aggregate detector-fact budget exhausted | Partial: succeeds with a warning, or fails closed under enforcement |
+| Typed-feed schema, trusted schema, target snapshot, other resource-budget, or internal failure | Fails with `unknown + failed` |
 | Required PR base unavailable | Fails with `unknown + partial` |
 
 Existing base-branch debt stays visible but does not fail an unrelated pull request. A pull request blocks only on a definite new or worsened breach — measured against the trusted base policy, so this holds when enforcement comes from the checked-in policy file rather than from a stricter action input.
@@ -283,7 +286,7 @@ The action requires Git 2.30.0 or newer, because it uses `git rev-parse --end-of
 | Each checked-in evidence document | 2 MiB and 10,000 records |
 | Detector output | 100,000 evidence facts per Git snapshot |
 
-A blob above the 2 MiB per-blob ceiling is reported as an identified partial blind spot. Exhausting an aggregate Git, event, feed, detector-fact, report, or trusted policy/evidence budget fails the assessment with `unknown + failed`. An over-limit target-only PR policy or evidence document is excluded from authority and shown as an advisory configuration change under the monotonic PR rules.
+A blob above the 2 MiB per-blob ceiling is reported as an identified partial blind spot. Exhausting the aggregate detector-fact budget truncates the scan and is reported as an identified partial blind spot. Exhausting an aggregate Git, event, feed, report, or trusted policy/evidence budget fails the assessment with `unknown + failed`. An over-limit target-only PR policy or evidence document is excluded from authority and shown as an advisory configuration change under the monotonic PR rules.
 
 Publication is bounded separately:
 
@@ -302,7 +305,9 @@ The current public upstream feed is not typed. The action wraps it with an adapt
 
 Every well-formed upstream row enters the normalized lifecycle feed as soon as the source publishes it. The adapter holds no allowlist: a newly published deprecation is visible on the next run, with no action release required. Authority is bounded by platform rather than by review — a row on a registered serving platform can block an enforced run, while a row on a platform the detector does not know yet is carried as unsupported, nonblocking evidence that can warn but never fail a build. Providers the upstream source adds are supported out of the box: their platform slug is derived from the provider label, and promoting one to blocking authority remains a deliberate registry, display-name and detector change.
 
-Malformed rows, duplicate pairs, unknown fields, invalid adapter metadata, and schema failures still produce `unknown + failed`. A provider label that yields no valid platform slug at all has its rows skipped with a diagnostic and makes `scan-status: partial`; if no row resolves a platform, the non-empty feed contract fails.
+Fields the adapter does not read are ignored, so an additive upstream column never fails a run. Malformed rows and duplicate pairs are quarantined one row at a time with a diagnostic and make `scan-status: partial`, so one bad row costs that row rather than the whole feed. Invalid adapter metadata and schema failures still produce `unknown + failed`. A provider label that yields no valid platform slug at all has its rows skipped with a diagnostic and makes `scan-status: partial`; if no row resolves a platform, or no row is well formed at all, the non-empty feed contract fails.
+
+An upstream feed that cannot be fetched or decoded at all is also `partial` rather than fatal: the run emits a `feed-unavailable` diagnostic and reports that it could not check, so a third-party outage does not break every repository's build at once. Enforced runs still fail closed on that partial coverage under the existing `allowPartial` rules.
 
 ### Upstream freshness
 
