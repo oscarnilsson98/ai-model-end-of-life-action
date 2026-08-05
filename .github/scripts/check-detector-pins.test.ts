@@ -26,23 +26,38 @@ describe("detector qualification pin drift", () => {
     expect(latestVersionFrom("pypi", { info: null })).toBeNull();
   });
 
+  // Derived from the manifest rather than hardcoded, so re-qualifying a pin does not break
+  // these tests. Hardcoding the pin made the drift check itself an obstacle to acting on
+  // what it reported.
+  const subject = (ecosystem: string, name: string) => {
+    const entry = DETECTOR_QUALIFICATION.find(
+      (candidate) => candidate.ecosystem === ecosystem && candidate.package === name,
+    );
+    if (entry === undefined) throw new Error(`${ecosystem}:${name} is no longer qualified`);
+    return entry;
+  };
+
+  /** Serve each qualified package its own pinned version, with named overrides. */
+  const registryStub = (overrides: ReadonlyMap<string, string>) => async (url: string) => {
+    const entry = DETECTOR_QUALIFICATION.find(
+      (candidate) => registryUrl(candidate) === url,
+    );
+    const key = `${entry?.ecosystem}:${entry?.package}`;
+    const version = overrides.get(key) ?? entry?.version;
+    const body = entry?.ecosystem === "pypi" ? { info: { version } } : { version };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+
   test("reports only packages whose latest release differs from the pin", async () => {
-    const drift = await collectPinDrift(async (url) => {
-      // Echo the pinned version back for everything except the first npm entry.
-      const entry = DETECTOR_QUALIFICATION.find(
-        (candidate) => registryUrl(candidate) === url,
-      );
-      const version =
-        entry?.package === "openai" && entry.ecosystem === "npm" ? "99.0.0" : entry?.version;
-      const body =
-        entry?.ecosystem === "pypi" ? { info: { version } } : { version };
-      return new Response(JSON.stringify(body), { status: 200 });
-    });
+    const pinned = subject("npm", "openai");
+    const drift = await collectPinDrift(
+      registryStub(new Map([["npm:openai", "99.0.0"]])),
+    );
     expect(drift).toEqual([
       {
         ecosystem: "npm",
         package: "openai",
-        pinned: "6.49.0",
+        pinned: pinned.version,
         latest: "99.0.0",
         majorChange: true,
       },
@@ -50,19 +65,21 @@ describe("detector qualification pin drift", () => {
   });
 
   test("separates a call-surface-breaking major bump from a within-major update", async () => {
-    const drift = await collectPinDrift(async (url) => {
-      const entry = DETECTOR_QUALIFICATION.find(
-        (candidate) => registryUrl(candidate) === url,
-      );
-      let version = entry?.version;
-      if (entry?.package === "openai" && entry.ecosystem === "npm") version = "7.0.0";
-      if (entry?.package === "ai") version = "7.0.99";
-      const body = entry?.ecosystem === "pypi" ? { info: { version } } : { version };
-      return new Response(JSON.stringify(body), { status: 200 });
-    });
+    const npmOpenai = subject("npm", "openai");
+    const aiSdk = subject("npm", "ai");
+    const nextMajor = `${(majorOf(npmOpenai.version) ?? 0) + 1}.0.0`;
+    const withinMajor = `${majorOf(aiSdk.version) ?? 0}.999.999`;
+    const drift = await collectPinDrift(
+      registryStub(
+        new Map([
+          ["npm:openai", nextMajor],
+          ["npm:ai", withinMajor],
+        ]),
+      ),
+    );
     expect(drift).toEqual([
-      expect.objectContaining({ package: "openai", majorChange: true }),
-      expect.objectContaining({ package: "ai", majorChange: false }),
+      expect.objectContaining({ package: "openai", latest: nextMajor, majorChange: true }),
+      expect.objectContaining({ package: "ai", latest: withinMajor, majorChange: false }),
     ]);
   });
 

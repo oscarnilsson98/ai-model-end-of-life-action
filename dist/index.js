@@ -7977,13 +7977,13 @@ function alertFingerprint(findings) {
 }
 
 // src/detection/manifest.ts
-var DETECTOR_MANIFEST_VERSION = "3.0.0-5";
+var DETECTOR_MANIFEST_VERSION = "3.0.0-6";
 var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
     package: "openai",
-    version: "6.49.0",
-    sourceUrl: "https://www.npmjs.com/package/openai/v/6.49.0"
+    version: "7.4.0",
+    sourceUrl: "https://www.npmjs.com/package/openai/v/7.4.0"
   }),
   Object.freeze({
     ecosystem: "pypi",
@@ -8030,8 +8030,8 @@ var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "terraform-provider",
     package: "hashicorp/azurerm",
-    version: "4.79.0",
-    sourceUrl: "https://registry.terraform.io/providers/hashicorp/azurerm/4.79.0"
+    version: "5.0.1",
+    sourceUrl: "https://registry.terraform.io/providers/hashicorp/azurerm/5.0.1"
   }),
   Object.freeze({
     ecosystem: "npm",
