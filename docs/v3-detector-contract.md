@@ -177,9 +177,9 @@ V3.0 semantic rules may resolve:
 
 - direct static string literals, including template literals with no substitutions;
 - unique, unshadowed same-file immutable string constants, at any block depth;
-- literal dotted paths into unique, unshadowed same-file object literals (`MODELS.flash.id`), where the literal contains no spread, computed key, or repeated key, and the path uses plain `.` access rather than a computed index, a call, or optional chaining;
+- literal dotted paths into unique, unshadowed same-file object literals (`MODELS.flash.id`), where the literal contains no spread, computed key, repeated key, or key containing `.`, and the path uses plain `.` access rather than a computed index, a call, or optional chaining. Only keys a `.` chain can reach are recorded; a key such as `"gpt-4o"` is skipped without affecting its siblings;
 - direct supported environment references and their static string fallbacks;
-- the static default of a runtime selector written as `a ?? b`, `a || b`, or Python `a or b`, where the left side is a simple value and the right side resolves statically. The default is reported as the model with `selectorKind: "dynamic"`, because the caller may still supply anything: it is never policy-eligible and can never block;
+- the static default of a runtime selector written as `a ?? b`, `a || b`, or Python `a or b`, where the left side is a simple value and the right side resolves statically. The default is reported as the model with `selectorKind: "dynamic"`, because the caller may still supply anything: it is never policy-eligible and can never block. When the left side itself resolves to a non-empty string the operator cannot fire, so that value is the model and keeps its ordinary definite standing;
 - direct client bindings constructed from supported imported SDK classes;
 - exact-name environment bindings consumed by a supported semantic fact;
 - static Azure Terraform model tuples, which remain unresolved until an exact trusted tuple resolution exists.

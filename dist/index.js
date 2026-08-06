@@ -10754,6 +10754,7 @@ function objectValueEnd(tokens, valueIndex, close) {
   return close;
 }
 var MAX_OBJECT_PATH_DEPTH = 12;
+var IDENTIFIER_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 function readObjectPaths(tokens, open, close, prefix, out, depth = 0) {
   if (depth > MAX_OBJECT_PATH_DEPTH)
     return false;
@@ -10770,12 +10771,18 @@ function readObjectPaths(tokens, open, close, prefix, out, depth = 0) {
     const key = keyToken?.kind === "identifier" || keyToken?.kind === "string" && keyToken.static ? keyToken.value : undefined;
     if (key === undefined || structuralValue(tokens[cursor + 1]) !== ":")
       return false;
+    if (key.includes("."))
+      return false;
     if (seen.has(key))
       return false;
     seen.add(key);
     const valueIndex = cursor + 2;
     const valueEnd = objectValueEnd(tokens, valueIndex, close);
     const valueToken = tokens[valueIndex];
+    if (!IDENTIFIER_KEY.test(key)) {
+      cursor = valueEnd + 1;
+      continue;
+    }
     if (structuralValue(valueToken) === "{") {
       const nestedClose = matchingIndex(tokens, valueIndex, "{", "}");
       if (nestedClose === null || nestedClose > valueEnd)
@@ -10836,9 +10843,7 @@ function staticFallbackIndex(tokens, valueIndex, language) {
     return end + 3;
   return;
 }
-function staticAtom(tokens, valueIndex, constants, allowLineBoundary = false) {
-  if (!isCompleteDirectValue(tokens, valueIndex, allowLineBoundary))
-    return;
+function staticAtomAt(tokens, valueIndex, constants) {
   const token = tokens[valueIndex];
   if (token?.kind === "string" && token.static) {
     return {
@@ -10868,24 +10873,26 @@ function staticAtom(tokens, valueIndex, constants, allowLineBoundary = false) {
     ]
   };
 }
+function staticAtom(tokens, valueIndex, constants, allowLineBoundary = false) {
+  return isCompleteDirectValue(tokens, valueIndex, allowLineBoundary) ? staticAtomAt(tokens, valueIndex, constants) : undefined;
+}
 function resolveValueExpression(tokens, valueIndex, constants, allowLineBoundary = false) {
-  const direct = staticAtom(tokens, valueIndex, constants, allowLineBoundary);
-  if (direct !== undefined)
-    return direct;
   const fallbackIndex = staticFallbackIndex(tokens, valueIndex, constants.language);
-  if (fallbackIndex === undefined)
-    return;
-  const fallback = staticAtom(tokens, fallbackIndex, constants, allowLineBoundary);
-  if (fallback === undefined)
-    return;
-  return {
-    value: fallback.value,
-    dynamic: true,
-    trace: [
-      { kind: "detector", detail: "static default behind a runtime selector" },
-      ...fallback.trace
-    ]
-  };
+  if (fallbackIndex !== undefined) {
+    const left = staticAtomAt(tokens, valueIndex, constants);
+    if (left !== undefined && left.value !== "")
+      return left;
+    const fallback = staticAtom(tokens, fallbackIndex, constants, allowLineBoundary);
+    return fallback === undefined ? undefined : {
+      value: fallback.value,
+      dynamic: true,
+      trace: [
+        { kind: "detector", detail: "static default behind a runtime selector" },
+        ...fallback.trace
+      ]
+    };
+  }
+  return staticAtom(tokens, valueIndex, constants, allowLineBoundary);
 }
 function collectConstants(tokens, language, analysis) {
   const objectPaths = language === "javascript" ? collectObjectPaths(tokens, analysis) : new Map;
@@ -14876,7 +14883,7 @@ function renderSlackSnapshot(report) {
   if (namedUnresolved.length > 0) {
     lines.push("", `*Unresolved selectors (${namedUnresolved.length}, not counted toward the result):*`, ...namedUnresolved.slice(0, MAX_UNRESOLVED_REFERENCES).map(unresolvedLine));
     if (namedUnresolved.length > MAX_UNRESOLVED_REFERENCES) {
-      lines.push(`• … ${namedUnresolved.length - MAX_UNRESOLVED_REFERENCES} more unresolved selector(s) in the job summary`);
+      lines.push(`• … ${namedUnresolved.length - MAX_UNRESOLVED_REFERENCES} more unresolved selector(s) in the report`);
     }
   }
   const runUrl = workflowRunUrl();

@@ -1749,6 +1749,58 @@ describe("same-file value resolution", () => {
     }
   });
 
+  test("never lets a dotted key impersonate a nested path", () => {
+    // `MODELS.flash.id` is a real nested path and also spells the quoted key. Recording
+    // both would make declaration order decide which model the scanner reports.
+    for (const declaration of [
+      `const MODELS = { flash: { id: "gpt-old" }, "flash.id": "wrong-model" };`,
+      `const MODELS = { "flash.id": "wrong-model", flash: { id: "gpt-old" } };`,
+    ]) {
+      const fact = providerFact(
+        withProvider(`${declaration}\nexport const m = google(MODELS.flash.id);\n`),
+      );
+      expect(fact).toMatchObject({ modelResolution: "dynamic", policyEligible: false });
+      expect(fact?.modelId).toBeUndefined();
+    }
+  });
+
+  test("prefers a resolvable left operand over the fallback", () => {
+    // `??` fires only for null or undefined and `||` only for a falsy value, so a known
+    // string on the left means the default is never the model this call selects.
+    expect(
+      providerFact(
+        withProvider(
+          `const MODELS = { flash: { id: "gpt-old" } };\nexport const m = google(MODELS.flash.id ?? "wrong-model");\n`,
+        ),
+      ),
+    ).toMatchObject({
+      modelId: "gpt-old",
+      modelResolution: "resolved",
+      selectorKind: "model-id",
+      policyEligible: true,
+    });
+
+    expect(
+      providerFact(
+        withProvider(
+          `const PRIMARY = "gpt-old";\nexport const m = google(PRIMARY || "wrong-model");\n`,
+        ),
+      ),
+    ).toMatchObject({ modelId: "gpt-old", modelResolution: "resolved" });
+  });
+
+  test("keys unreachable by dot access are skipped without losing the rest", () => {
+    // A dashed key can only be read with a computed index, so it is not recorded — but it
+    // must not poison the sibling paths that are reachable.
+    expect(
+      providerFact(
+        withProvider(
+          `const MODELS = { "gpt-4o": { id: "other" }, flash: { id: "gpt-old" } };\nexport const m = google(MODELS.flash.id);\n`,
+        ),
+      ),
+    ).toMatchObject({ modelId: "gpt-old", modelResolution: "resolved" });
+  });
+
   test("pins the documented limits of same-file resolution", () => {
     // Two hops: a constant initializer resolves against object literals, never against
     // another constant, because chaining would depend on declaration order.

@@ -326,7 +326,7 @@ function renderSlackSnapshot(report: AssessmentReport): string {
       lines.push(
         `• … ${
           namedUnresolved.length - MAX_UNRESOLVED_REFERENCES
-        } more unresolved selector(s) in the job summary`,
+        } more unresolved selector(s) in the report`,
       );
     }
   }

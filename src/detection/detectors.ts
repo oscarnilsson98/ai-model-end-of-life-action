@@ -1408,6 +1408,9 @@ function objectValueEnd(
  */
 const MAX_OBJECT_PATH_DEPTH = 12;
 
+/** An object key a `.` member chain can reach, and so the only kind worth recording. */
+const IDENTIFIER_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
 /**
  * Record every statically knowable string path of one object literal into `out`. Returns
  * false when the literal holds a spread, a computed key, or a repeated key: each can
@@ -1439,11 +1442,22 @@ function readObjectPaths(
         : undefined;
     // A computed `[expr]:` key, a method, and a shorthand property all fail this test.
     if (key === undefined || structuralValue(tokens[cursor + 1]) !== ":") return false;
+    // A quoted key containing a dot would build a path that collides with a real nested
+    // one — `{ flash: { id: … }, "flash.id": … }` produces `MODELS.flash.id` twice, and
+    // whichever is written last would silently win. Its shape is not knowable here.
+    if (key.includes(".")) return false;
     if (seen.has(key)) return false;
     seen.add(key);
     const valueIndex = cursor + 2;
     const valueEnd = objectValueEnd(tokens, valueIndex, close);
     const valueToken = tokens[valueIndex];
+    // Only a key that `.` access can reach is worth recording. Others (`"gpt-4o"`, `0`)
+    // are reachable solely by computed index, which this pass never resolves, so skipping
+    // them loses nothing and cannot collide with a recorded path.
+    if (!IDENTIFIER_KEY.test(key)) {
+      cursor = valueEnd + 1;
+      continue;
+    }
     if (structuralValue(valueToken) === "{") {
       const nestedClose = matchingIndex(tokens, valueIndex, "{", "}");
       if (nestedClose === null || nestedClose > valueEnd) return false;
@@ -1553,13 +1567,16 @@ function staticFallbackIndex(
   return undefined;
 }
 
-function staticAtom(
+/**
+ * Resolve the value at `valueIndex` without checking what follows it. Callers that have
+ * already established the value's boundary — such as an operand sitting immediately before
+ * a `??` — use this; everything else goes through `staticAtom`.
+ */
+function staticAtomAt(
   tokens: readonly Token[],
   valueIndex: number,
   constants: ConstantTable,
-  allowLineBoundary = false,
 ): ConstantValue | undefined {
-  if (!isCompleteDirectValue(tokens, valueIndex, allowLineBoundary)) return undefined;
   const token = tokens[valueIndex];
   if (token?.kind === "string" && token.static) {
     return {
@@ -1593,6 +1610,17 @@ function staticAtom(
       };
 }
 
+function staticAtom(
+  tokens: readonly Token[],
+  valueIndex: number,
+  constants: ConstantTable,
+  allowLineBoundary = false,
+): ConstantValue | undefined {
+  return isCompleteDirectValue(tokens, valueIndex, allowLineBoundary)
+    ? staticAtomAt(tokens, valueIndex, constants)
+    : undefined;
+}
+
 /**
  * A value expression that is either a static atom or a runtime selector with a static
  * default. Constant initializers and call arguments accept the same shapes, so both
@@ -1604,20 +1632,27 @@ function resolveValueExpression(
   constants: ConstantTable,
   allowLineBoundary = false,
 ): ConstantValue | undefined {
-  const direct = staticAtom(tokens, valueIndex, constants, allowLineBoundary);
-  if (direct !== undefined) return direct;
   const fallbackIndex = staticFallbackIndex(tokens, valueIndex, constants.language);
-  if (fallbackIndex === undefined) return undefined;
-  const fallback = staticAtom(tokens, fallbackIndex, constants, allowLineBoundary);
-  if (fallback === undefined) return undefined;
-  return {
-    value: fallback.value,
-    dynamic: true,
-    trace: [
-      { kind: "detector", detail: "static default behind a runtime selector" },
-      ...fallback.trace,
-    ],
-  };
+  if (fallbackIndex !== undefined) {
+    // A left operand that already resolves is the value: `??` fires only for null or
+    // undefined, and `||` only for a falsy value, so neither can reach the default once
+    // the left side is a known non-empty string. Reporting the default here would name a
+    // model the call never selects.
+    const left = staticAtomAt(tokens, valueIndex, constants);
+    if (left !== undefined && left.value !== "") return left;
+    const fallback = staticAtom(tokens, fallbackIndex, constants, allowLineBoundary);
+    return fallback === undefined
+      ? undefined
+      : {
+          value: fallback.value,
+          dynamic: true,
+          trace: [
+            { kind: "detector", detail: "static default behind a runtime selector" },
+            ...fallback.trace,
+          ],
+        };
+  }
+  return staticAtom(tokens, valueIndex, constants, allowLineBoundary);
 }
 
 /**

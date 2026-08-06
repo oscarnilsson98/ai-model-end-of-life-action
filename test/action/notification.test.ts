@@ -246,7 +246,7 @@ describe("v3 Slack snapshot delivery", () => {
     expect(text).toContain("Unresolved selectors (7, not counted toward the result):");
     expect(text).toContain("src/call4.ts:5");
     expect(text).not.toContain("src/call5.ts:6");
-    expect(text).toContain("2 more unresolved selector(s) in the job summary");
+    expect(text).toContain("2 more unresolved selector(s) in the report");
   });
 
   test("sends a clean bounded snapshot with authoritative event identity", async () => {
