@@ -1334,48 +1334,332 @@ function analyzeTokens(
 
 const DIRECT_VALUE_TERMINATORS = new Set([",", ")", "}", "]", ";"]);
 
+/**
+ * The last token of a simple value at `valueIndex`: a string, a bare identifier, or a
+ * dotted member chain such as `MODELS.flash.id`. A call, a computed index, and optional
+ * chaining are not simple values, so the chain stops before them and the caller's
+ * terminator check then rejects the expression rather than resolving a prefix of it.
+ */
+function directValueEnd(tokens: readonly Token[], valueIndex: number): number {
+  if (tokens[valueIndex]?.kind !== "identifier") return valueIndex;
+  let end = valueIndex;
+  while (
+    structuralValue(tokens[end + 1]) === "." &&
+    tokens[end + 2]?.kind === "identifier"
+  ) {
+    end += 2;
+  }
+  return end;
+}
+
+/** The dotted source text of the member chain spanning `start` to `end`. */
+function memberPath(tokens: readonly Token[], start: number, end: number): string {
+  const parts: string[] = [];
+  for (let index = start; index <= end; index += 2) {
+    parts.push(tokens[index]?.value ?? "");
+  }
+  return parts.join(".");
+}
+
 function isCompleteDirectValue(
   tokens: readonly Token[],
   valueIndex: number,
   allowLineBoundary = false,
 ): boolean {
   const value = tokens[valueIndex];
-  const next = tokens[valueIndex + 1];
-  if (value === undefined || next === undefined) return value !== undefined;
+  if (value === undefined) return false;
+  const end = directValueEnd(tokens, valueIndex);
+  const last = tokens[end] ?? value;
+  const next = tokens[end + 1];
+  if (next === undefined) return true;
   if (DIRECT_VALUE_TERMINATORS.has(next.value)) return true;
-  return allowLineBoundary && next.line > value.line;
+  return allowLineBoundary && next.line > last.line;
 }
 
+/** The `...` of an object spread, which the lexer emits as three separate dots. */
+function isSpreadAt(tokens: readonly Token[], index: number): boolean {
+  return (
+    structuralValue(tokens[index]) === "." &&
+    structuralValue(tokens[index + 1]) === "." &&
+    structuralValue(tokens[index + 2]) === "."
+  );
+}
+
+/** The index of the `,` closing an object-literal property value, or `close`. */
+function objectValueEnd(
+  tokens: readonly Token[],
+  valueIndex: number,
+  close: number,
+): number {
+  let depth = 0;
+  for (let index = valueIndex; index < close; index += 1) {
+    const value = structuralValue(tokens[index]);
+    if (value === "{" || value === "[" || value === "(") depth += 1;
+    else if (value === "}" || value === "]" || value === ")") depth = Math.max(0, depth - 1);
+    else if (value === "," && depth === 0) return index;
+  }
+  return close;
+}
+
+/**
+ * How deep a nested object literal is read. Repository content is untrusted, so the walk
+ * is bounded rather than trusting the source to be reasonably shaped; a literal nested
+ * past this depth is dropped whole rather than partly recorded.
+ */
+const MAX_OBJECT_PATH_DEPTH = 12;
+
+/**
+ * Record every statically knowable string path of one object literal into `out`. Returns
+ * false when the literal holds a spread, a computed key, or a repeated key: each can
+ * silently change what a recorded key resolves to, and a half-known object would resolve a
+ * selector to the wrong model. A value this pass cannot read is not fatal — it is simply
+ * not a resolvable path, and nothing can reach it by name.
+ */
+function readObjectPaths(
+  tokens: readonly Token[],
+  open: number,
+  close: number,
+  prefix: string,
+  out: Map<string, string>,
+  depth = 0,
+): boolean {
+  if (depth > MAX_OBJECT_PATH_DEPTH) return false;
+  const seen = new Set<string>();
+  let cursor = open + 1;
+  while (cursor < close) {
+    if (structuralValue(tokens[cursor]) === ",") {
+      cursor += 1;
+      continue;
+    }
+    if (isSpreadAt(tokens, cursor)) return false;
+    const keyToken = tokens[cursor];
+    const key =
+      keyToken?.kind === "identifier" || (keyToken?.kind === "string" && keyToken.static)
+        ? keyToken.value
+        : undefined;
+    // A computed `[expr]:` key, a method, and a shorthand property all fail this test.
+    if (key === undefined || structuralValue(tokens[cursor + 1]) !== ":") return false;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    const valueIndex = cursor + 2;
+    const valueEnd = objectValueEnd(tokens, valueIndex, close);
+    const valueToken = tokens[valueIndex];
+    if (structuralValue(valueToken) === "{") {
+      const nestedClose = matchingIndex(tokens, valueIndex, "{", "}");
+      if (nestedClose === null || nestedClose > valueEnd) return false;
+      if (
+        !readObjectPaths(tokens, valueIndex, nestedClose, `${prefix}.${key}`, out, depth + 1)
+      ) {
+        return false;
+      }
+    } else if (
+      valueToken?.kind === "string" &&
+      valueToken.static &&
+      valueEnd === valueIndex + 1
+    ) {
+      out.set(`${prefix}.${key}`, valueToken.value);
+    }
+    cursor = valueEnd + 1;
+  }
+  return true;
+}
+
+/**
+ * Dotted paths into same-file object literals, so a registry written as
+ * `const MODELS = { flash: { id: "…" } }` resolves `MODELS.flash.id`. JavaScript only: a
+ * Python dict is a different shape and is not read here.
+ */
+function collectObjectPaths(
+  tokens: readonly Token[],
+  analysis: TokenAnalysis,
+): Map<string, string> {
+  const paths = new Map<string, string>();
+  const declared = new Set<string>();
+  const rejected = new Set<string>();
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (!isIdentifier(tokens[index], "const")) continue;
+    const name = tokens[index + 1];
+    if (
+      name?.kind !== "identifier" ||
+      structuralValue(tokens[index + 2]) !== "=" ||
+      structuralValue(tokens[index + 3]) !== "{"
+    ) {
+      continue;
+    }
+    const root = name.value;
+    const close = matchingIndex(tokens, index + 3, "{", "}");
+    // A name declared twice, reassigned, or bound as a parameter is not one known object.
+    if (
+      close === null ||
+      declared.has(root) ||
+      (analysis.assignmentCounts.get(root) ?? 0) !== 1 ||
+      analysis.parameterNames.has(root)
+    ) {
+      declared.add(root);
+      rejected.add(root);
+      continue;
+    }
+    declared.add(root);
+    const collected = new Map<string, string>();
+    if (readObjectPaths(tokens, index + 3, close, root, collected)) {
+      for (const [path, value] of collected) paths.set(path, value);
+    } else {
+      rejected.add(root);
+    }
+    index = close;
+  }
+  for (const path of [...paths.keys()]) {
+    if (rejected.has(path.slice(0, path.indexOf(".")))) paths.delete(path);
+  }
+  return paths;
+}
+
+/** A same-file value a selector can resolve to, and how that value was established. */
+type ConstantValue = {
+  value: string;
+  trace: EvidenceFact["resolutionTrace"];
+  /**
+   * True when the value is only the static default behind a runtime selector, as in
+   * `override ?? MODELS.flash.id`. The default is knowable but the call's actual model is
+   * not, so the fact stays `selectorKind: "dynamic"` and never becomes policy-eligible.
+   */
+  dynamic: boolean;
+};
+
+/** Everything a value expression in one file can be resolved against. */
+type ConstantTable = {
+  scalars: ReadonlyMap<string, ConstantValue>;
+  objectPaths: ReadonlyMap<string, string>;
+  language: "javascript" | "python";
+};
+
+const EMPTY_SCALARS: ReadonlyMap<string, ConstantValue> = new Map();
+
+/**
+ * The index just past a `??`, `||`, or Python `or` following the value at `valueIndex`,
+ * when the expression is a simple value with a fallback.
+ */
+function staticFallbackIndex(
+  tokens: readonly Token[],
+  valueIndex: number,
+  language: "javascript" | "python",
+): number | undefined {
+  const end = directValueEnd(tokens, valueIndex);
+  const operator = tokens[end + 1];
+  if (language === "python") return isIdentifier(operator, "or") ? end + 2 : undefined;
+  if (operator?.value === "??" || operator?.value === "||") return end + 2;
+  // The lexer pairs `||`, but accepting a split pair costs nothing.
+  if (operator?.value === "|" && tokens[end + 2]?.value === "|") return end + 3;
+  return undefined;
+}
+
+function staticAtom(
+  tokens: readonly Token[],
+  valueIndex: number,
+  constants: ConstantTable,
+  allowLineBoundary = false,
+): ConstantValue | undefined {
+  if (!isCompleteDirectValue(tokens, valueIndex, allowLineBoundary)) return undefined;
+  const token = tokens[valueIndex];
+  if (token?.kind === "string" && token.static) {
+    return {
+      value: token.value,
+      dynamic: false,
+      trace: [{ kind: "detector", detail: "direct static string" }],
+    };
+  }
+  if (token?.kind !== "identifier") return undefined;
+  const end = directValueEnd(tokens, valueIndex);
+  if (end > valueIndex) {
+    const path = memberPath(tokens, valueIndex, end);
+    const value = constants.objectPaths.get(path);
+    return value === undefined
+      ? undefined
+      : {
+          value,
+          dynamic: false,
+          trace: [{ kind: "constant", detail: `same-file object path ${path}` }],
+        };
+  }
+  const constant = constants.scalars.get(token.value);
+  return constant === undefined
+    ? undefined
+    : {
+        ...constant,
+        trace: [
+          { kind: "constant", detail: `same-file constant ${token.value}` },
+          ...constant.trace,
+        ],
+      };
+}
+
+/**
+ * A value expression that is either a static atom or a runtime selector with a static
+ * default. Constant initializers and call arguments accept the same shapes, so both
+ * resolve through here.
+ */
+function resolveValueExpression(
+  tokens: readonly Token[],
+  valueIndex: number,
+  constants: ConstantTable,
+  allowLineBoundary = false,
+): ConstantValue | undefined {
+  const direct = staticAtom(tokens, valueIndex, constants, allowLineBoundary);
+  if (direct !== undefined) return direct;
+  const fallbackIndex = staticFallbackIndex(tokens, valueIndex, constants.language);
+  if (fallbackIndex === undefined) return undefined;
+  const fallback = staticAtom(tokens, fallbackIndex, constants, allowLineBoundary);
+  if (fallback === undefined) return undefined;
+  return {
+    value: fallback.value,
+    dynamic: true,
+    trace: [
+      { kind: "detector", detail: "static default behind a runtime selector" },
+      ...fallback.trace,
+    ],
+  };
+}
+
+/**
+ * Same-file constants a selector can resolve through. A constant initializer is resolved
+ * against object paths but not against other constants: chaining would depend on
+ * declaration order, and a name invalidated later by the reassignment and shadowing filter
+ * below would already have been baked into an earlier value.
+ */
 function collectConstants(
   tokens: readonly Token[],
   language: "javascript" | "python",
   analysis: TokenAnalysis,
-): Map<string, string> {
-  const candidates = new Map<string, string | null>();
-  const record = (name: string, value: string): void => {
+): ConstantTable {
+  const objectPaths =
+    language === "javascript"
+      ? collectObjectPaths(tokens, analysis)
+      : new Map<string, string>();
+  const atoms: ConstantTable = { scalars: EMPTY_SCALARS, objectPaths, language };
+  const candidates = new Map<string, ConstantValue | null>();
+  const record = (name: string, value: ConstantValue): void => {
     candidates.set(name, candidates.has(name) ? null : value);
   };
-  let braceDepth = 0;
+  const consider = (name: string, valueIndex: number): void => {
+    const resolved = resolveValueExpression(tokens, valueIndex, atoms, true);
+    if (resolved === undefined) return;
+    record(name, {
+      ...resolved,
+      // The constant's own name is the trace entry a reader needs; the atom's
+      // "direct static string" marker would only restate the literal.
+      trace: resolved.trace.filter((entry) => entry.detail !== "direct static string"),
+    });
+  };
   for (let index = 0; index < tokens.length; index += 1) {
     if (language === "javascript") {
-      if (structuralValue(tokens[index]) === "{") {
-        braceDepth += 1;
-        continue;
-      }
-      if (structuralValue(tokens[index]) === "}") {
-        braceDepth = Math.max(0, braceDepth - 1);
-        continue;
-      }
+      // Depth is not tracked: a function-scope `const` is as knowable as a module-level
+      // one once the reassignment and shadowing filter below has run.
       if (
-        braceDepth === 0 &&
         isIdentifier(tokens[index], "const") &&
         tokens[index + 1]?.kind === "identifier" &&
-        tokens[index + 2]?.value === "=" &&
-        tokens[index + 3]?.kind === "string" &&
-        tokens[index + 3]?.static &&
-        isCompleteDirectValue(tokens, index + 3, true)
+        tokens[index + 2]?.value === "="
       ) {
-        record(tokens[index + 1]?.value as string, tokens[index + 3]?.value as string);
+        consider(tokens[index + 1]?.value as string, index + 3);
       }
       continue;
     }
@@ -1383,54 +1667,30 @@ function collectConstants(
     if (
       token?.kind === "identifier" &&
       token.column === 1 &&
-      structuralValue(tokens[index + 1]) === "=" &&
-      tokens[index + 2]?.kind === "string" &&
-      tokens[index + 2]?.static &&
-      isCompleteDirectValue(tokens, index + 2, true)
+      structuralValue(tokens[index + 1]) === "="
     ) {
-      record(token.value, tokens[index + 2]?.value as string);
+      consider(token.value, index + 2);
     }
   }
   const { parameterNames: shadowed, assignmentCounts } = analysis;
-  return new Map(
-    [...candidates.entries()].filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== null &&
-        !shadowed.has(entry[0]) &&
-        (assignmentCounts.get(entry[0]) ?? 0) === 1,
+  return {
+    scalars: new Map(
+      [...candidates.entries()].filter(
+        (entry): entry is [string, ConstantValue] =>
+          entry[1] !== null &&
+          !shadowed.has(entry[0]) &&
+          (assignmentCounts.get(entry[0]) ?? 0) === 1,
+      ),
     ),
-  );
-}
-
-function staticAtom(
-  tokens: readonly Token[],
-  valueIndex: number,
-  constants: ReadonlyMap<string, string>,
-): { modelId: string; trace: EvidenceFact["resolutionTrace"] } | undefined {
-  if (!isCompleteDirectValue(tokens, valueIndex)) return undefined;
-  const token = tokens[valueIndex];
-  if (token?.kind === "string" && token.static) {
-    return {
-      modelId: token.value,
-      trace: [{ kind: "detector", detail: "direct static string" }],
-    };
-  }
-  if (token?.kind === "identifier") {
-    const constant = constants.get(token.value);
-    if (constant !== undefined) {
-      return {
-        modelId: constant,
-        trace: [{ kind: "constant", detail: `same-file constant ${token.value}` }],
-      };
-    }
-  }
-  return undefined;
+    objectPaths,
+    language,
+  };
 }
 
 function resolveTokenValue(
   tokens: readonly Token[],
   valueIndex: number,
-  constants: ReadonlyMap<string, string>,
+  constants: ConstantTable,
   defaultSelectorKind: ModelSelectorKind,
   environmentReference?: EnvironmentReference,
 ): ResolvedValue {
@@ -1441,8 +1701,8 @@ function resolveTokenValue(
       : staticAtom(tokens, environmentReference.fallbackIndex, constants);
     if (fallback !== undefined) {
       return {
-        rawValue: fallback.modelId,
-        modelId: fallback.modelId,
+        rawValue: fallback.value,
+        modelId: fallback.value,
         modelResolution: "resolved",
         selectorKind: "dynamic",
         trace: [
@@ -1468,13 +1728,21 @@ function resolveTokenValue(
       environmentVariable: environmentReference.variable,
     };
   }
-  const resolved = staticAtom(tokens, valueIndex, constants);
+  const resolved = resolveValueExpression(tokens, valueIndex, constants);
   if (resolved !== undefined) {
     return {
-      rawValue: token?.kind === "identifier" ? token.value : resolved.modelId,
-      modelId: resolved.modelId,
+      // A resolved default names the model, not the expression that selected it; a
+      // definite value keeps naming what the call site actually wrote.
+      rawValue: resolved.dynamic
+        ? resolved.value
+        : token?.kind === "identifier"
+          ? memberPath(tokens, valueIndex, directValueEnd(tokens, valueIndex))
+          : resolved.value,
+      modelId: resolved.value,
       modelResolution: "resolved",
-      selectorKind: defaultSelectorKind,
+      // A runtime selector with a static default names the default, not the model this
+      // call will use, so it stays dynamic and never becomes policy-eligible.
+      selectorKind: resolved.dynamic ? "dynamic" : defaultSelectorKind,
       trace: resolved.trace,
     };
   }
@@ -3283,7 +3551,7 @@ function opensModelSelector(token: Token): boolean {
  */
 function detectAiSdkModelCalls(input: {
   tokens: readonly Token[];
-  constants: ReadonlyMap<string, string>;
+  constants: ConstantTable;
   imports: ImportProvenance;
   analysis: TokenAnalysis;
   path: string;

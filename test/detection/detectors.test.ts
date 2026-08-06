@@ -1634,6 +1634,161 @@ function ruleEvidence(path: string, source: string, ruleId: string) {
   );
 }
 
+describe("same-file value resolution", () => {
+  const providerFact = (source: string) =>
+    detectSnapshot(snapshot("src/model.ts", source), feed).evidence.find((fact) =>
+      fact.detectorRuleId.startsWith("source.ts.vercel-ai-sdk."),
+    );
+  const withProvider = (body: string) =>
+    `import { google } from "@ai-sdk/google";\n${body}`;
+
+  test("resolves a dotted path into a same-file object literal", () => {
+    const fact = providerFact(
+      withProvider(
+        `const MODELS = { flash: { id: "gpt-old" }, pro: { id: "other" } };\nexport const model = google(MODELS.flash.id);\n`,
+      ),
+    );
+
+    expect(fact).toMatchObject({
+      modelId: "gpt-old",
+      modelResolution: "resolved",
+      selectorKind: "model-id",
+      // A definite static value, so it carries the same weight as a direct literal.
+      policyEligible: true,
+      rawValue: "MODELS.flash.id",
+    });
+    expect(fact?.resolutionTrace).toContainEqual({
+      kind: "constant",
+      detail: "same-file object path MODELS.flash.id",
+    });
+  });
+
+  test("resolves a constant declared inside a function body", () => {
+    expect(
+      providerFact(
+        withProvider(
+          `export function build() {\n  const modelId = "gpt-old";\n  return google(modelId);\n}\n`,
+        ),
+      ),
+    ).toMatchObject({
+      modelId: "gpt-old",
+      modelResolution: "resolved",
+      selectorKind: "model-id",
+      policyEligible: true,
+    });
+  });
+
+  test("resolves a static default behind a non-environment runtime selector", () => {
+    const fact = providerFact(
+      withProvider(
+        `export function build(modelOverride) {\n  return google(modelOverride ?? "gpt-old");\n}\n`,
+      ),
+    );
+
+    expect(fact).toMatchObject({
+      modelId: "gpt-old",
+      modelResolution: "resolved",
+      // The caller may still pass anything, so the default is reported but never enforced.
+      selectorKind: "dynamic",
+      policyEligible: false,
+    });
+    expect(fact?.resolutionTrace).toContainEqual({
+      kind: "detector",
+      detail: "static default behind a runtime selector",
+    });
+  });
+
+  test("resolves an override-or-registry selector held in a function-scope constant", () => {
+    // The shape this work exists for: a registry object, a caller override, and a local
+    // constant joining them — three indirections that used to leave the call unresolved.
+    const fact = providerFact(
+      withProvider(
+        `const MODELS = { flash: { id: "gpt-old" } };\nexport function build(modelOverride) {\n  const modelId = modelOverride ?? MODELS.flash.id;\n  return google(modelId);\n}\n`,
+      ),
+    );
+
+    expect(fact).toMatchObject({
+      modelId: "gpt-old",
+      modelResolution: "resolved",
+      selectorKind: "dynamic",
+      policyEligible: false,
+    });
+  });
+
+  test("keeps an object literal unresolved when its shape is not fully known", () => {
+    const unknowable = [
+      // A spread can overwrite a recorded key, depending on where it appears.
+      `const MODELS = { ...base, flash: { id: "gpt-old" } };`,
+      // A computed key can collide with a recorded key.
+      `const MODELS = { [key]: 1, flash: { id: "gpt-old" } };`,
+      // A repeated key means the last write wins, which this pass does not model.
+      `const MODELS = { flash: { id: "gpt-old" }, flash: { id: "other" } };`,
+    ];
+    for (const declaration of unknowable) {
+      expect(
+        providerFact(withProvider(`${declaration}\nexport const m = google(MODELS.flash.id);\n`)),
+      ).toMatchObject({ modelResolution: "dynamic", policyEligible: false });
+    }
+  });
+
+  test("keeps a selector unresolved when the path is not a literal member chain", () => {
+    const unresolvable = [
+      // A computed index needs a value this pass does not have.
+      `export const m = google(MODELS[key].id);`,
+      // A call result is not a member chain.
+      `export const m = google(loadConfig().id);`,
+      // Optional chaining is not the plain `.` chain the resolver accepts.
+      `export const m = google(MODELS.flash?.id);`,
+    ];
+    for (const call of unresolvable) {
+      expect(
+        providerFact(
+          withProvider(`const MODELS = { flash: { id: "gpt-old" } };\n${call}\n`),
+        ),
+      ).toMatchObject({ modelResolution: "dynamic", policyEligible: false });
+    }
+  });
+
+  test("pins the documented limits of same-file resolution", () => {
+    // Two hops: a constant initializer resolves against object literals, never against
+    // another constant, because chaining would depend on declaration order.
+    expect(
+      providerFact(
+        withProvider(
+          `const MODELS = { flash: { id: "gpt-old" } };\nconst chosen = MODELS.flash;\nexport const m = google(chosen.id);\n`,
+        ),
+      ),
+    ).toMatchObject({ modelResolution: "dynamic", policyEligible: false });
+
+    // An explicit type annotation puts a `:` where the scan expects `=`.
+    expect(
+      providerFact(
+        withProvider(`const modelId: string = "gpt-old";\nexport const m = google(modelId);\n`),
+      ),
+    ).toMatchObject({ modelResolution: "dynamic", policyEligible: false });
+  });
+
+  test("keeps a rebound or shadowed name unresolved", () => {
+    // Two declarations of one name: neither value is the value at the call site.
+    expect(
+      providerFact(
+        withProvider(
+          `function a() { const modelId = "gpt-old"; return modelId; }\nfunction b() { const modelId = "other"; return modelId; }\nexport const m = google(modelId);\n`,
+        ),
+      ),
+    ).toMatchObject({ modelResolution: "dynamic", policyEligible: false });
+
+    // A parameter of the same name shadows the constant wherever it is in scope.
+    expect(
+      providerFact(
+        withProvider(
+          `const MODELS = { flash: { id: "gpt-old" } };\nexport function build(MODELS) {\n  return google(MODELS.flash.id);\n}\n`,
+        ),
+      ),
+    ).toMatchObject({ modelResolution: "dynamic", policyEligible: false });
+  });
+});
+
 describe("v3 semantic support matrix golden cases", () => {
   test("recognizes representative official OpenAI JavaScript and Python methods", () => {
     const javascript = ruleEvidence(
