@@ -174,6 +174,8 @@ Slack is a snapshot, not a stateful alert subscription. Delivery is attempted on
 
 The message names every blocking and advisory finding in application or deployment scope, with its deadline, the feed's first replacement model, and a link to the provider's deprecation page when the feed supplies one. A match found only in text — the fallback when a repository has no typed SDK call site — is named too and labelled `ADVISORY (text match)`, so an advisory run always says which models it is about. Findings in documentation, test, or example scope are reported as a count and stay in the job summary. The snapshot links back to the workflow run, so the summary, annotations, and any uploaded report are one click away.
 
+Below the findings, the message names up to five unresolved selectors — typed call sites in application or deployment code whose model is computed at runtime — with the rule that found them and where they are. These are labelled as not counted toward the result, because they never elevate it: a selector built from a caller-supplied override has no static value to find, so treating it as actionable would leave the repository permanently ⚠️ with nothing to fix. They are reported so the call site stays visible, and the models themselves are still matched wherever they are written literally.
+
 A delivery failure does not change `result` or `scan-status`. It changes `notification-status`, `exit-reason`, and, by default, the final step exit; set `notification-failure-mode: warn` to keep delivery best-effort.
 
 ## Optional runtime-only claims

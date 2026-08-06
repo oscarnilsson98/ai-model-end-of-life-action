@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { deliverSlackNotification } from "../../src/action/notification.ts";
 import type {
   AssessmentReport,
+  EvidenceFact,
   LifecycleFinding,
 } from "../../src/shared/types.ts";
 
@@ -30,6 +31,29 @@ function finding(overrides: Partial<LifecycleFinding> = {}): LifecycleFinding {
     confidence: "high",
     selectorKind: "model-id",
     locations: [{ path: "/secret/workspace/src/chat.ts", line: 1, column: 1 }],
+    ...overrides,
+  };
+}
+
+/** A typed call site whose selector is computed at runtime: reportable, never a finding. */
+function unresolvedFact(overrides: Partial<EvidenceFact> = {}): EvidenceFact {
+  return {
+    evidenceId: "unresolved-google",
+    origin: "repository",
+    kind: "sdk-argument",
+    confidence: "high",
+    scope: "application",
+    environment: "production",
+    detectorRuleId: "source.ts.vercel-ai-sdk.google-model@1",
+    detectorManifestVersion: "1",
+    rawValue: "modelId",
+    servingPlatform: "google",
+    modelResolution: "dynamic",
+    selectorKind: "dynamic",
+    platformResolution: "resolved",
+    policyEligible: false,
+    locations: [{ path: "packages/ai-client/src/provider.ts", line: 28, column: 12 }],
+    resolutionTrace: [],
     ...overrides,
   };
 }
@@ -146,6 +170,85 @@ function payloadText(request: CapturedRequest): string {
 }
 
 describe("v3 Slack snapshot delivery", () => {
+  test("names unresolved selectors without contradicting a clean result", async () => {
+    const base = report();
+    const text = await deliveredText(
+      report({
+        unresolvedReferences: [
+          unresolvedFact(),
+          unresolvedFact({
+            evidenceId: "unresolved-openai",
+            detectorRuleId: "source.ts.vercel-ai-sdk.openai-model@1",
+            servingPlatform: "openai",
+            locations: [
+              { path: "packages/ai-client/src/provider.ts", line: 39, column: 12 },
+            ],
+          }),
+        ],
+        counts: {
+          ...base.counts,
+          unresolved: 2,
+          byResolution: { resolved: 0, dynamic: 2, unresolved: 0 },
+        },
+      }),
+    );
+
+    // The whole point: unresolved selectors are reported, and the result stays clean.
+    expect(text).toContain("✅");
+    expect(text).toContain("Result:* no-actionable-risk");
+    expect(text).toContain("0 blocking · 0 advisory · 2 unresolved");
+    expect(text).toContain("Unresolved selectors (2, not counted toward the result):");
+    // Rule IDs keep the snapshot's mention neutralization, like every other report-owned string.
+    expect(text).toContain("source.ts.vercel-ai-sdk.google-model@​1");
+    expect(text).toContain("source.ts.vercel-ai-sdk.openai-model@​1");
+    expect(text).toContain("packages/ai-client/src/provider.ts:28");
+    expect(text).toContain("packages/ai-client/src/provider.ts:39");
+    expect(text).toContain("dynamic/resolved");
+    expect(text).toContain("Actionable findings (0):");
+  });
+
+  test("keeps lexical and protected-scope unresolved references out of the snapshot", async () => {
+    const text = await deliveredText(
+      report({
+        unresolvedReferences: [
+          unresolvedFact({
+            evidenceId: "lexical",
+            kind: "lexical",
+            confidence: "low",
+            detectorRuleId: "text.model-id@1",
+          }),
+          unresolvedFact({
+            evidenceId: "documented",
+            scope: "documentation",
+            detectorRuleId: "source.ts.vercel-ai-sdk.xai-model@1",
+          }),
+        ],
+      }),
+    );
+
+    expect(text).not.toContain("Unresolved selectors");
+    expect(text).not.toContain("text.model-id@​1");
+    expect(text).not.toContain("source.ts.vercel-ai-sdk.xai-model@​1");
+  });
+
+  test("bounds the named unresolved selectors and counts the remainder", async () => {
+    const text = await deliveredText(
+      report({
+        unresolvedReferences: Array.from({ length: 7 }, (_unused, index) =>
+          unresolvedFact({
+            evidenceId: `unresolved-${index}`,
+            locations: [{ path: `src/call${index}.ts`, line: index + 1, column: 1 }],
+          }),
+        ),
+      }),
+    );
+
+    expect(text).toContain("Unresolved selectors (7, not counted toward the result):");
+    expect(text).toContain("src/call4.ts:5");
+    expect(text).not.toContain("src/call5.ts:6");
+    expect(text).toContain("2 more unresolved selector(s) in the job summary");
+  });
+
   test("sends a clean bounded snapshot with authoritative event identity", async () => {
     const requests: CapturedRequest[] = [];
     const assessment = report();

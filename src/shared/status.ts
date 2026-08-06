@@ -199,6 +199,24 @@ const SCOPES: readonly EvidenceScope[] = [
 ];
 const RESOLUTIONS: readonly ModelResolution[] = ["resolved", "dynamic", "unresolved"];
 
+/**
+ * Whether an unresolved selector is worth a reader's attention: a typed call site in code
+ * that runs, rather than a text match or a low-confidence guess. This never elevates the
+ * result. A selector computed at runtime can be unresolvable by construction — a caller-
+ * supplied override has no static value to find — so elevating would pin the repository to
+ * a standing advisory that no change can clear. It selects which references human-facing
+ * surfaces name.
+ */
+export function isPolicyRelevantUnresolved(
+  fact: Pick<EvidenceFact, "kind" | "confidence" | "scope">,
+): boolean {
+  return (
+    fact.kind !== "lexical" &&
+    fact.confidence !== "low" &&
+    (fact.scope === "application" || fact.scope === "deployment")
+  );
+}
+
 export function buildCounts(
   evidence: readonly EvidenceFact[],
   findings: readonly LifecycleFinding[],
