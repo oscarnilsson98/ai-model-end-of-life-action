@@ -681,14 +681,6 @@ function evidenceHealth(evidence: readonly EvidenceFact[]): EvidenceHealth {
   );
 }
 
-function unresolvedIsAdvisory(fact: EvidenceFact): boolean {
-  return (
-    fact.kind !== "lexical" &&
-    fact.confidence !== "low" &&
-    (fact.scope === "application" || fact.scope === "deployment")
-  );
-}
-
 export function evaluateEvidence(input: {
   evidence: readonly EvidenceFact[];
   feed: V3FeedIndex;
@@ -728,10 +720,13 @@ export function evaluateEvidence(input: {
   const findings = aggregateFindings(rawFindings);
   let result = resultFromFindings(findings);
   const health = evidenceHealth(scoped);
-  if (
-    result === "no-actionable-risk" &&
-    (unresolved.some(unresolvedIsAdvisory) || health !== "current")
-  ) {
+  // Unresolved evidence never elevates the result on its own. A runtime-computed selector
+  // can be unresolvable by construction, so an elevation here would pin the repository to a
+  // standing advisory that no change clears — and the Slack snapshot, which reconciles its
+  // finding list against blocking and advisory counts, would have no finding to name for it.
+  // Unresolved references stay in the counts, the job summary, the `unresolved-references`
+  // output, and the snapshot's own unresolved section.
+  if (result === "no-actionable-risk" && health !== "current") {
     result = "advisory";
   }
   return {

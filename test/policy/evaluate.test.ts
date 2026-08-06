@@ -140,6 +140,49 @@ describe("v3 lifecycle evaluation", () => {
     expect(result.result).toBe("blocking");
   });
 
+  test("a runtime-computed selector is reported without elevating the result", () => {
+    const dynamic = fact({
+      evidenceId: "dynamic-selector",
+      rawValue: "modelId",
+      modelResolution: "dynamic",
+      selectorKind: "dynamic",
+      policyEligible: false,
+    });
+    delete dynamic.modelId;
+    const result = evaluateEvidence({
+      evidence: [dynamic],
+      feed,
+      policy: defaultPolicy(),
+      now: NOW,
+      scanStatus: "complete",
+    });
+
+    // A caller-supplied override has no static value to find, so elevating here would pin
+    // the repository to an advisory no change can clear. The reference is still reported.
+    expect(result.result).toBe("no-actionable-risk");
+    expect(result.scanStatus).toBe("complete");
+    expect(result.findings).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.evidenceId)).toEqual([
+      "dynamic-selector",
+    ]);
+  });
+
+  test("evidence health still elevates when no finding does", () => {
+    const result = evaluateEvidence({
+      evidence: [
+        fact({ rawValue: "model-with-no-record", modelId: "model-with-no-record", evidenceHealth: "stale" }),
+      ],
+      feed,
+      policy: defaultPolicy(),
+      now: NOW,
+      scanStatus: "complete",
+    });
+
+    expect(result.findings).toEqual([]);
+    expect(result.result).toBe("advisory");
+    expect(result.scanStatus).toBe("partial");
+  });
+
   test("covers every independent v3 blocking-eligibility condition", () => {
     const enforced = { ...defaultPolicy(), failWithinDays: 30 };
     const eligibleOrigins: Array<{

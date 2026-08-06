@@ -4,16 +4,22 @@ import {
   type FetchLike,
 } from "../shared/http.ts";
 import { parseHttpsUrl } from "./input.ts";
-import { deprecationLeadsHorizon, earliestLifecycleDays } from "../shared/status.ts";
+import {
+  deprecationLeadsHorizon,
+  earliestLifecycleDays,
+  isPolicyRelevantUnresolved,
+} from "../shared/status.ts";
 import { servingPlatformLabel } from "../shared/text.ts";
 import type {
   AssessmentReport,
+  EvidenceFact,
   LifecycleFinding,
   NotificationStatus,
 } from "../shared/types.ts";
 
 const MAX_SLACK_TEXT_BYTES = 12_000;
 const MAX_ACTIONABLE_FINDINGS = 10;
+const MAX_UNRESOLVED_REFERENCES = 5;
 const MAX_EVIDENCE_SOURCES = 8;
 const TRUSTED_NOTIFICATION_EVENTS = new Set(["schedule", "workflow_dispatch", "push"]);
 const PROTECTED_SCOPES = new Set(["documentation", "example", "test"]);
@@ -210,6 +216,25 @@ function findingLine(finding: NotifiableFinding): string {
   return source === null ? line : `${line} · ${slackLink(source, "source")}`;
 }
 
+/**
+ * One unresolved selector: the raw value the detector saw, the rule that saw it, how far
+ * resolution got, and where to look. These lines are context, never findings — they are
+ * outside the `Counts:` reconciliation and cannot move the result, so the section labels
+ * itself as such rather than reading like an actionable warning.
+ */
+function unresolvedLine(fact: EvidenceFact): string {
+  const location = fact.locations[0];
+  const line = `• ${slackText(fact.rawValue, 120)} — ${slackText(
+    fact.detectorRuleId,
+    200,
+  )} · ${slackText(fact.servingPlatform ?? "platform unresolved", 60)} · ${
+    fact.modelResolution
+  }/${fact.platformResolution}`;
+  return location === undefined
+    ? line
+    : `${line} · ${slackText(location.path, 200)}:${location.line}`;
+}
+
 /** The run link is the only way an alert reader can reach the job summary and artifacts. */
 function workflowRunUrl(): string | null {
   const repository = repositoryName();
@@ -286,6 +311,22 @@ function renderSlackSnapshot(report: AssessmentReport): string {
     if (withheld.length > 0) {
       lines.push(
         `• ${withheld.length} counted finding(s) outside application and deployment scope stay in the job summary.`,
+      );
+    }
+  }
+
+  const namedUnresolved = report.unresolvedReferences.filter(isPolicyRelevantUnresolved);
+  if (namedUnresolved.length > 0) {
+    lines.push(
+      "",
+      `*Unresolved selectors (${namedUnresolved.length}, not counted toward the result):*`,
+      ...namedUnresolved.slice(0, MAX_UNRESOLVED_REFERENCES).map(unresolvedLine),
+    );
+    if (namedUnresolved.length > MAX_UNRESOLVED_REFERENCES) {
+      lines.push(
+        `• … ${
+          namedUnresolved.length - MAX_UNRESOLVED_REFERENCES
+        } more unresolved selector(s) in the report`,
       );
     }
   }

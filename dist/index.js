@@ -7945,6 +7945,9 @@ var SCOPES = [
   "unknown"
 ];
 var RESOLUTIONS = ["resolved", "dynamic", "unresolved"];
+function isPolicyRelevantUnresolved(fact) {
+  return fact.kind !== "lexical" && fact.confidence !== "low" && (fact.scope === "application" || fact.scope === "deployment");
+}
 function buildCounts(evidence, findings, unresolved) {
   const byScope = Object.fromEntries(SCOPES.map((scope) => [scope, 0]));
   const byResolution = Object.fromEntries(RESOLUTIONS.map((resolution) => [resolution, 0]));
@@ -9227,9 +9230,6 @@ function applySuppressions(findings, evidenceById, policy, now, diagnostics) {
 function evidenceHealth(evidence) {
   return combineEvidenceHealth(...evidence.map((fact) => fact.evidenceHealth ?? "current"));
 }
-function unresolvedIsAdvisory(fact) {
-  return fact.kind !== "lexical" && fact.confidence !== "low" && (fact.scope === "application" || fact.scope === "deployment");
-}
 function evaluateEvidence(input) {
   const diagnostics = [...input.diagnostics ?? []];
   if (input.policy.servingPlatforms.length > 0) {
@@ -9251,7 +9251,7 @@ function evaluateEvidence(input) {
   const findings = aggregateFindings(rawFindings);
   let result = resultFromFindings(findings);
   const health = evidenceHealth(scoped);
-  if (result === "no-actionable-risk" && (unresolved.some(unresolvedIsAdvisory) || health !== "current")) {
+  if (result === "no-actionable-risk" && health !== "current") {
     result = "advisory";
   }
   return {
@@ -10708,64 +10708,226 @@ function analyzeTokens(tokens, language) {
   };
 }
 var DIRECT_VALUE_TERMINATORS = new Set([",", ")", "}", "]", ";"]);
+function directValueEnd(tokens, valueIndex) {
+  if (tokens[valueIndex]?.kind !== "identifier")
+    return valueIndex;
+  let end = valueIndex;
+  while (structuralValue(tokens[end + 1]) === "." && tokens[end + 2]?.kind === "identifier") {
+    end += 2;
+  }
+  return end;
+}
+function memberPath(tokens, start, end) {
+  const parts = [];
+  for (let index = start;index <= end; index += 2) {
+    parts.push(tokens[index]?.value ?? "");
+  }
+  return parts.join(".");
+}
 function isCompleteDirectValue(tokens, valueIndex, allowLineBoundary = false) {
   const value = tokens[valueIndex];
-  const next = tokens[valueIndex + 1];
-  if (value === undefined || next === undefined)
-    return value !== undefined;
+  if (value === undefined)
+    return false;
+  const end = directValueEnd(tokens, valueIndex);
+  const last = tokens[end] ?? value;
+  const next = tokens[end + 1];
+  if (next === undefined)
+    return true;
   if (DIRECT_VALUE_TERMINATORS.has(next.value))
     return true;
-  return allowLineBoundary && next.line > value.line;
+  return allowLineBoundary && next.line > last.line;
+}
+function isSpreadAt(tokens, index) {
+  return structuralValue(tokens[index]) === "." && structuralValue(tokens[index + 1]) === "." && structuralValue(tokens[index + 2]) === ".";
+}
+function objectValueEnd(tokens, valueIndex, close) {
+  let depth = 0;
+  for (let index = valueIndex;index < close; index += 1) {
+    const value = structuralValue(tokens[index]);
+    if (value === "{" || value === "[" || value === "(")
+      depth += 1;
+    else if (value === "}" || value === "]" || value === ")")
+      depth = Math.max(0, depth - 1);
+    else if (value === "," && depth === 0)
+      return index;
+  }
+  return close;
+}
+var MAX_OBJECT_PATH_DEPTH = 12;
+var IDENTIFIER_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+function readObjectPaths(tokens, open, close, prefix, out, depth = 0) {
+  if (depth > MAX_OBJECT_PATH_DEPTH)
+    return false;
+  const seen = new Set;
+  let cursor = open + 1;
+  while (cursor < close) {
+    if (structuralValue(tokens[cursor]) === ",") {
+      cursor += 1;
+      continue;
+    }
+    if (isSpreadAt(tokens, cursor))
+      return false;
+    const keyToken = tokens[cursor];
+    const key = keyToken?.kind === "identifier" || keyToken?.kind === "string" && keyToken.static ? keyToken.value : undefined;
+    if (key === undefined || structuralValue(tokens[cursor + 1]) !== ":")
+      return false;
+    if (key.includes("."))
+      return false;
+    if (seen.has(key))
+      return false;
+    seen.add(key);
+    const valueIndex = cursor + 2;
+    const valueEnd = objectValueEnd(tokens, valueIndex, close);
+    const valueToken = tokens[valueIndex];
+    if (!IDENTIFIER_KEY.test(key)) {
+      cursor = valueEnd + 1;
+      continue;
+    }
+    if (structuralValue(valueToken) === "{") {
+      const nestedClose = matchingIndex(tokens, valueIndex, "{", "}");
+      if (nestedClose === null || nestedClose > valueEnd)
+        return false;
+      if (!readObjectPaths(tokens, valueIndex, nestedClose, `${prefix}.${key}`, out, depth + 1)) {
+        return false;
+      }
+    } else if (valueToken?.kind === "string" && valueToken.static && valueEnd === valueIndex + 1) {
+      out.set(`${prefix}.${key}`, valueToken.value);
+    }
+    cursor = valueEnd + 1;
+  }
+  return true;
+}
+function collectObjectPaths(tokens, analysis) {
+  const paths = new Map;
+  const declared = new Set;
+  const rejected = new Set;
+  for (let index = 0;index < tokens.length; index += 1) {
+    if (!isIdentifier(tokens[index], "const"))
+      continue;
+    const name = tokens[index + 1];
+    if (name?.kind !== "identifier" || structuralValue(tokens[index + 2]) !== "=" || structuralValue(tokens[index + 3]) !== "{") {
+      continue;
+    }
+    const root = name.value;
+    const close = matchingIndex(tokens, index + 3, "{", "}");
+    if (close === null || declared.has(root) || (analysis.assignmentCounts.get(root) ?? 0) !== 1 || analysis.parameterNames.has(root)) {
+      declared.add(root);
+      rejected.add(root);
+      continue;
+    }
+    declared.add(root);
+    const collected = new Map;
+    if (readObjectPaths(tokens, index + 3, close, root, collected)) {
+      for (const [path, value] of collected)
+        paths.set(path, value);
+    } else {
+      rejected.add(root);
+    }
+    index = close;
+  }
+  for (const path of [...paths.keys()]) {
+    if (rejected.has(path.slice(0, path.indexOf("."))))
+      paths.delete(path);
+  }
+  return paths;
+}
+var EMPTY_SCALARS = new Map;
+function staticFallbackIndex(tokens, valueIndex, language) {
+  const end = directValueEnd(tokens, valueIndex);
+  const operator = tokens[end + 1];
+  if (language === "python")
+    return isIdentifier(operator, "or") ? end + 2 : undefined;
+  if (operator?.value === "??" || operator?.value === "||")
+    return end + 2;
+  if (operator?.value === "|" && tokens[end + 2]?.value === "|")
+    return end + 3;
+  return;
+}
+function staticAtomAt(tokens, valueIndex, constants) {
+  const token = tokens[valueIndex];
+  if (token?.kind === "string" && token.static) {
+    return {
+      value: token.value,
+      dynamic: false,
+      trace: [{ kind: "detector", detail: "direct static string" }]
+    };
+  }
+  if (token?.kind !== "identifier")
+    return;
+  const end = directValueEnd(tokens, valueIndex);
+  if (end > valueIndex) {
+    const path = memberPath(tokens, valueIndex, end);
+    const value = constants.objectPaths.get(path);
+    return value === undefined ? undefined : {
+      value,
+      dynamic: false,
+      trace: [{ kind: "constant", detail: `same-file object path ${path}` }]
+    };
+  }
+  const constant = constants.scalars.get(token.value);
+  return constant === undefined ? undefined : {
+    ...constant,
+    trace: [
+      { kind: "constant", detail: `same-file constant ${token.value}` },
+      ...constant.trace
+    ]
+  };
+}
+function staticAtom(tokens, valueIndex, constants, allowLineBoundary = false) {
+  return isCompleteDirectValue(tokens, valueIndex, allowLineBoundary) ? staticAtomAt(tokens, valueIndex, constants) : undefined;
+}
+function resolveValueExpression(tokens, valueIndex, constants, allowLineBoundary = false) {
+  const fallbackIndex = staticFallbackIndex(tokens, valueIndex, constants.language);
+  if (fallbackIndex !== undefined) {
+    const left = staticAtomAt(tokens, valueIndex, constants);
+    if (left !== undefined && left.value !== "")
+      return left;
+    const fallback = staticAtom(tokens, fallbackIndex, constants, allowLineBoundary);
+    return fallback === undefined ? undefined : {
+      value: fallback.value,
+      dynamic: true,
+      trace: [
+        { kind: "detector", detail: "static default behind a runtime selector" },
+        ...fallback.trace
+      ]
+    };
+  }
+  return staticAtom(tokens, valueIndex, constants, allowLineBoundary);
 }
 function collectConstants(tokens, language, analysis) {
+  const objectPaths = language === "javascript" ? collectObjectPaths(tokens, analysis) : new Map;
+  const atoms = { scalars: EMPTY_SCALARS, objectPaths, language };
   const candidates = new Map;
   const record = (name, value) => {
     candidates.set(name, candidates.has(name) ? null : value);
   };
-  let braceDepth = 0;
+  const consider = (name, valueIndex) => {
+    const resolved = resolveValueExpression(tokens, valueIndex, atoms, true);
+    if (resolved === undefined)
+      return;
+    record(name, {
+      ...resolved,
+      trace: resolved.trace.filter((entry) => entry.detail !== "direct static string")
+    });
+  };
   for (let index = 0;index < tokens.length; index += 1) {
     if (language === "javascript") {
-      if (structuralValue(tokens[index]) === "{") {
-        braceDepth += 1;
-        continue;
-      }
-      if (structuralValue(tokens[index]) === "}") {
-        braceDepth = Math.max(0, braceDepth - 1);
-        continue;
-      }
-      if (braceDepth === 0 && isIdentifier(tokens[index], "const") && tokens[index + 1]?.kind === "identifier" && tokens[index + 2]?.value === "=" && tokens[index + 3]?.kind === "string" && tokens[index + 3]?.static && isCompleteDirectValue(tokens, index + 3, true)) {
-        record(tokens[index + 1]?.value, tokens[index + 3]?.value);
+      if (isIdentifier(tokens[index], "const") && tokens[index + 1]?.kind === "identifier" && tokens[index + 2]?.value === "=") {
+        consider(tokens[index + 1]?.value, index + 3);
       }
       continue;
     }
     const token = tokens[index];
-    if (token?.kind === "identifier" && token.column === 1 && structuralValue(tokens[index + 1]) === "=" && tokens[index + 2]?.kind === "string" && tokens[index + 2]?.static && isCompleteDirectValue(tokens, index + 2, true)) {
-      record(token.value, tokens[index + 2]?.value);
+    if (token?.kind === "identifier" && token.column === 1 && structuralValue(tokens[index + 1]) === "=") {
+      consider(token.value, index + 2);
     }
   }
   const { parameterNames: shadowed, assignmentCounts } = analysis;
-  return new Map([...candidates.entries()].filter((entry) => entry[1] !== null && !shadowed.has(entry[0]) && (assignmentCounts.get(entry[0]) ?? 0) === 1));
-}
-function staticAtom(tokens, valueIndex, constants) {
-  if (!isCompleteDirectValue(tokens, valueIndex))
-    return;
-  const token = tokens[valueIndex];
-  if (token?.kind === "string" && token.static) {
-    return {
-      modelId: token.value,
-      trace: [{ kind: "detector", detail: "direct static string" }]
-    };
-  }
-  if (token?.kind === "identifier") {
-    const constant = constants.get(token.value);
-    if (constant !== undefined) {
-      return {
-        modelId: constant,
-        trace: [{ kind: "constant", detail: `same-file constant ${token.value}` }]
-      };
-    }
-  }
-  return;
+  return {
+    scalars: new Map([...candidates.entries()].filter((entry) => entry[1] !== null && !shadowed.has(entry[0]) && (assignmentCounts.get(entry[0]) ?? 0) === 1)),
+    objectPaths,
+    language
+  };
 }
 function resolveTokenValue(tokens, valueIndex, constants, defaultSelectorKind, environmentReference) {
   const token = tokens[valueIndex];
@@ -10773,8 +10935,8 @@ function resolveTokenValue(tokens, valueIndex, constants, defaultSelectorKind, e
     const fallback = environmentReference.fallbackIndex === undefined ? undefined : staticAtom(tokens, environmentReference.fallbackIndex, constants);
     if (fallback !== undefined) {
       return {
-        rawValue: fallback.modelId,
-        modelId: fallback.modelId,
+        rawValue: fallback.value,
+        modelId: fallback.value,
         modelResolution: "resolved",
         selectorKind: "dynamic",
         trace: [
@@ -10800,13 +10962,13 @@ function resolveTokenValue(tokens, valueIndex, constants, defaultSelectorKind, e
       environmentVariable: environmentReference.variable
     };
   }
-  const resolved = staticAtom(tokens, valueIndex, constants);
+  const resolved = resolveValueExpression(tokens, valueIndex, constants);
   if (resolved !== undefined) {
     return {
-      rawValue: token?.kind === "identifier" ? token.value : resolved.modelId,
-      modelId: resolved.modelId,
+      rawValue: resolved.dynamic ? resolved.value : token?.kind === "identifier" ? memberPath(tokens, valueIndex, directValueEnd(tokens, valueIndex)) : resolved.value,
+      modelId: resolved.value,
       modelResolution: "resolved",
-      selectorKind: defaultSelectorKind,
+      selectorKind: resolved.dynamic ? "dynamic" : defaultSelectorKind,
       trace: resolved.trace
     };
   }
@@ -14508,6 +14670,7 @@ function resultIcon(result, scanStatus) {
 // src/action/notification.ts
 var MAX_SLACK_TEXT_BYTES = 12000;
 var MAX_ACTIONABLE_FINDINGS = 10;
+var MAX_UNRESOLVED_REFERENCES = 5;
 var MAX_EVIDENCE_SOURCES = 8;
 var TRUSTED_NOTIFICATION_EVENTS = new Set(["schedule", "workflow_dispatch", "push"]);
 var PROTECTED_SCOPES2 = new Set(["documentation", "example", "test"]);
@@ -14643,6 +14806,11 @@ function findingLine(finding) {
   const source = safeLink(finding.sourceUrls[0]);
   return source === null ? line : `${line} · ${slackLink(source, "source")}`;
 }
+function unresolvedLine(fact) {
+  const location = fact.locations[0];
+  const line = `• ${slackText(fact.rawValue, 120)} — ${slackText(fact.detectorRuleId, 200)} · ${slackText(fact.servingPlatform ?? "platform unresolved", 60)} · ${fact.modelResolution}/${fact.platformResolution}`;
+  return location === undefined ? line : `${line} · ${slackText(location.path, 200)}:${location.line}`;
+}
 function workflowRunUrl() {
   const repository = repositoryName();
   const runId = process.env.GITHUB_RUN_ID?.trim();
@@ -14709,6 +14877,13 @@ function renderSlackSnapshot(report) {
     }
     if (withheld.length > 0) {
       lines.push(`• ${withheld.length} counted finding(s) outside application and deployment scope stay in the job summary.`);
+    }
+  }
+  const namedUnresolved = report.unresolvedReferences.filter(isPolicyRelevantUnresolved);
+  if (namedUnresolved.length > 0) {
+    lines.push("", `*Unresolved selectors (${namedUnresolved.length}, not counted toward the result):*`, ...namedUnresolved.slice(0, MAX_UNRESOLVED_REFERENCES).map(unresolvedLine));
+    if (namedUnresolved.length > MAX_UNRESOLVED_REFERENCES) {
+      lines.push(`• … ${namedUnresolved.length - MAX_UNRESOLVED_REFERENCES} more unresolved selector(s) in the report`);
     }
   }
   const runUrl = workflowRunUrl();
