@@ -1789,6 +1789,21 @@ describe("same-file value resolution", () => {
     ).toMatchObject({ modelId: "gpt-old", modelResolution: "resolved" });
   });
 
+  test("resolves a Python static default behind a non-environment selector", () => {
+    expect(
+      ruleEvidence(
+        "src/chat.py",
+        `from openai import OpenAI\nclient = OpenAI()\n\n\ndef build(override):\n    return client.responses.create(model=override or "gpt-old", input="hi")\n`,
+        "source.py.openai.request-model@1",
+      ),
+    ).toMatchObject({
+      modelId: "gpt-old",
+      modelResolution: "resolved",
+      selectorKind: "dynamic",
+      policyEligible: false,
+    });
+  });
+
   test("keys unreachable by dot access are skipped without losing the rest", () => {
     // A dashed key can only be read with a computed index, so it is not recorded — but it
     // must not poison the sibling paths that are reachable.
