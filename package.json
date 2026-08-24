@@ -19,8 +19,8 @@
     "check": "bun run verify-toolchain && bun run typecheck && bun run test"
   },
   "devDependencies": {
-    "@types/bun": "1.3.14",
-    "@types/node": "24.13.3",
+    "@types/bun": "1.4.0",
+    "@types/node": "26.2.0",
     "typescript": "7.0.2"
   },
   "overrides": {
