@@ -2489,6 +2489,21 @@ client.responses.create({ model: "gpt-old", input: "hello" });
     }
   });
 
+  test("classifies adversarial configuration file names without catastrophic backtracking", () => {
+    // Repository paths are untrusted. A separator that the name body could also absorb
+    // made these names backtrack exponentially and stall the scan.
+    for (const path of [
+      `values-${"--".repeat(40)}!.yaml`,
+      `docker-compose.${"--".repeat(40)}!.yml`,
+      `openapi-${"--".repeat(40)}!.json`,
+    ]) {
+      const lexical = detectSnapshot(snapshot(path, 'model = "gpt-old"\n'), feed).evidence.filter(
+        (fact) => fact.detectorRuleId === "fallback.text.lifecycle-id@1",
+      );
+      expect(lexical.map((fact) => fact.scope), path).toEqual(["application"]);
+    }
+  });
+
   test("emits non-enforceable evidence for dynamic selectors and endpoints", () => {
     const dynamicSelector = ruleEvidence(
       "src/chat.ts",

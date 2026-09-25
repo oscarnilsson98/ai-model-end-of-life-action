@@ -94,10 +94,10 @@ const DEPLOYMENT_FILE_NAMES = new Set([
   "render.yaml",
 ]);
 const DEPLOYMENT_FILE_PATTERN =
-  /^(?:(?:docker-)?compose|values|helmfile)(?:[.-][a-z0-9_-]+)*\.ya?ml$|^(?:dockerfile|containerfile)(?:\.[a-z0-9_-]+)*$|\.(?:dockerfile|containerfile|tfvars|bicep|tfvars\.json|tf\.json)$/u;
+  /^(?:(?:docker-)?compose|values|helmfile)(?:[.-][a-z0-9_.-]*)?\.ya?ml$|^(?:dockerfile|containerfile)(?:\.[a-z0-9_-]+)*$|\.(?:dockerfile|containerfile|tfvars|bicep|tfvars\.json|tf\.json)$/u;
 /** Machine-written inventories that enumerate model IDs without selecting one. */
 const NON_SELECTING_CONFIGURATION_FILE =
-  /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.ya?ml|(?:openapi|swagger)(?:[.-][a-z0-9_-]+)*\.(?:json|ya?ml))$/u;
+  /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.ya?ml|(?:openapi|swagger)(?:[.-][a-z0-9_.-]*)?\.(?:json|ya?ml))$/u;
 const CONFIGURATION_EXAMPLE_PARTS = new Set(["example", "sample", "template", "dist"]);
 const IDENTIFIER_CHARACTER = /^[\p{L}\p{N}\p{M}._:/-]$/u;
 const DIRECT_POLICY_RULES = new Set(

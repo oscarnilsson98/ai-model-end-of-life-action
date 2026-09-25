@@ -9753,8 +9753,8 @@ var DEPLOYMENT_FILE_NAMES = new Set([
   "fly.toml",
   "render.yaml"
 ]);
-var DEPLOYMENT_FILE_PATTERN = /^(?:(?:docker-)?compose|values|helmfile)(?:[.-][a-z0-9_-]+)*\.ya?ml$|^(?:dockerfile|containerfile)(?:\.[a-z0-9_-]+)*$|\.(?:dockerfile|containerfile|tfvars|bicep|tfvars\.json|tf\.json)$/u;
-var NON_SELECTING_CONFIGURATION_FILE = /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.ya?ml|(?:openapi|swagger)(?:[.-][a-z0-9_-]+)*\.(?:json|ya?ml))$/u;
+var DEPLOYMENT_FILE_PATTERN = /^(?:(?:docker-)?compose|values|helmfile)(?:[.-][a-z0-9_.-]*)?\.ya?ml$|^(?:dockerfile|containerfile)(?:\.[a-z0-9_-]+)*$|\.(?:dockerfile|containerfile|tfvars|bicep|tfvars\.json|tf\.json)$/u;
+var NON_SELECTING_CONFIGURATION_FILE = /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.ya?ml|(?:openapi|swagger)(?:[.-][a-z0-9_.-]*)?\.(?:json|ya?ml))$/u;
 var CONFIGURATION_EXAMPLE_PARTS = new Set(["example", "sample", "template", "dist"]);
 var IDENTIFIER_CHARACTER = /^[\p{L}\p{N}\p{M}._:/-]$/u;
 var DIRECT_POLICY_RULES = new Set(DETECTOR_RULES.filter((rule) => rule.policyEligible).map((rule) => rule.ruleId));
