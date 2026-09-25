@@ -52,6 +52,53 @@ const JS_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".m
  */
 const JSX_EXTENSIONS = new Set([".js", ".jsx", ".mjs", ".cjs", ".tsx"]);
 const HCL_EXTENSIONS = new Set([".tf", ".hcl"]);
+const CONFIGURATION_EXTENSIONS = new Set([
+  ".yaml",
+  ".yml",
+  ".json",
+  ".jsonc",
+  ".json5",
+  ".toml",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".properties",
+  ".env",
+]);
+/** Kubernetes, Helm, Kustomize, and infrastructure trees. */
+const DEPLOYMENT_DIRECTORIES = new Set([
+  "k8s",
+  "kubernetes",
+  "kube",
+  "helm",
+  "charts",
+  "manifests",
+  "kustomize",
+  "deploy",
+  "deployment",
+  "deployments",
+  "infra",
+  "infrastructure",
+]);
+/** Deployment descriptors recognized by their lower-cased file name. */
+const DEPLOYMENT_FILE_NAMES = new Set([
+  "procfile",
+  "serverless.yml",
+  "serverless.yaml",
+  "chart.yml",
+  "chart.yaml",
+  "kustomization.yml",
+  "kustomization.yaml",
+  "skaffold.yaml",
+  "fly.toml",
+  "render.yaml",
+]);
+const DEPLOYMENT_FILE_PATTERN =
+  /^(?:(?:docker-)?compose|values|helmfile)(?:[.-][a-z0-9_.-]*)?\.ya?ml$|^(?:dockerfile|containerfile)(?:\.[a-z0-9_-]+)*$|\.(?:dockerfile|containerfile|tfvars|bicep|tfvars\.json|tf\.json)$/u;
+/** Machine-written inventories that enumerate model IDs without selecting one. */
+const NON_SELECTING_CONFIGURATION_FILE =
+  /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.ya?ml|(?:openapi|swagger)(?:[.-][a-z0-9_.-]*)?\.(?:json|ya?ml))$/u;
+const CONFIGURATION_EXAMPLE_PARTS = new Set(["example", "sample", "template", "dist"]);
 const IDENTIFIER_CHARACTER = /^[\p{L}\p{N}\p{M}._:/-]$/u;
 const DIRECT_POLICY_RULES = new Set(
   DETECTOR_RULES.filter((rule) => rule.policyEligible).map((rule) => rule.ruleId),
@@ -3766,7 +3813,39 @@ export function classifyEvidenceScope(path: string, semantic = false): EvidenceS
   }
   if (HCL_EXTENSIONS.has(extension)) return "deployment";
   if (semantic || SOURCE_EXTENSIONS.has(extension)) return "application";
-  return "unknown";
+  return configurationScope(lower, segments, fileName, extension) ?? "unknown";
+}
+
+/**
+ * Configuration is where a deployed model is most often chosen — a Helm value, a compose
+ * environment entry, an app settings file — so an exact feed ID there must warn rather than
+ * sit in the report as a notice. Only lexical fallback reads these files, and lexical
+ * evidence is never policy eligible, so this scope decides visibility, never blocking.
+ */
+function configurationScope(
+  lowerPath: string,
+  segments: readonly string[],
+  fileName: string,
+  extension: string,
+): EvidenceScope | undefined {
+  // GitHub runs every file in the workflows directory, whatever it is named.
+  if (GITHUB_WORKFLOW_PATH.test(lowerPath)) return "deployment";
+  const dotenv = DOTENV_PATH.test(fileName);
+  const deploymentFile =
+    DEPLOYMENT_FILE_NAMES.has(fileName) || DEPLOYMENT_FILE_PATTERN.test(fileName);
+  if (!dotenv && !deploymentFile && !CONFIGURATION_EXTENSIONS.has(extension)) return undefined;
+  const nameParts = fileName.split(".").slice(1);
+  if (nameParts.some((part) => CONFIGURATION_EXAMPLE_PARTS.has(part))) return "example";
+  if (dotenv && nameParts.includes("test")) return "test";
+  if (NON_SELECTING_CONFIGURATION_FILE.test(fileName)) return "unknown";
+  if (
+    dotenv ||
+    deploymentFile ||
+    segments.slice(0, -1).some((segment) => DEPLOYMENT_DIRECTORIES.has(segment))
+  ) {
+    return "deployment";
+  }
+  return "application";
 }
 
 type AutomatonNode = { transitions: Map<string, number>; failure: number; outputs: number[] };
