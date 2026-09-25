@@ -105,6 +105,8 @@ An unresolved selector never elevates the result by itself. A selector computed 
 
 `complete` means every eligible Git blob and configured evidence source within the declared scope and resource budgets was processed by its applicable v3 detector or fallback. It does not mean all runtime usage is knowable.
 
+Nor does it mean every processed model could be checked. A model ID absent from the feed means "not deprecated" only on a serving platform the feed actually publishes records for. Application or deployment evidence whose resolved serving platform has no feed records at all is therefore reported in one `platform-without-lifecycle-data` notice per run, naming each such platform with a reference count and a bounded path sample. It is a notice by design: it does not change `scan-status`, `result`, or enforcement, emits no annotation, and is not sent to Slack, so a platform the feed does not cover costs one line rather than recurring noise. It is evaluated after trusted resolutions, so resolving the evidence onto a covered platform clears it, and it is omitted when the feed has no model records at all, an outage `feed-unavailable` already reports. On pull requests and merge groups only the evaluated target's notice is reported; the base's copy is superseded and could name usage the change removed.
+
 `partial` includes at least one of:
 
 - an eligible blob was unavailable, skipped, truncated, or could not be parsed by an applicable detector;
@@ -149,7 +151,7 @@ Enforcement is enabled when the effective trusted policy sets `fail-within-days`
 
 Lexical-only, model-dynamic, platform-ambiguous, documentation, example, and test evidence MUST NOT produce `blocking` in v3.0. Platform-ambiguous evidence never blocks in v3.0, even if every currently known feed record is within the failure window, because feed platforms do not prove a closed set of possible serving platforms.
 
-Lexical evidence scoped to application/deployment source may produce a clearly labelled `advisory` when its exact typed model ID is inside the warning horizon, but it is never policy eligible. Lexical evidence in unknown, documentation, example, fixture, test, or generated scope produces `notice` only. High/medium-confidence semantic application or deployment evidence with a dynamic model, ambiguous platform, or lifecycle-feed conflict may also produce `advisory`. Repetition changes counts and locations, never outcome severity.
+Lexical evidence scoped to application/deployment source or configuration may produce a clearly labelled `advisory` when its exact typed model ID is inside the warning horizon, but it is never policy eligible. Lexical evidence in unknown, documentation, example, fixture, test, or generated scope produces `notice` only. High/medium-confidence semantic application or deployment evidence with a dynamic model, ambiguous platform, or lifecycle-feed conflict may also produce `advisory`. Repetition changes counts and locations, never outcome severity.
 
 One occurrence whose serving platform the evidence did not establish MUST produce one finding, however many feed providers publish that model ID. Such matches are collapsed into a single finding that carries every candidate platform in `servingPlatforms`, the most severe of their lifecycle outcomes, and the dates of the most urgent candidate record — nearest measured lifecycle date first, undated last, by the same [date precedence](#lifecycle-date-precedence) the warning horizon uses. `servingPlatform` remains the platform of that reported record, and the union of candidate source URLs and replacement models stays in the finding. Human-facing text names every candidate platform, so a collapsed finding never reads as an established platform. Alert volume therefore follows repository evidence, not feed breadth. Platform-resolved semantic evidence is unaffected and keeps one finding per exact pair and active lifecycle signature.
 
@@ -241,6 +243,8 @@ A feed record may publish an `announcementDate`, a `deprecationDate`, and a `shu
 The warning horizon therefore measures the **earliest published transition**: `min(deprecationDate, shutdownDate)`, which given the required ordering is `deprecationDate` whenever one is published. A model whose deprecation date has passed or is near is advisory even when its shutdown is hundreds of days out. A record with no published `shutdownDate` has no measurable end and stays inside the warning horizon at any distance, which is why undated deprecations with joined evidence are advisory.
 
 `failWithinDays` deliberately keeps measuring `shutdownDate` alone. Failing a job is the irreversible direction, and enforcement is contracted against the date the model actually stops being served. A deprecation inside the failure horizon warns; it does not block.
+
+Human-facing surfaces — the job summary, annotations, and the Slack snapshot — lead with the shutdown, because that is the day calls start failing. A shutdown that is today or past is stated as such (`shut down 2026-02-19 (218d ago)`) rather than as a negative distance. When the deprecation opened the warning horizon and the model has not yet shut down, it follows as context (`shutdown 2027-06-01 (in 303d) · deprecated 2026-06-01 (62d ago)`), so a warning against a distant shutdown still says why it fired. Findings in the report and in those surfaces are ordered by shutdown date: models already shut down first, then the nearest shutdown, then records with no published shutdown date.
 
 The action captures one `evaluatedAt` UTC instant before evaluation and derives one UTC calendar date from it. Feed lifecycle dates are ISO `YYYY-MM-DD` dates. `daysUntilShutdown` is the signed calendar-day difference `shutdownDate - evaluatedDate`: shutdown today is `0`, a past shutdown is negative, and a shutdown exactly at the configured horizon is included. `daysUntilDeprecation` is the same signed difference against `deprecationDate` and is present in a finding exactly when `deprecationDate` is. Base, target, summary, notification, and fingerprints use the same instant.
 
@@ -618,7 +622,7 @@ For operational visibility, documentation SHOULD recommend one or both of:
 
 The zero-input workflow keeps `contents: read` and MUST NOT request issue, pull-request write, or security-event permissions. External writes require explicit credentials and configuration.
 
-Slack delivery in v3.0 is a stateless snapshot limited to current actionable lifecycle advisories, blocking findings, and configured evidence-source freshness state. Every finding the report counts as blocking or advisory is either named in the snapshot's finding list or reported there as a withheld count, so a snapshot MUST NOT state a result it then denies. Low-confidence lexical matches are named and labelled `ADVISORY (text match)`, because a repository with no typed SDK call site has no stronger evidence to report; documentation, test, and example scope findings are counted but not named; resolved evidence is excluded. Policy-relevant unresolved selectors—non-lexical, non-low-confidence evidence in application or deployment scope—are named in a bounded section of their own that is explicitly labelled as not counted toward the result, so the snapshot can report them without implying a finding its result denies. A named finding carries the feed's first replacement model and a link to its primary source when the feed supplies them, and the snapshot links to the workflow run when `GITHUB_SERVER_URL`, `GITHUB_REPOSITORY`, and `GITHUB_RUN_ID` are all present and well-formed. Report-owned URLs are rendered as links only when they are credential-free HTTP(S) URLs made of RFC 3986 characters. Delivery is attempted only when the event name is exactly `schedule`, `workflow_dispatch`, or `push` and the selected target is a commit. Every other event—including `pull_request`, `merge_group`, `release`, and local or unknown events—is skipped.
+Slack delivery in v3.0 is a stateless snapshot limited to current actionable lifecycle advisories, blocking findings, and configured evidence-source freshness state. Every finding the report counts as blocking or advisory is either named in the snapshot's finding list or reported there as a withheld count, so a snapshot MUST NOT state a result it then denies. Low-confidence lexical matches are named and labelled `ADVISORY (text match)`, because a repository with no typed SDK call site has no stronger evidence to report; documentation, test, and example scope findings are counted but not named; resolved and unchanged unresolved evidence is excluded. A named finding leads with its shutdown date, as described under [lifecycle date precedence](#lifecycle-date-precedence), and findings are listed by outcome, then evidence tier, then shutdown date. It carries the feed's first replacement model and a link to its primary source when the feed supplies them, and the snapshot links to the workflow run when `GITHUB_SERVER_URL`, `GITHUB_REPOSITORY`, and `GITHUB_RUN_ID` are all present and well-formed. Report-owned URLs are rendered as links only when they are credential-free HTTP(S) URLs made of RFC 3986 characters. Delivery is attempted only when the event name is exactly `schedule`, `workflow_dispatch`, or `push` and the selected target is a commit. Every other event—including `pull_request`, `merge_group`, `release`, and local or unknown events—is skipped.
 
 Notification delivery state is independent:
 
@@ -671,14 +675,17 @@ Evidence: repository only · Scan: complete within repository scope
 No runtime or control-plane evidence source was supplied; those systems were not assessed.
 ```
 
+When a `platform-without-lifecycle-data` notice is present, its message follows the evidence line as a single `Not assessed:` line, so a clean result never reads as an all-clear for models nothing could check. It is not repeated among the collapsed coverage diagnostics.
+
 The detailed summary contains nonempty sections in this order:
 
 1. actionable lifecycle findings;
-2. conditional and unresolved evidence;
-3. external evidence health;
-4. policy/configuration diff on pull requests;
-5. active suppressions;
-6. collapsed coverage and provenance.
+2. notices outside application and deployment scope whose shutdown is within 30 days, so a model a test or example still calls is named before it stops answering;
+3. conditional and unresolved evidence;
+4. external evidence health;
+5. policy/configuration diff on pull requests;
+6. active suppressions;
+7. collapsed coverage and provenance.
 
 Annotations are aggregated per semantic model/platform finding, with one primary location and bounded secondary locations. Source snippets and secret values are never emitted.
 

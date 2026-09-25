@@ -138,9 +138,9 @@ Support is syntax-based because the action does not install repository dependenc
 | Ecosystem | Qualified package | Qualified version |
 | --- | --- | --- |
 | npm | `openai` | `7.4.0` |
-| PyPI | `openai` | `2.46.0` |
+| PyPI | `openai` | `3.19.2` |
 | npm | `@anthropic-ai/sdk` | `0.112.4` |
-| PyPI | `anthropic` | `0.117.0` |
+| PyPI | `anthropic` | `1.8.0` |
 | npm | `@google/genai` | `2.13.0` |
 | PyPI | `google-genai` | `2.13.0` |
 | npm | `@aws-sdk/client-bedrock-runtime` | `3.1096.0` |
@@ -155,7 +155,7 @@ Support is syntax-based because the action does not install repository dependenc
 | npm | `@ai-sdk/amazon-bedrock` | `5.0.40` |
 | npm | `@ai-sdk/cohere` | `4.0.20` |
 | npm | `@ai-sdk/groq` | `4.0.21` |
-| npm | `@ai-sdk/xai` | `4.0.27` |
+| npm | `@ai-sdk/xai` | `5.0.7` |
 
 V3.0 does not claim semantic support for Go, Java, Kotlin, C#, Ruby, PHP, LiteLLM, legacy `@google/generative-ai`, the retired Vertex AI generative SDK module, platform-specific Anthropic clients, arbitrary framework wrappers, broad Kubernetes/Helm schemas, generic Terraform resources, or arbitrary keys named `model`. Those files still receive bounded lexical fallback where eligible. These higher-ambiguity integrations may ship in v3.x only with separate provider-specific rule IDs and fixtures; they are not stretched into v3.0 by generic matching.
 
@@ -225,9 +225,17 @@ V3.0 conventional path matching is ASCII-case-insensitive, segment-aware, and ap
 2. `test`, `tests`, `__tests__`, `spec`, `fixtures`, and files with `.test.*`/`.spec.*` are `test`;
 3. `example`, `examples`, `demo`, `demos`, `sample`, and `samples` are `example`;
 4. `dist`, `build`, `generated`, `out`, `archive`, `archived`, `legacy`, `vendor`, and recognized bundles are generated/uncertain artifacts and begin as `unknown`;
-5. recognized IaC and deployment schemas outside the higher-precedence noise scopes are `deployment`;
+5. recognized IaC (`.tf` and `.hcl`) outside the higher-precedence noise scopes is `deployment`;
 6. a parser-recognized SDK call or a tracked conventional source file outside those scopes is `application` with environment `unknown`; v3.0 conventional extensions are `.js`, `.jsx`, `.mjs`, `.cjs`, `.ts`, `.tsx`, `.mts`, `.cts`, `.py`, `.go`, `.java`, `.kt`, `.kts`, `.cs`, `.rb`, `.php`, `.rs`, `.swift`, `.c`, `.h`, `.cc`, `.cpp`, and `.sh`;
-7. other evidence is `unknown`.
+7. configuration is classified by name, in this order:
+   - every file under `.github/workflows/` is `deployment`, because GitHub runs it whatever it is named;
+   - a configuration, dotenv, or deployment file whose name carries an `example`, `sample`, `template`, or `dist` part after the first (`.env.example`, `config.sample.yaml`) is `example`, and a dotenv file with a `test` part is `test`;
+   - `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, and `openapi*`/`swagger*` JSON or YAML documents enumerate model IDs without selecting one and are `unknown`;
+   - dotenv files, deployment descriptors (`Dockerfile`, `Containerfile`, `*.dockerfile`, `compose*.yml`, `docker-compose*.yml`, `values*.yaml`, `helmfile*.yaml`, `Chart.yaml`, `kustomization.yaml`, `skaffold.yaml`, `serverless.yml`, `Procfile`, `fly.toml`, `render.yaml`, `*.tfvars`, `*.tfvars.json`, `*.tf.json`, and `*.bicep`), and configuration files inside a `k8s`, `kubernetes`, `kube`, `helm`, `charts`, `manifests`, `kustomize`, `deploy`, `deployment`, `deployments`, `infra`, or `infrastructure` directory are `deployment`;
+   - other configuration files — `.yaml`, `.yml`, `.json`, `.jsonc`, `.json5`, `.toml`, `.ini`, `.cfg`, `.conf`, `.properties`, and `.env` — are `application`, since an application reads its settings from them;
+8. other evidence is `unknown`.
+
+No semantic rule reads configuration files, so rule 7 reaches only `fallback.text.lifecycle-id@1` evidence: it decides whether an exact feed ID in configuration warns or stays a notice, and never grants blocking authority, because lexical evidence is never policy eligible. The environment-binding rules keep taking their scope from the consuming call site. Because rule 7 changes visibility only, it shipped as a detector-manifest revision under the existing rule major rather than a new one, which would have invalidated every suppression and scope rule written against `fallback.text.lifecycle-id@1`.
 
 Path names containing `prod` or `production` never establish an environment by themselves.
 

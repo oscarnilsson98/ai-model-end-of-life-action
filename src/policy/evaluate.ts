@@ -13,7 +13,9 @@ import {
   daysUntilEarliestLifecycleDate,
   earliestLifecycleDays,
   resultFromFindings,
+  shutdownOrderDays,
   strongerOutcome,
+  UNCOVERED_PLATFORM_DIAGNOSTIC,
 } from "../shared/status.ts";
 import type {
   CoverageDiagnostic,
@@ -626,13 +628,13 @@ function aggregateFindings(findings: readonly LifecycleFinding[]): LifecycleFind
     existing.confidence = strongestConfidence(existing.confidence, finding.confidence);
     if (existing.suppressedBy !== finding.suppressedBy) delete existing.suppressedBy;
   }
-  return [...byKey.values()].sort((left, right) => {
-    // Order by the deadline the horizon actually measures, so a model already past its
-    // deprecation date is not buried under one with a nearer shutdown.
-    const daysLeft = earliestLifecycleDays(left) ?? Number.MAX_SAFE_INTEGER;
-    const daysRight = earliestLifecycleDays(right) ?? Number.MAX_SAFE_INTEGER;
-    return daysLeft - daysRight || compareText(left.semanticKey, right.semanticKey);
-  });
+  // Order by shutdown, the day calls start failing. Ordering by the earliest lifecycle
+  // date instead ranked a model deprecated long ago, with a shutdown a year out, above
+  // one that stops serving next week.
+  return [...byKey.values()].sort((left, right) =>
+    shutdownOrderDays(left) - shutdownOrderDays(right) ||
+    compareText(left.semanticKey, right.semanticKey)
+  );
 }
 
 function applySuppressions(
@@ -681,6 +683,66 @@ function evidenceHealth(evidence: readonly EvidenceFact[]): EvidenceHealth {
   );
 }
 
+const MAX_UNCOVERED_PLATFORMS = 5;
+const MAX_UNCOVERED_PATHS = 3;
+
+/**
+ * Evidence on a serving platform the feed publishes nothing for can never join, so without
+ * this it vanishes into a clean result: an absent model ID means "not deprecated" only on
+ * a platform the feed actually tracks. One notice covers every such platform, so the gap
+ * is stated once per run without warning, annotating, or degrading coverage. An empty feed
+ * is an outage that `feed-unavailable` already reports, not a per-platform gap.
+ */
+function uncoveredPlatformDiagnostic(
+  evidence: readonly EvidenceFact[],
+  feed: V3FeedIndex,
+): CoverageDiagnostic | undefined {
+  if (feed.modelPairs.length === 0) return undefined;
+  const published = new Set(feed.modelPairs.map((pair) => pair.servingPlatform));
+  const locationsByPlatform = new Map<string, Map<string, string>>();
+  for (const fact of evidence) {
+    const platform = fact.servingPlatform;
+    const location = fact.locations[0];
+    if (
+      platform === undefined ||
+      location === undefined ||
+      published.has(platform) ||
+      fact.platformResolution !== "resolved" ||
+      (fact.scope !== "application" && fact.scope !== "deployment")
+    ) {
+      continue;
+    }
+    const locations = locationsByPlatform.get(platform) ?? new Map<string, string>();
+    locations.set(`${location.path}:${location.line}:${location.column}`, location.path);
+    locationsByPlatform.set(platform, locations);
+  }
+  if (locationsByPlatform.size === 0) return undefined;
+  const platforms = [...locationsByPlatform.keys()].sort(compareText);
+  const references = [...locationsByPlatform.values()].reduce(
+    (total, locations) => total + locations.size,
+    0,
+  );
+  const described = platforms.slice(0, MAX_UNCOVERED_PLATFORMS).map((platform) => {
+    const locations = locationsByPlatform.get(platform) ?? new Map<string, string>();
+    const paths = [...new Set(locations.values())].sort(compareText);
+    const sample = paths.slice(0, MAX_UNCOVERED_PATHS).join(", ");
+    const more = paths.length > MAX_UNCOVERED_PATHS
+      ? `, +${paths.length - MAX_UNCOVERED_PATHS} more`
+      : "";
+    return `${platform} (${locations.size} reference(s): ${sample}${more})`;
+  });
+  if (platforms.length > MAX_UNCOVERED_PLATFORMS) {
+    described.push(`${platforms.length - MAX_UNCOVERED_PLATFORMS} more platform(s)`);
+  }
+  return {
+    code: UNCOVERED_PLATFORM_DIAGNOSTIC,
+    message: `The lifecycle feed publishes no records for ${described.join("; ")}, so ${
+      references === 1 ? "that model reference was" : "those model references were"
+    } not checked for deprecation.`,
+    severity: "notice",
+  };
+}
+
 export function evaluateEvidence(input: {
   evidence: readonly EvidenceFact[];
   feed: V3FeedIndex;
@@ -718,6 +780,8 @@ export function evaluateEvidence(input: {
   const evidenceById = new Map(scoped.map((fact) => [fact.evidenceId, fact]));
   applySuppressions(rawFindings, evidenceById, input.policy, input.now, diagnostics);
   const findings = aggregateFindings(rawFindings);
+  const uncovered = uncoveredPlatformDiagnostic(scoped, input.feed);
+  if (uncovered !== undefined) diagnostics.push(uncovered);
   let result = resultFromFindings(findings);
   const health = evidenceHealth(scoped);
   // Unresolved evidence never elevates the result on its own. A runtime-computed selector

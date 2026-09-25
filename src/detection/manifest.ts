@@ -14,7 +14,7 @@ export type DetectorQualificationEntry = {
   sourceUrl: string;
 };
 
-export const DETECTOR_MANIFEST_VERSION = "3.0.0-6";
+export const DETECTOR_MANIFEST_VERSION = "3.0.0-8";
 
 /** Syntax baselines reviewed for the v3.0 rule set; repository packages are never installed. */
 export const DETECTOR_QUALIFICATION: readonly DetectorQualificationEntry[] =
@@ -28,8 +28,8 @@ export const DETECTOR_QUALIFICATION: readonly DetectorQualificationEntry[] =
     Object.freeze({
       ecosystem: "pypi",
       package: "openai",
-      version: "2.46.0",
-      sourceUrl: "https://pypi.org/project/openai/2.46.0/",
+      version: "3.19.2",
+      sourceUrl: "https://pypi.org/project/openai/3.19.2/",
     }),
     Object.freeze({
       ecosystem: "npm",
@@ -40,8 +40,8 @@ export const DETECTOR_QUALIFICATION: readonly DetectorQualificationEntry[] =
     Object.freeze({
       ecosystem: "pypi",
       package: "anthropic",
-      version: "0.117.0",
-      sourceUrl: "https://pypi.org/project/anthropic/0.117.0/",
+      version: "1.8.0",
+      sourceUrl: "https://pypi.org/project/anthropic/1.8.0/",
     }),
     Object.freeze({
       ecosystem: "npm",
@@ -131,8 +131,8 @@ export const DETECTOR_QUALIFICATION: readonly DetectorQualificationEntry[] =
     Object.freeze({
       ecosystem: "npm",
       package: "@ai-sdk/xai",
-      version: "4.0.27",
-      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/xai/v/4.0.27",
+      version: "5.0.7",
+      sourceUrl: "https://www.npmjs.com/package/@ai-sdk/xai/v/5.0.7",
     }),
   ]);
 

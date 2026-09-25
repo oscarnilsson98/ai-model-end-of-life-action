@@ -366,7 +366,7 @@ describe("v3 Slack snapshot delivery", () => {
     const text = payloadText(captured as CapturedRequest);
     expect(text.indexOf("BLOCKING")).toBeLessThan(text.indexOf("ADVISORY"));
     expect(text).toContain("danger&lt;@​U123&gt;@​channel＿∗ˋ");
-    expect(text).toContain("2d overdue");
+    expect(text).toContain("shut down 2026-08-20 (2d ago)");
     expect(text).toContain("medium-advisory");
     expect(text).toContain("review-overdue");
     // Verified findings outrank the text match, which the bounded view then defers.
@@ -388,7 +388,7 @@ describe("v3 Slack snapshot delivery", () => {
     expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(12_000);
   });
 
-  test("names the deprecation date and orders by the nearest lifecycle date", async () => {
+  test("leads with the shutdown, names the deprecation, and orders by shutdown", async () => {
     let captured: CapturedRequest | undefined;
     const assessment = report({
       result: "advisory",
@@ -421,10 +421,10 @@ describe("v3 Slack snapshot delivery", () => {
 
     expect(result.status).toBe("sent");
     const text = payloadText(captured as CapturedRequest);
-    expect(text).toContain("deprecation 2026-06-01 (62d overdue)");
-    expect(text).toContain("shutdown 2027-06-01 (303d)");
-    // The already-deprecated model is the more urgent of the two.
-    expect(text.indexOf("already-deprecated")).toBeLessThan(text.indexOf("shutting-down-soon"));
+    expect(text).toContain("shutdown 2027-06-01 (in 303d) · deprecated 2026-06-01 (62d ago)");
+    expect(text).toContain("shutdown 2026-09-01 (in 30d)");
+    // The model that stops serving first leads, however long ago the other was deprecated.
+    expect(text.indexOf("shutting-down-soon")).toBeLessThan(text.indexOf("already-deprecated"));
   });
 
   test("names low-confidence findings an advisory result counted", async () => {

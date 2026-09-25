@@ -62,8 +62,11 @@ the adapter ignores upstream fields it does not read, quarantines malformed rows
 falls back to lexical evidence when a semantic rule no longer matches. That tolerance is
 what makes an explicit monitor necessary — without it, drift is silent.
 
-The job opens one issue titled `Upstream contract drift detected`, commenting on the
-existing issue rather than filing duplicates while drift is unreviewed. It reports:
+The job keeps one issue titled `Upstream contract drift detected`. Its description always
+carries the newest report and is edited in place, which notifies no one; a comment is added
+only when what drifted changes, so a new SDK major still reaches the maintainer without a
+daily repeat of drift already on record. Once a run observes no drift — after the baseline
+or pins are updated in a reviewed change — the job closes the issue itself. It reports:
 
 - **Upstream feed drift** — fields or serving platforms the source has started or stopped
   publishing, compared against `.github/upstream-contract-baseline.json`. Review the

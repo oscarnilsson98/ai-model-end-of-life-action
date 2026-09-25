@@ -98,12 +98,14 @@ The action detects static model values in these supported integrations:
 - OpenAI's JavaScript/TypeScript and Python SDKs
 - Anthropic's JavaScript/TypeScript and Python SDKs
 - Google's current Gen AI JavaScript/TypeScript and Python SDKs
-- Amazon Bedrock Runtime calls through the AWS JavaScript SDK and boto3
+- Amazon Bedrock Runtime calls through the AWS JavaScript SDK and boto3 (the current feed publishes no Bedrock lifecycle data; see [feed integrity](#feed-integrity))
 - the Vercel AI SDK's OpenAI, Anthropic, Google, Google Vertex, Azure, Amazon Bedrock, Cohere, Groq, and xAI providers
 - Azure Cognitive Services model deployments in Terraform
 - model-valued environment bindings connected to supported calls
 
 Other tracked UTF-8 files are checked for exact eligible model IDs from the lifecycle feed. Those text-only matches, documentation, examples, tests, dynamic selectors, and ambiguous serving platforms can warn or appear as notices, but never block.
+
+Configuration counts as much as code, because that is often where a deployed model is chosen. An exact model ID in a Kubernetes manifest, Helm values file, compose file, Dockerfile, `.env`, `.tfvars`, workflow, or an ordinary YAML, JSON, or TOML settings file warns just like one in source — as a text match it still never blocks. Files named as examples, such as `.env.example` or `config.sample.yaml`, stay notices, and lockfiles and OpenAPI documents are treated as inventories rather than model choices. A notice whose shutdown is within 30 days — a test that still calls a model, say — is listed in the job summary anyway. The exact rules are in [the detector contract](docs/v3-detector-contract.md#scope-and-noise-classification).
 
 For the Vercel AI SDK, a provider call is read wherever it appears — `generateText({ model: openai("gpt-5") })`, a `const model = openai(id)` held for later, or a middleware wrapper — because the provider call itself is what selects the model. The provider package pins the serving platform, so these resolve and can block on the same terms as the official SDKs. `azure(...)` names a deployment and `bedrock(...)` is polymorphic, so both need a trusted resolution before they block, exactly as their official-SDK counterparts do.
 
@@ -306,6 +308,8 @@ Publication is bounded separately:
 The current public upstream feed is not typed. The action wraps it with an adapter manifest that classifies the source's few non-model rows by kind, so entries such as reusable prompts and agent builders never enter model matching, and that marks a small set of short ambiguous identifiers ineligible for literal scanning.
 
 Every well-formed upstream row enters the normalized lifecycle feed as soon as the source publishes it. The adapter holds no allowlist: a newly published deprecation is visible on the next run, with no action release required. Authority is bounded by platform rather than by review — a row on a registered serving platform can block an enforced run, while a row on a platform the detector does not know yet is carried as unsupported, nonblocking evidence that can warn but never fail a build. Providers the upstream source adds are supported out of the box: their platform slug is derived from the provider label, and promoting one to blocking authority remains a deliberate registry, display-name and detector change.
+
+A model can only be checked against a platform the feed covers. When your code calls a serving platform the feed publishes nothing for — currently Amazon Bedrock — the job summary says so in a single `Not assessed:` line under the scan status, naming the platform and where it is used, and the report carries a `platform-without-lifecycle-data` notice. It does not warn, annotate, notify Slack, or change `scan-status`. Mapping the model to a covered platform with a checked-in resolution clears it.
 
 Fields the adapter does not read are ignored, so an additive upstream column never fails a run. Malformed rows and duplicate pairs are quarantined one row at a time with a diagnostic and make `scan-status: partial`, so one bad row costs that row rather than the whole feed. Invalid adapter metadata and schema failures still produce `unknown + failed`. A provider label that yields no valid platform slug at all has its rows skipped with a diagnostic and makes `scan-status: partial`; if no row resolves a platform, or no row is well formed at all, the non-empty feed contract fails.
 

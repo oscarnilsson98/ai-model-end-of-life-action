@@ -132,7 +132,7 @@ test("one collapsed finding annotates once and names every candidate platform", 
   const lines: string[] = [];
   publishAnnotations(report, (line: string) => lines.push(line));
   expect(lines).toHaveLength(1);
-  expect(lines[0]).toContain("o4-mini on azure or openai: shutdown 2026-10-16 (74 day(s))");
+  expect(lines[0]).toContain("o4-mini on azure or openai: shutdown 2026-10-16 (in 74d).");
   expect(renderSummary(report)).toContain("azure or openai");
 
   // A suppression may name any covered platform, so the suppression list must not
@@ -183,73 +183,216 @@ test("collapses coverage annotations beyond the published bound", () => {
   expect(lines.at(-1)).toContain("2 additional coverage diagnostic(s)");
 });
 
-test("the summary names the deprecation date when it is the nearer deadline", () => {
+function lifecycleFinding(
+  overrides: Partial<AssessmentReport["lifecycleFindings"][number]>,
+): AssessmentReport["lifecycleFindings"][number] {
+  return {
+    findingId: "finding",
+    semanticKey: "semantic",
+    evidenceIds: ["evidence"],
+    modelId: "gpt-old",
+    servingPlatform: "openai",
+    servingPlatforms: ["openai"],
+    lifecycleMatch: "exact",
+    lifecycleStatus: "shutdown-scheduled",
+    shutdownDate: "2026-08-20",
+    daysUntilShutdown: 18,
+    replacementModels: [],
+    sourceUrls: [],
+    feedConflict: false,
+    outcome: "warning",
+    reasons: ["Shutdown is 18 UTC calendar day(s) away."],
+    scope: "application",
+    environment: "production",
+    confidence: "high",
+    selectorKind: "model-id",
+    locations: [{ path: "src/chat.ts", line: 1, column: 1 }],
+    ...overrides,
+  };
+}
+
+// Summary cells are Markdown-escaped, so parentheses render from entities.
+const openParen = "&#40;";
+const closeParen = "&#41;";
+
+test("the summary leads with the shutdown and names the deprecation that opened the horizon", () => {
   const report = cleanReport();
   report.result = "advisory";
   report.lifecycleFindings = [
-    {
-      findingId: "finding",
-      semanticKey: "semantic",
-      evidenceIds: ["evidence"],
-      modelId: "gpt-old",
-      servingPlatform: "openai",
-      servingPlatforms: ["openai"],
-      lifecycleMatch: "exact",
-      lifecycleStatus: "shutdown-scheduled",
+    lifecycleFinding({
       deprecationDate: "2026-06-01",
       shutdownDate: "2027-06-01",
       daysUntilShutdown: 303,
       daysUntilDeprecation: -62,
-      replacementModels: [],
-      sourceUrls: [],
-      feedConflict: false,
-      outcome: "warning",
-      reasons: ["Deprecation was 62 UTC calendar day(s) ago; shutdown is 303 UTC calendar day(s) away."],
-      scope: "application",
-      environment: "production",
-      confidence: "high",
-      selectorKind: "model-id",
-      locations: [{ path: "src/chat.ts", line: 1, column: 1 }],
-    },
+    }),
   ];
 
-  const summary = renderSummary(report);
-  // A bare "2027-06-01 (303d)" next to a warning reads as a false alarm.
-  expect(summary).toContain("deprecation 2026-06-01 (-62d)");
-  expect(summary).not.toContain("(303d)");
+  // The shutdown is when calls fail; the deprecation says why a distant shutdown warns.
+  expect(renderSummary(report)).toContain(
+    `| shutdown 2027-06-01 ${openParen}in 303d${closeParen} · deprecated 2026-06-01 ${openParen}62d ago${closeParen} |`,
+  );
 });
 
-test("the summary keeps naming the shutdown date when it is the nearer deadline", () => {
+test("the summary names only the shutdown when it is the nearer deadline", () => {
   const report = cleanReport();
   report.result = "advisory";
   report.lifecycleFindings = [
-    {
-      findingId: "finding",
-      semanticKey: "semantic",
-      evidenceIds: ["evidence"],
-      modelId: "gpt-old",
-      servingPlatform: "openai",
-      servingPlatforms: ["openai"],
-      lifecycleMatch: "exact",
-      lifecycleStatus: "shutdown-scheduled",
-      deprecationDate: "2026-08-20",
-      shutdownDate: "2026-08-20",
-      daysUntilShutdown: 18,
-      daysUntilDeprecation: 18,
-      replacementModels: [],
-      sourceUrls: [],
-      feedConflict: false,
-      outcome: "warning",
-      reasons: ["Shutdown is 18 UTC calendar day(s) away."],
-      scope: "application",
-      environment: "production",
-      confidence: "high",
-      selectorKind: "model-id",
-      locations: [{ path: "src/chat.ts", line: 1, column: 1 }],
-    },
+    lifecycleFinding({ deprecationDate: "2026-08-20", daysUntilDeprecation: 18 }),
   ];
 
-  expect(renderSummary(report)).toContain("shutdown 2026-08-20 (18d)");
+  const summary = renderSummary(report);
+  expect(summary).toContain(`| shutdown 2026-08-20 ${openParen}in 18d${closeParen} |`);
+  expect(summary).not.toContain("deprecat");
+});
+
+test("the summary marks a model that has already shut down", () => {
+  const report = cleanReport();
+  report.result = "advisory";
+  report.lifecycleFindings = [
+    lifecycleFinding({
+      deprecationDate: "2025-10-28",
+      shutdownDate: "2026-02-19",
+      daysUntilShutdown: -164,
+      daysUntilDeprecation: -278,
+    }),
+    lifecycleFinding({
+      findingId: "today",
+      semanticKey: "today",
+      modelId: "gpt-today",
+      shutdownDate: "2026-08-02",
+      daysUntilShutdown: 0,
+    }),
+  ];
+
+  const summary = renderSummary(report);
+  // Once the model is gone the earlier deprecation is noise.
+  expect(summary).toContain(
+    `| **shut down 2026-02-19 ${openParen}164d ago${closeParen}** |`,
+  );
+  expect(summary).toContain(
+    `| **shuts down today ${openParen}2026-08-02${closeParen}** |`,
+  );
+  expect(summary).not.toContain("deprecat");
+});
+
+test("the summary and annotations order findings by shutdown whatever the report order", () => {
+  const report = cleanReport();
+  report.result = "advisory";
+  // Pull-request findings arrive in comparison-merge order, not date order.
+  report.lifecycleFindings = [
+    lifecycleFinding({
+      findingId: "a",
+      semanticKey: "a",
+      modelId: "gpt-deprecated-long-ago",
+      deprecationDate: "2025-06-01",
+      daysUntilDeprecation: -427,
+      shutdownDate: "2027-06-01",
+      daysUntilShutdown: 303,
+    }),
+    lifecycleFinding({
+      findingId: "b",
+      semanticKey: "b",
+      modelId: "gpt-next-week",
+      shutdownDate: "2026-08-09",
+      daysUntilShutdown: 7,
+    }),
+    lifecycleFinding({
+      findingId: "c",
+      semanticKey: "c",
+      modelId: "gpt-already-gone",
+      shutdownDate: "2026-07-01",
+      daysUntilShutdown: -32,
+    }),
+  ];
+
+  const summary = renderSummary(report);
+  const order = ["gpt-already-gone", "gpt-next-week", "gpt-deprecated-long-ago"];
+  expect(order.map((model) => summary.indexOf(model))).toEqual(
+    order.map((model) => summary.indexOf(model)).toSorted((left, right) => left - right),
+  );
+  const lines: string[] = [];
+  publishAnnotations(report, (line: string) => lines.push(line));
+  expect(lines.map((line) => order.find((model) => line.includes(`::${model} `)))).toEqual(order);
+});
+
+test("the summary names imminent shutdowns that are only notices", () => {
+  const report = cleanReport();
+  report.lifecycleFindings = [
+    lifecycleFinding({
+      findingId: "test-soon",
+      semanticKey: "test-soon",
+      modelId: "gpt-test-soon",
+      outcome: "notice",
+      scope: "test",
+      daysUntilShutdown: 3,
+      shutdownDate: "2026-08-05",
+      locations: [{ path: "tests/chat.py", line: 1, column: 1 }],
+    }),
+    lifecycleFinding({
+      findingId: "test-later",
+      semanticKey: "test-later",
+      modelId: "gpt-test-later",
+      outcome: "notice",
+      scope: "test",
+      daysUntilShutdown: 31,
+      shutdownDate: "2026-09-02",
+    }),
+    lifecycleFinding({
+      findingId: "test-gone",
+      semanticKey: "test-gone",
+      modelId: "gpt-test-gone",
+      outcome: "notice",
+      scope: "test",
+      daysUntilShutdown: -1,
+      shutdownDate: "2026-08-01",
+    }),
+    // A notice in application scope sits outside the configured warning horizon.
+    lifecycleFinding({
+      findingId: "outside-horizon",
+      semanticKey: "outside-horizon",
+      modelId: "gpt-outside-horizon",
+      outcome: "notice",
+      scope: "application",
+      daysUntilShutdown: 10,
+    }),
+  ];
+
+  const summary = renderSummary(report);
+  expect(summary).toContain(
+    "### Shutting down within 30 days outside application and deployment scope",
+  );
+  expect(summary).toContain(
+    `- <code>gpt-test-soon</code> on openai — shutdown 2026-08-05 ${openParen}in 3d${closeParen} · test · <code>tests/chat&#46;py</code>`,
+  );
+  expect(summary).not.toContain("gpt-test-later");
+  expect(summary).not.toContain("gpt-test-gone");
+  expect(summary).not.toContain("gpt-outside-horizon");
+  // Notices never turn the outcome actionable.
+  expect(summary).toContain("No actionable lifecycle risk found in eligible repository evidence");
+});
+
+test("an uncovered serving platform is stated once and never annotated", () => {
+  const report = cleanReport();
+  const message =
+    "The lifecycle feed publishes no records for aws-bedrock (1 reference(s): app/bedrock.py), so that model reference was not checked for deprecation.";
+  report.diagnostics = [
+    { code: "platform-without-lifecycle-data", message, severity: "notice" },
+    { code: "unused-resolution", message: "Resolution r did not match.", severity: "notice" },
+  ];
+
+  const summary = renderSummary(report);
+  const lines = summary.split("\n");
+  const caveat = lines.findIndex((line) => line.startsWith("Not assessed: "));
+  // Beside assessment health, so a clean result cannot read as an all-clear.
+  expect(lines[caveat - 1]).toStartWith("Evidence: ");
+  expect(lines[caveat]).toContain("aws-bedrock");
+  expect(summary.match(/aws-bedrock/g)).toHaveLength(1);
+  expect(summary).toContain("unused-resolution");
+  expect(summary).toContain("No actionable lifecycle risk found in eligible repository evidence");
+
+  const annotations: string[] = [];
+  publishAnnotations(report, (line: string) => annotations.push(line));
+  expect(annotations).toEqual([]);
 });
 
 test("active suppressions stay visible in the summary", () => {
