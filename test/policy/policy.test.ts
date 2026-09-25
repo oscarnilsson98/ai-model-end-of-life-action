@@ -115,6 +115,7 @@ suppressions:
         failWithinDays: null,
         allowPartial: null,
         maxFeedAgeDays: null,
+        slackNotify: "always",
         notificationFailureMode: "fail",
       }),
     ).toMatchObject({ warnWithinDays: 365, allowPartial: true });

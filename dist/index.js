@@ -14957,6 +14957,7 @@ function parseActionInputs(environment) {
   const rawMaxFeedAge = getInput("max-feed-age-days", environment);
   const slackWebhook = getInput("slack-webhook", environment);
   const rawNotificationFailure = getInput("notification-failure-mode", environment);
+  const rawSlackNotify = getInput("slack-notify", environment);
   const warnWithinDays = parseOptionalInteger(rawWarn, "warn-within-days", {
     max: MAX_POLICY_DAYS
   });
@@ -14969,11 +14970,16 @@ function parseActionInputs(environment) {
   if (notificationFailureMode !== "fail" && notificationFailureMode !== "warn") {
     throw new Error("Invalid notification-failure-mode: expected `fail` or `warn`.");
   }
+  const slackNotify = rawSlackNotify?.toLowerCase() || "always";
+  if (slackNotify !== "always" && slackNotify !== "findings") {
+    throw new Error("Invalid slack-notify: expected `always` or `findings`.");
+  }
   const result = {
     warnWithinDays,
     failWithinDays,
     allowPartial,
     maxFeedAgeDays,
+    slackNotify,
     notificationFailureMode
   };
   if (slackWebhook)
@@ -15217,11 +15223,20 @@ function safeFailureDetail(error) {
     return "Slack webhook request timed out.";
   return "Slack webhook delivery failed.";
 }
+function snapshotHasFindings(report) {
+  return report.result !== "no-actionable-risk" || report.scanStatus !== "complete" || report.evidenceHealth !== "current";
+}
 async function deliverSlackNotification(options) {
   if (!TRUSTED_NOTIFICATION_EVENTS.has(options.report.event.eventName) || options.report.event.targetKind !== "commit") {
     return {
       status: "skipped",
       detail: `Slack snapshots are disabled for ${slackText(options.report.event.eventName, 80)} events.`
+    };
+  }
+  if (options.notify === "findings" && !snapshotHasFindings(options.report)) {
+    return {
+      status: "skipped",
+      detail: "No blocking or advisory finding and coverage is complete; slack-notify is `findings`."
     };
   }
   let webhookUrl;
@@ -15990,6 +16005,7 @@ var DEFAULT_INPUTS = {
   failWithinDays: null,
   allowPartial: null,
   maxFeedAgeDays: DEFAULT_MAX_FEED_AGE_DAYS,
+  slackNotify: "always",
   notificationFailureMode: "fail"
 };
 
@@ -16577,7 +16593,8 @@ async function run(dependencies = {}) {
       const deliver = dependencies.deliverNotification ?? deliverSlackNotification;
       const delivery = await deliver({
         webhookUrl: product.inputs.slackWebhook,
-        report
+        report,
+        notify: product.inputs.slackNotify
       });
       report.notificationStatus = delivery.status;
       report.notificationReason = delivery.detail ?? (delivery.status === "sent" ? "Slack snapshot delivered" : "Slack snapshot delivery was skipped");

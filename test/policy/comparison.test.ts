@@ -167,6 +167,7 @@ const noInputs = {
   failWithinDays: null,
   allowPartial: null,
   maxFeedAgeDays: null,
+  slackNotify: "always" as const,
   notificationFailureMode: "fail" as const,
 };
 

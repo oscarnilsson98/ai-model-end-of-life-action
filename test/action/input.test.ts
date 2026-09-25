@@ -8,6 +8,7 @@ describe("v3 action inputs", () => {
       failWithinDays: null,
       allowPartial: null,
       maxFeedAgeDays: 30,
+      slackNotify: "always",
       notificationFailureMode: "fail",
     });
   });
@@ -26,6 +27,7 @@ describe("v3 action inputs", () => {
       failWithinDays: 30,
       allowPartial: true,
       maxFeedAgeDays: 7,
+      slackNotify: "always",
       notificationFailureMode: "warn",
     });
   });
@@ -45,5 +47,13 @@ describe("v3 action inputs", () => {
         /max-feed-age-days/,
       );
     }
+  });
+  test("reads slack-notify case-insensitively and rejects anything else", () => {
+    expect(parseActionInputs({ "INPUT_SLACK-NOTIFY": "findings" }).slackNotify).toBe("findings");
+    expect(parseActionInputs({ "INPUT_SLACK-NOTIFY": " FINDINGS " }).slackNotify).toBe("findings");
+    expect(parseActionInputs({ "INPUT_SLACK-NOTIFY": "" }).slackNotify).toBe("always");
+    expect(() => parseActionInputs({ "INPUT_SLACK-NOTIFY": "on-change" })).toThrow(
+      "Invalid slack-notify: expected `always` or `findings`.",
+    );
   });
 });

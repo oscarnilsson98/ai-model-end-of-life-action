@@ -180,6 +180,18 @@ The message names every blocking and advisory finding in application or deployme
 
 A typed call site whose model is computed at runtime — a caller-supplied override, say — has no static value to check. It does not change the result, because nothing in the repository could clear it; instead the job summary states such references once, in a `Not assessed:` line under the scan status, and the `unresolved-references` output lists them. Slack leaves them out, so they never become a daily repeat.
 
+By default every eligible run posts, including a clean one, so the channel shows the check is alive. To hear only when there is something to act on, set `slack-notify: findings`:
+
+```yaml
+- name: Check AI model lifecycle
+  uses: oscarnilsson98/ai-model-end-of-life-action@v3
+  with:
+    slack-webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+    slack-notify: findings
+```
+
+A clean, fully assessed run then posts nothing, and `notification-status` reports `skipped`. A failed or partial scan still posts — during a feed outage, a quiet channel would look exactly like an all-clear — and so does stale checked-in evidence. The choice is made per run, not per change: an unchanged advisory still posts on every scheduled run.
+
 A delivery failure does not change `result` or `scan-status`. It changes `notification-status`, `exit-reason`, and, by default, the final step exit; set `notification-failure-mode: warn` to keep delivery best-effort.
 
 ## Optional runtime-only claims
@@ -223,6 +235,7 @@ All inputs are optional.
 | `allow-partial` | Checked-in policy, otherwise `false` | Permits enforced partial scans to succeed unless they contain a definite breach. |
 | `max-feed-age-days` | `30` | Upstream freshness horizon. An older lifecycle feed makes `scan-status` partial. Set to `""` to disable. |
 | `slack-webhook` | Unset | HTTPS Slack incoming webhook used only for commit targets on `schedule`, `workflow_dispatch`, or `push`; every other event is skipped. |
+| `slack-notify` | `always` | `always` posts a snapshot on every eligible run, clean or not; `findings` posts only when there is a blocking or advisory finding, a failed or partial scan, or stale evidence. |
 | `notification-failure-mode` | `fail` | `fail` or `warn` when configured delivery fails. |
 
 There is intentionally no `models`, `models-file`, workspace path, custom feed URL, or runtime evidence input. The action discovers committed repository evidence and uses the release's reviewed lifecycle-feed contract.

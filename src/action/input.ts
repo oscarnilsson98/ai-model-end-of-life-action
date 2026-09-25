@@ -65,6 +65,7 @@ export function parseActionInputs(environment: Environment): ActionInputs {
   const rawMaxFeedAge = getInput("max-feed-age-days", environment);
   const slackWebhook = getInput("slack-webhook", environment);
   const rawNotificationFailure = getInput("notification-failure-mode", environment);
+  const rawSlackNotify = getInput("slack-notify", environment);
 
   const warnWithinDays = parseOptionalInteger(rawWarn, "warn-within-days", {
     max: MAX_POLICY_DAYS,
@@ -89,11 +90,17 @@ export function parseActionInputs(environment: Environment): ActionInputs {
     );
   }
 
+  const slackNotify = rawSlackNotify?.toLowerCase() || "always";
+  if (slackNotify !== "always" && slackNotify !== "findings") {
+    throw new Error("Invalid slack-notify: expected `always` or `findings`.");
+  }
+
   const result: ActionInputs = {
     warnWithinDays,
     failWithinDays,
     allowPartial,
     maxFeedAgeDays,
+    slackNotify,
     notificationFailureMode,
   };
   if (slackWebhook) result.slackWebhook = parseHttpsUrl(slackWebhook, "slack-webhook");

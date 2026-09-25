@@ -632,6 +632,8 @@ Notification delivery state is independent:
 notification-status: disabled | skipped | sent | failed
 ```
 
+`slack-notify` selects when an eligible snapshot is posted. `always`, the default, posts every eligible run. `findings` posts only when the run has something to act on — `result` other than `no-actionable-risk`, `scan-status` other than `complete`, or `evidence-health` other than `current` — and otherwise reports `notification-status: skipped` with a reason. A degraded scan counts as something to act on, because a silent channel during a feed outage is indistinguishable from an all-clear. The decision is per run and stateless, so it is not on-change delivery in the sense of the paragraph below.
+
 If a channel is explicitly configured, delivery failure defaults to failing the step on eligible `schedule`, `workflow_dispatch`, or `push` commit targets. `notification-failure-mode: warn` MAY override this. Secrets MUST NOT be used for untrusted fork pull requests. Notification failure never changes `result` or `scan-status`; it changes only `notification-status`, `exit-reason`, and possibly the final step exit.
 
 V3 MUST NOT claim on-change delivery unless prior state is durably restored and next state is durably persisted. The action exposes `alert-fingerprint` so a caller that persists prior state can implement unchanged-alert suppression. V3.0 publishes no notification payload or next-state token and owns no durable state.

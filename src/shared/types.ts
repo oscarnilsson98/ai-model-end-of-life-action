@@ -324,5 +324,9 @@ export type ActionInputs = {
   /** Upstream-freshness horizon in days; null disables the staleness guard entirely. */
   maxFeedAgeDays: number | null;
   slackWebhook?: string;
+  /** `always` posts every eligible snapshot; `findings` skips a clean, fully assessed one. */
+  slackNotify: SlackNotifyMode;
   notificationFailureMode: "fail" | "warn";
 };
+
+export type SlackNotifyMode = "always" | "findings";

@@ -71,6 +71,7 @@ import type {
   PolicyInspection,
   Result,
   ScanStatus,
+  SlackNotifyMode,
 } from "../shared/types.ts";
 
 const UNAVAILABLE_SHA256 = canonicalSha256("ai-model-eol/unavailable/v3", null);
@@ -80,6 +81,7 @@ const DEFAULT_INPUTS: ActionInputs = {
   failWithinDays: null,
   allowPartial: null,
   maxFeedAgeDays: DEFAULT_MAX_FEED_AGE_DAYS,
+  slackNotify: "always",
   notificationFailureMode: "fail",
 };
 
@@ -101,6 +103,7 @@ export type RunDependencies = {
   deliverNotification?: (options: {
     webhookUrl: string;
     report: AssessmentReport;
+    notify: SlackNotifyMode;
   }) => Promise<SlackDeliveryResult>;
 };
 
@@ -932,6 +935,7 @@ export async function run(dependencies: RunDependencies = {}): Promise<Assessmen
       const delivery = await deliver({
         webhookUrl: product.inputs.slackWebhook,
         report,
+        notify: product.inputs.slackNotify,
       });
       report.notificationStatus = delivery.status;
       report.notificationReason =
