@@ -37,6 +37,7 @@ source.py.anthropic.messages-model@1
 binding.github-actions.consumed-model@1
 deploy.hcl.azure.cognitive-deployment-model@1
 fallback.text.lifecycle-id@1
+fallback.text.keyed-lifecycle-id@1
 ```
 
 Changing a rule's evidence meaning, resolution authority, confidence, scope/environment behavior, or policy eligibility requires a new rule major. Adding a new API family requires a new rule ID. A fixture-preserving parser crash/location fix or an additional syntax spelling with identical semantics may keep the rule major, but changes the versioned detector-manifest revision and digest. The release publishes the complete detector/rule manifest; every run publishes its digest.
@@ -132,6 +133,9 @@ The launch matrix is intentionally bounded. “Policy eligible” below is rule 
 | `deploy.hcl.azure.cognitive-deployment-model@1` | HCL/Terraform | `azurerm_cognitive_deployment` with direct static `model.format`, `model.name`, and optional `model.version` strings | Resource establishes `azure`; the tuple remains a deployment/model tuple until a versioned trusted resolution maps it to one exact feed ID. Omitted version and auto-upgrade remain unresolved; dynamic values and unsupported forms are outside this semantic rule and receive lexical fallback only | Only after exact trusted tuple resolution |
 | `binding.env.consumed-model@1`, `binding.github-actions.consumed-model@1` | Dotenv/GitHub workflow YAML | Literal value linked by exact variable name to a supported semantic selector | Inherits candidates from the consuming fact and never resolves independently | Never independently |
 | `fallback.text.lifecycle-id@1` | Other bounded UTF-8 text | Boundary-safe exact ID from a record with `literalScanEligible: true` | Feed candidates only; never inferred | No |
+| `fallback.text.keyed-lifecycle-id@1` | Any bounded UTF-8 text | An exact ID from an unconflicted record with `literalScanEligible: false`, written on one line as the value of a key whose name, lower-cased without `_` and `-`, ends in `model` or is `modelid`/`modelname` — `model: o1`, `"chat_model": "o1"`, `model="o1"`, `OPENAI_MODEL=o1`. The value must be quoted in conventional source files; a `=` that is part of a comparison or compound operator does not qualify. A literal a platform-joining semantic fact already reported is not repeated | Feed candidates only; never inferred | No |
+
+Both official SDK rules in Python and TypeScript recognize a client however the quickstart or a class wrapper binds it: a named or default import (`from openai import OpenAI`), a Python module import (`import anthropic` then `anthropic.Anthropic()`, with or without `as`), an instance attribute (`self.client = …`, `this.client = new …`), and a class field or class-level attribute read through the instance (`this.client` for `private client = new Anthropic()`). An attribute of any other object (`config.client = …`) binds nothing, since a later bare `client` call cannot be attributed to it; a name reassigned in the file loses its binding as before.
 
 Support is syntax-based because the action does not install repository dependencies. `src/detection/manifest.ts` pins the exact SDK/package versions used to qualify every row and includes them in the detector-manifest digest; later SDK syntax is unsupported until fixtures and the detector-manifest revision are updated.
 
@@ -301,7 +305,7 @@ All objects reject unknown fields. Strings, arrays, URLs, IDs, and documents hav
 
 `recordKind` is the sole semantic distinction between models and non-model entities. Records such as reusable prompts, agent builders, APIs, SDKs, tools, and products use a non-model branch and never enter semantic model joins or the lexical model automaton. An unrecognized or missing `recordKind` is a feed-contract failure; it is not silently treated as a model or ignored.
 
-`literalScanEligible` explicitly controls inclusion in the lexical fallback automaton. It is set by the typed producer or a versioned reviewed adapter based on record semantics and collision fixtures, never derived solely from identifier shape. A `false` model record remains eligible for semantic exact joins.
+`literalScanEligible` explicitly controls inclusion in the lexical fallback automaton. It is set by the typed producer or a versioned reviewed adapter based on record semantics and collision fixtures, never derived solely from identifier shape. A `false` model record remains eligible for semantic exact joins, and for `fallback.text.keyed-lifecycle-id@1`, where a key disambiguates what prose cannot.
 
 Record identity and conflict behavior are deterministic:
 
