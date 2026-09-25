@@ -13,6 +13,7 @@ import {
   daysUntilEarliestLifecycleDate,
   earliestLifecycleDays,
   resultFromFindings,
+  shutdownOrderDays,
   strongerOutcome,
 } from "../shared/status.ts";
 import type {
@@ -626,13 +627,13 @@ function aggregateFindings(findings: readonly LifecycleFinding[]): LifecycleFind
     existing.confidence = strongestConfidence(existing.confidence, finding.confidence);
     if (existing.suppressedBy !== finding.suppressedBy) delete existing.suppressedBy;
   }
-  return [...byKey.values()].sort((left, right) => {
-    // Order by the deadline the horizon actually measures, so a model already past its
-    // deprecation date is not buried under one with a nearer shutdown.
-    const daysLeft = earliestLifecycleDays(left) ?? Number.MAX_SAFE_INTEGER;
-    const daysRight = earliestLifecycleDays(right) ?? Number.MAX_SAFE_INTEGER;
-    return daysLeft - daysRight || compareText(left.semanticKey, right.semanticKey);
-  });
+  // Order by shutdown, the day calls start failing. Ordering by the earliest lifecycle
+  // date instead ranked a model deprecated long ago, with a shutdown a year out, above
+  // one that stops serving next week.
+  return [...byKey.values()].sort((left, right) =>
+    shutdownOrderDays(left) - shutdownOrderDays(right) ||
+    compareText(left.semanticKey, right.semanticKey)
+  );
 }
 
 function applySuppressions(

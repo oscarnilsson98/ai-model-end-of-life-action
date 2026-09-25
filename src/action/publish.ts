@@ -8,7 +8,12 @@ import {
   type Environment,
   type Log,
 } from "./github.ts";
-import { canonicalSha256, deprecationLeadsHorizon } from "../shared/status.ts";
+import {
+  canonicalSha256,
+  deprecationText,
+  shutdownOrderDays,
+  shutdownText,
+} from "../shared/status.ts";
 import {
   compact,
   resultIcon as sharedResultIcon,
@@ -22,6 +27,8 @@ const MAX_REPORT_BYTES = 25 * 1024 * 1024;
 const MAX_ANNOTATIONS = 10;
 /** Bounded separately from findings so a degraded scan cannot crowd out lifecycle risk. */
 const MAX_COVERAGE_ANNOTATIONS = 5;
+const IMMINENT_SHUTDOWN_DAYS = 30;
+const MAX_IMMINENT_NOTICES = 20;
 
 /**
  * Neutralize repository-derived text for the Markdown job summary. Beyond HTML
@@ -53,6 +60,14 @@ function escapeHtml(value: string): string {
     .replace(/[\r\n]+/g, "<br>");
 }
 
+/**
+ * Pull-request findings arrive in comparison-merge order, so every human-facing list
+ * sorts by shutdown itself. The sort is stable, keeping report order among ties.
+ */
+function byShutdown(findings: readonly LifecycleFinding[]): LifecycleFinding[] {
+  return [...findings].sort((left, right) => shutdownOrderDays(left) - shutdownOrderDays(right));
+}
+
 function resultIcon(report: AssessmentReport): string {
   return sharedResultIcon(report.result, report.scanStatus);
 }
@@ -73,30 +88,45 @@ function deliveryLine(
 }
 
 /**
- * The nearest published transition, which is the date the warning horizon measured. A
- * model already past its deprecation date is actionable even when its shutdown is far
- * out, so the row must name which date it is reporting.
+ * The shutdown leads, in bold once it is today or past. A deprecation that opened the
+ * warning horizon follows it, so a warning against a distant shutdown still says why.
  */
-function deadlineCell(finding: LifecycleFinding): string {
-  if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
-    return `deprecation ${escapeHtml(finding.deprecationDate)} (${finding.daysUntilDeprecation ?? "?"}d)`;
-  }
-  return finding.shutdownDate === undefined
-    ? "Not announced"
-    : `shutdown ${escapeHtml(finding.shutdownDate)} (${finding.daysUntilShutdown ?? "?"}d)`;
+function lifecycleCell(finding: LifecycleFinding): string {
+  const shutdown = escapeHtml(shutdownText(finding));
+  const lead =
+    finding.daysUntilShutdown !== null && finding.daysUntilShutdown <= 0
+      ? `**${shutdown}**`
+      : shutdown;
+  const deprecation = deprecationText(finding);
+  return deprecation === null ? lead : `${lead} · ${escapeHtml(deprecation)}`;
 }
 
 function findingRow(finding: LifecycleFinding): string {
   const delta = finding.delta === undefined ? "—" : finding.delta;
-  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${deadlineCell(finding)} |`;
+  return `| <code>${escapeHtml(compact(finding.modelId, 160))}</code> | ${escapeHtml(compact(servingPlatformLabel(finding), 300))} | ${escapeHtml(finding.outcome)} | ${escapeHtml(delta)} | ${lifecycleCell(finding)} |`;
+}
+
+/**
+ * A notice outside application and deployment scope cannot warn, but a model a test or
+ * example still calls is about to stop answering, so an imminent shutdown is named anyway.
+ */
+function imminentNoticeLine(finding: LifecycleFinding): string {
+  const location = finding.locations[0];
+  return `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(
+    compact(servingPlatformLabel(finding), 300),
+  )} — ${escapeHtml(shutdownText(finding))} · ${finding.scope}${
+    location === undefined ? "" : ` · <code>${escapeHtml(compact(location.path, 300))}</code>`
+  }`;
 }
 
 export function renderSummary(
   report: AssessmentReport,
   options: Readonly<{ notificationPending?: boolean }> = {},
 ): string {
-  const actionable = report.lifecycleFindings.filter(
-    (finding) => finding.outcome === "breach" || finding.outcome === "warning",
+  const actionable = byShutdown(
+    report.lifecycleFindings.filter(
+      (finding) => finding.outcome === "breach" || finding.outcome === "warning",
+    ),
   );
   const visibleSources = report.evidenceSources.slice(0, 20);
   const hiddenSourceCount = report.evidenceSources.length - visibleSources.length;
@@ -142,7 +172,7 @@ export function renderSummary(
     lines.push(
       "### Actionable lifecycle findings",
       "",
-      "| Model | Serving platform | Outcome | Change | Next lifecycle date |",
+      "| Model | Serving platform | Outcome | Change | Lifecycle |",
       "| --- | --- | --- | --- | --- |",
       ...actionable.slice(0, 100).map(findingRow),
       "",
@@ -150,6 +180,29 @@ export function renderSummary(
     if (actionable.length > 100) {
       lines.push(`${actionable.length - 100} additional finding(s) are in the local JSON report.`, "");
     }
+  }
+  const imminent = byShutdown(
+    report.lifecycleFindings.filter(
+      (finding) =>
+        finding.outcome === "notice" &&
+        finding.scope !== "application" &&
+        finding.scope !== "deployment" &&
+        finding.delta !== "resolved" &&
+        finding.daysUntilShutdown !== null &&
+        finding.daysUntilShutdown >= 0 &&
+        finding.daysUntilShutdown <= IMMINENT_SHUTDOWN_DAYS,
+    ),
+  );
+  if (imminent.length > 0) {
+    lines.push(
+      `### Shutting down within ${IMMINENT_SHUTDOWN_DAYS} days outside application and deployment scope`,
+      "",
+      ...imminent.slice(0, MAX_IMMINENT_NOTICES).map(imminentNoticeLine),
+      ...(imminent.length > MAX_IMMINENT_NOTICES
+        ? [`- ${imminent.length - MAX_IMMINENT_NOTICES} more in the local JSON report.`]
+        : []),
+      "",
+    );
   }
   if (report.unresolvedReferences.length > 0) {
     lines.push(
@@ -231,23 +284,20 @@ export function renderSummary(
 }
 
 function annotationText(finding: LifecycleFinding): string {
-  const deadline =
-    finding.shutdownDate === undefined
-      ? "shutdown date not announced"
-      : `shutdown ${finding.shutdownDate} (${finding.daysUntilShutdown ?? "?"} day(s))`;
-  const deprecation =
-    deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined
-      ? `deprecation ${finding.deprecationDate} (${finding.daysUntilDeprecation ?? "?"} day(s)), `
-      : "";
-  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${deprecation}${deadline}. ${finding.reasons.join(" ")}`;
+  const deprecation = deprecationText(finding);
+  return `${finding.modelId} on ${servingPlatformLabel(finding)}: ${shutdownText(finding)}${
+    deprecation === null ? "" : `, ${deprecation}`
+  }. ${finding.reasons.join(" ")}`;
 }
 
 export function publishAnnotations(report: AssessmentReport, log: Log = console.log): void {
-  const actionable = report.lifecycleFindings.filter(
-    (finding) =>
-      (finding.outcome === "breach" || finding.outcome === "warning") &&
-      finding.delta !== "unchanged" &&
-      finding.delta !== "resolved",
+  const actionable = byShutdown(
+    report.lifecycleFindings.filter(
+      (finding) =>
+        (finding.outcome === "breach" || finding.outcome === "warning") &&
+        finding.delta !== "unchanged" &&
+        finding.delta !== "resolved",
+    ),
   );
   let emitted = 0;
   for (const finding of actionable) {

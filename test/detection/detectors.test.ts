@@ -2449,6 +2449,46 @@ client.responses.create({ model: "gpt-old", input: "hello" });
     });
   });
 
+  test("scopes text matches in configuration and deployment files so they can warn", () => {
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ["k8s/deployment.yaml", "deployment"],
+      ["charts/api/templates/deployment.yaml", "deployment"],
+      ["values-prod.yaml", "deployment"],
+      ["docker-compose.yml", "deployment"],
+      ["compose.override.yaml", "deployment"],
+      ["Dockerfile", "deployment"],
+      ["api.Dockerfile", "deployment"],
+      [".env", "deployment"],
+      [".env.production", "deployment"],
+      ["envs/prod.tfvars", "deployment"],
+      // GitHub runs every file in the workflows directory, whatever it is named.
+      [".github/workflows/ci.example.yml", "deployment"],
+      ["config/llm.yaml", "application"],
+      ["settings.json", "application"],
+      ["pyproject.toml", "application"],
+      ["src/main/resources/application.properties", "application"],
+      [".env.example", "example"],
+      ["config.sample.yaml", "example"],
+      ["values.template.yaml", "example"],
+      [".env.test", "test"],
+      ["tests/config.yaml", "test"],
+      ["docs/config.yaml", "documentation"],
+      ["vendor/config.yaml", "unknown"],
+      ["package-lock.json", "unknown"],
+      ["openapi.yaml", "unknown"],
+      ["data/models.csv", "unknown"],
+      // Source files keep their existing classification, so semantic authority is unchanged.
+      ["deploy/run.sh", "application"],
+    ];
+    for (const [path, scope] of cases) {
+      const lexical = detectSnapshot(snapshot(path, 'model = "gpt-old"\n'), feed).evidence.filter(
+        (fact) => fact.detectorRuleId === "fallback.text.lifecycle-id@1",
+      );
+      expect(lexical.map((fact) => [path, fact.scope]), path).toEqual([[path, scope]]);
+      expect(lexical[0]?.policyEligible, path).toBe(false);
+    }
+  });
+
   test("emits non-enforceable evidence for dynamic selectors and endpoints", () => {
     const dynamicSelector = ruleEvidence(
       "src/chat.ts",

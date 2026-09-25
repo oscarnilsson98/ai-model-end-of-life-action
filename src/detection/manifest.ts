@@ -14,7 +14,7 @@ export type DetectorQualificationEntry = {
   sourceUrl: string;
 };
 
-export const DETECTOR_MANIFEST_VERSION = "3.0.0-6";
+export const DETECTOR_MANIFEST_VERSION = "3.0.0-7";
 
 /** Syntax baselines reviewed for the v3.0 rule set; repository packages are never installed. */
 export const DETECTOR_QUALIFICATION: readonly DetectorQualificationEntry[] =
