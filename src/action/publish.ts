@@ -11,9 +11,9 @@ import {
 import {
   canonicalSha256,
   deprecationText,
+  NOT_ASSESSED_DIAGNOSTICS,
   shutdownOrderDays,
   shutdownText,
-  UNCOVERED_PLATFORM_DIAGNOSTIC,
 } from "../shared/status.ts";
 import {
   compact,
@@ -140,13 +140,13 @@ export function renderSummary(
               `${compact(source.id, 180)} (${source.kind}, ${source.health})`,
           )
           .join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
-  // An uncovered platform is stated once, beside assessment health, so a clean result
-  // cannot read as an all-clear for models nothing was able to check.
-  const uncovered = report.diagnostics.find(
-    (diagnostic) => diagnostic.code === UNCOVERED_PLATFORM_DIAGNOSTIC,
+  // What the run could not check is stated once, beside assessment health, so a clean
+  // result cannot read as an all-clear for models nothing was able to check.
+  const notAssessed = report.diagnostics.filter((diagnostic) =>
+    NOT_ASSESSED_DIAGNOSTICS.has(diagnostic.code)
   );
   const listedDiagnostics = report.diagnostics.filter(
-    (diagnostic) => diagnostic.code !== UNCOVERED_PLATFORM_DIAGNOSTIC,
+    (diagnostic) => !NOT_ASSESSED_DIAGNOSTICS.has(diagnostic.code),
   );
   const lines = [
     "## AI model lifecycle",
@@ -154,7 +154,7 @@ export function renderSummary(
     `${resultIcon(report)} **${report.result}** · ${report.counts.blocking} blocking · ${report.counts.advisory} advisory · ${report.counts.unresolved} unresolved`,
     "",
     `Evidence: ${escapeHtml(sourceText)} · Scan: ${report.scanStatus} · Comparison: ${report.comparisonStatus}`,
-    ...(uncovered === undefined ? [] : [`Not assessed: ${escapeHtml(compact(uncovered.message, 800))}`]),
+    ...notAssessed.map((diagnostic) => `Not assessed: ${escapeHtml(compact(diagnostic.message, 800))}`),
     deliveryLine(report, options),
     "",
   ];

@@ -518,7 +518,7 @@ describe("v3 production orchestration", () => {
     );
   });
 
-  test("a PR reports the uncovered-platform notice for the merged tree only", async () => {
+  test("a PR reports the not-assessed notices for the merged tree only", async () => {
     const bedrock = (evidenceId: string, path: string): EvidenceFact => ({
       ...evidence(evidenceId),
       detectorRuleId: "source.py.aws-bedrock.invoke-model@1",
@@ -529,6 +529,18 @@ describe("v3 production orchestration", () => {
       policyEligible: false,
       locations: [{ path, line: 1, column: 1 }],
     });
+    const dynamic = (evidenceId: string, path: string): EvidenceFact => {
+      const fact: EvidenceFact = {
+        ...evidence(evidenceId),
+        rawValue: "modelId",
+        modelResolution: "dynamic",
+        selectorKind: "dynamic",
+        policyEligible: false,
+        locations: [{ path, line: 1, column: 1 }],
+      };
+      delete fact.modelId;
+      return fact;
+    };
     const fixture = fixtureEnvironment({ GITHUB_EVENT_NAME: "pull_request" });
     const report = await run(
       dependencies(fixture, {
@@ -536,8 +548,13 @@ describe("v3 production orchestration", () => {
         detect: (inspected) =>
           detection(
             inspected.treeObjectId === BASE
-              ? [bedrock("base-call", "app/bedrock.py")]
-              : [bedrock("base-call", "app/bedrock.py"), bedrock("new-call", "src/more.ts")],
+              ? [bedrock("base-call", "app/bedrock.py"), dynamic("base-dynamic", "src/a.ts")]
+              : [
+                  bedrock("base-call", "app/bedrock.py"),
+                  bedrock("new-call", "src/more.ts"),
+                  dynamic("base-dynamic", "src/a.ts"),
+                  dynamic("new-dynamic", "src/b.ts"),
+                ],
           ),
       }),
     );
@@ -550,10 +567,19 @@ describe("v3 production orchestration", () => {
     ).toEqual([
       "The lifecycle feed publishes no records for aws-bedrock (2 reference(s): app/bedrock.py, src/more.ts), so those model references were not checked for deprecation.",
     ]);
+    expect(
+      report.diagnostics
+        .filter((diagnostic) => diagnostic.code === "selector-without-model-id")
+        .map((diagnostic) => diagnostic.message),
+    ).toEqual([
+      "2 model reference(s) in application or deployment code could not be resolved to a model ID (src/a.ts, src/b.ts), so they were not checked for deprecation.",
+    ]);
     expect(report.scanStatus).toBe("complete");
+    expect(report.result).toBe("no-actionable-risk");
     const summary = readFileSync(fixture.summaryPath, "utf8");
-    expect(summary.match(/^Not assessed: /gm)).toHaveLength(1);
+    expect(summary.match(/^Not assessed: /gm)).toHaveLength(2);
     expect(summary).not.toContain("platform-without-lifecycle-data");
+    expect(summary).not.toContain("selector-without-model-id");
   });
 
   test("does not fail an unrelated PR for unchanged base debt", async () => {

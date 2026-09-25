@@ -12,10 +12,12 @@ import {
   compareOutcome,
   daysUntilEarliestLifecycleDate,
   earliestLifecycleDays,
+  isPolicyRelevantUnresolved,
   resultFromFindings,
   shutdownOrderDays,
   strongerOutcome,
   UNCOVERED_PLATFORM_DIAGNOSTIC,
+  UNRESOLVED_SELECTOR_DIAGNOSTIC,
 } from "../shared/status.ts";
 import type {
   CoverageDiagnostic,
@@ -684,7 +686,23 @@ function evidenceHealth(evidence: readonly EvidenceFact[]): EvidenceHealth {
 }
 
 const MAX_UNCOVERED_PLATFORMS = 5;
-const MAX_UNCOVERED_PATHS = 3;
+const MAX_NOT_ASSESSED_PATHS = 3;
+
+function pathSample(paths: ReadonlySet<string>): string {
+  const sorted = [...paths].sort(compareText);
+  const more = sorted.length > MAX_NOT_ASSESSED_PATHS
+    ? `, +${sorted.length - MAX_NOT_ASSESSED_PATHS} more`
+    : "";
+  return `${sorted.slice(0, MAX_NOT_ASSESSED_PATHS).join(", ")}${more}`;
+}
+
+function onUncoveredPlatform(fact: EvidenceFact, published: ReadonlySet<string>): boolean {
+  return (
+    fact.servingPlatform !== undefined &&
+    fact.platformResolution === "resolved" &&
+    !published.has(fact.servingPlatform)
+  );
+}
 
 /**
  * Evidence on a serving platform the feed publishes nothing for can never join, so without
@@ -706,8 +724,7 @@ function uncoveredPlatformDiagnostic(
     if (
       platform === undefined ||
       location === undefined ||
-      published.has(platform) ||
-      fact.platformResolution !== "resolved" ||
+      !onUncoveredPlatform(fact, published) ||
       (fact.scope !== "application" && fact.scope !== "deployment")
     ) {
       continue;
@@ -724,12 +741,7 @@ function uncoveredPlatformDiagnostic(
   );
   const described = platforms.slice(0, MAX_UNCOVERED_PLATFORMS).map((platform) => {
     const locations = locationsByPlatform.get(platform) ?? new Map<string, string>();
-    const paths = [...new Set(locations.values())].sort(compareText);
-    const sample = paths.slice(0, MAX_UNCOVERED_PATHS).join(", ");
-    const more = paths.length > MAX_UNCOVERED_PATHS
-      ? `, +${paths.length - MAX_UNCOVERED_PATHS} more`
-      : "";
-    return `${platform} (${locations.size} reference(s): ${sample}${more})`;
+    return `${platform} (${locations.size} reference(s): ${pathSample(new Set(locations.values()))})`;
   });
   if (platforms.length > MAX_UNCOVERED_PLATFORMS) {
     described.push(`${platforms.length - MAX_UNCOVERED_PLATFORMS} more platform(s)`);
@@ -743,12 +755,50 @@ function uncoveredPlatformDiagnostic(
   };
 }
 
-function unresolvedIsAdvisory(fact: EvidenceFact): boolean {
-  return (
-    fact.kind !== "lexical" &&
-    fact.confidence !== "low" &&
-    (fact.scope === "application" || fact.scope === "deployment")
-  );
+/**
+ * A typed call site whose model the evidence could not name — computed at runtime, or a
+ * deployment or polymorphic selector no trusted resolution mapped — joins no lifecycle
+ * record, so nothing checked it. It no longer elevates the result, because a caller-
+ * supplied model has no static value to find, so the gap is stated once instead, beside
+ * any uncovered platform, and never per reference or in Slack. A reference that reached a
+ * finding was checked, and one on an uncovered platform is already named by that notice.
+ */
+function unresolvedSelectorDiagnostic(
+  unresolved: readonly EvidenceFact[],
+  findings: readonly LifecycleFinding[],
+  feed: V3FeedIndex,
+): CoverageDiagnostic | undefined {
+  if (feed.modelPairs.length === 0) return undefined;
+  const published = new Set(feed.modelPairs.map((pair) => pair.servingPlatform));
+  const checked = new Set(findings.flatMap((finding) => finding.evidenceIds));
+  const locations = new Map<string, string>();
+  for (const fact of unresolved) {
+    const location = fact.locations[0];
+    // Only a reference whose model itself is unknown belongs here. One that names an exact
+    // model but not its platform is matched by the lexical fallback like any other text.
+    const modelUnknown =
+      fact.modelResolution !== "resolved" ||
+      fact.modelId === undefined ||
+      fact.selectorKind !== "model-id";
+    if (
+      location === undefined ||
+      !modelUnknown ||
+      !isPolicyRelevantUnresolved(fact) ||
+      checked.has(fact.evidenceId) ||
+      onUncoveredPlatform(fact, published)
+    ) {
+      continue;
+    }
+    locations.set(`${location.path}:${location.line}:${location.column}`, location.path);
+  }
+  if (locations.size === 0) return undefined;
+  return {
+    code: UNRESOLVED_SELECTOR_DIAGNOSTIC,
+    message: `${locations.size} model reference(s) in application or deployment code could not be resolved to a model ID (${pathSample(
+      new Set(locations.values()),
+    )}), so ${locations.size === 1 ? "it was" : "they were"} not checked for deprecation.`,
+    severity: "notice",
+  };
 }
 
 export function evaluateEvidence(input: {
@@ -790,12 +840,17 @@ export function evaluateEvidence(input: {
   const findings = aggregateFindings(rawFindings);
   const uncovered = uncoveredPlatformDiagnostic(scoped, input.feed);
   if (uncovered !== undefined) diagnostics.push(uncovered);
+  const unchecked = unresolvedSelectorDiagnostic(unresolved, findings, input.feed);
+  if (unchecked !== undefined) diagnostics.push(unchecked);
   let result = resultFromFindings(findings);
   const health = evidenceHealth(scoped);
-  if (
-    result === "no-actionable-risk" &&
-    (unresolved.some(unresolvedIsAdvisory) || health !== "current")
-  ) {
+  // Unresolved evidence never elevates the result on its own. A runtime-computed selector
+  // can be unresolvable by construction, so an elevation here would pin the repository to a
+  // standing advisory that no change clears — and the Slack snapshot, which reconciles its
+  // finding list against blocking and advisory counts, would have no finding to name for it.
+  // Unresolved references stay in the counts, the job summary, the `unresolved-references`
+  // output, and the snapshot's own unresolved section.
+  if (result === "no-actionable-risk" && health !== "current") {
     result = "advisory";
   }
   return {

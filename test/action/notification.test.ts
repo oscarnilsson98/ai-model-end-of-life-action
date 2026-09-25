@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { deliverSlackNotification } from "../../src/action/notification.ts";
 import type {
   AssessmentReport,
+  EvidenceFact,
   LifecycleFinding,
 } from "../../src/shared/types.ts";
 
@@ -30,6 +31,29 @@ function finding(overrides: Partial<LifecycleFinding> = {}): LifecycleFinding {
     confidence: "high",
     selectorKind: "model-id",
     locations: [{ path: "/secret/workspace/src/chat.ts", line: 1, column: 1 }],
+    ...overrides,
+  };
+}
+
+/** A typed call site whose selector is computed at runtime: reportable, never a finding. */
+function unresolvedFact(overrides: Partial<EvidenceFact> = {}): EvidenceFact {
+  return {
+    evidenceId: "unresolved-google",
+    origin: "repository",
+    kind: "sdk-argument",
+    confidence: "high",
+    scope: "application",
+    environment: "production",
+    detectorRuleId: "source.ts.vercel-ai-sdk.google-model@1",
+    detectorManifestVersion: "1",
+    rawValue: "modelId",
+    servingPlatform: "google",
+    modelResolution: "dynamic",
+    selectorKind: "dynamic",
+    platformResolution: "resolved",
+    policyEligible: false,
+    locations: [{ path: "packages/ai-client/src/provider.ts", line: 28, column: 12 }],
+    resolutionTrace: [],
     ...overrides,
   };
 }
@@ -146,6 +170,39 @@ function payloadText(request: CapturedRequest): string {
 }
 
 describe("v3 Slack snapshot delivery", () => {
+  test("leaves unresolved selectors out of the snapshot and keeps a clean result clean", async () => {
+    const base = report();
+    const text = await deliveredText(
+      report({
+        unresolvedReferences: [
+          unresolvedFact(),
+          unresolvedFact({
+            evidenceId: "unresolved-openai",
+            detectorRuleId: "source.ts.vercel-ai-sdk.openai-model@1",
+            servingPlatform: "openai",
+            locations: [
+              { path: "packages/ai-client/src/provider.ts", line: 39, column: 12 },
+            ],
+          }),
+        ],
+        counts: {
+          ...base.counts,
+          unresolved: 2,
+          byResolution: { resolved: 0, dynamic: 2, unresolved: 0 },
+        },
+      }),
+    );
+
+    // A selector computed at runtime cannot be checked, but it is not a finding either:
+    // the job summary states it once, and a daily snapshot repeating it would be noise.
+    expect(text).toContain("✅");
+    expect(text).toContain("Result:* no-actionable-risk");
+    expect(text).toContain("0 blocking · 0 advisory · 2 unresolved");
+    expect(text).not.toContain("Unresolved selectors");
+    expect(text).not.toContain("provider.ts");
+    expect(text).not.toContain("vercel-ai-sdk");
+  });
+
   test("sends a clean bounded snapshot with authoritative event identity", async () => {
     const requests: CapturedRequest[] = [];
     const assessment = report();

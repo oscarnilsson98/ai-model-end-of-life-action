@@ -140,6 +140,126 @@ describe("v3 lifecycle evaluation", () => {
     expect(result.result).toBe("blocking");
   });
 
+  test("a runtime-computed selector is reported without elevating the result", () => {
+    const dynamic = fact({
+      evidenceId: "dynamic-selector",
+      rawValue: "modelId",
+      modelResolution: "dynamic",
+      selectorKind: "dynamic",
+      policyEligible: false,
+    });
+    delete dynamic.modelId;
+    const result = evaluateEvidence({
+      evidence: [dynamic],
+      feed,
+      policy: defaultPolicy(),
+      now: NOW,
+      scanStatus: "complete",
+    });
+
+    // A caller-supplied override has no static value to find, so elevating here would pin
+    // the repository to an advisory no change can clear. The reference is still reported.
+    expect(result.result).toBe("no-actionable-risk");
+    expect(result.scanStatus).toBe("complete");
+    expect(result.findings).toEqual([]);
+    expect(result.unresolved.map((entry) => entry.evidenceId)).toEqual([
+      "dynamic-selector",
+    ]);
+    // It is stated once as a coverage notice instead, so a clean result is not an all-clear.
+    expect(
+      result.diagnostics.filter((diagnostic) => diagnostic.code === "selector-without-model-id"),
+    ).toEqual([
+      {
+        code: "selector-without-model-id",
+        message:
+          "1 model reference(s) in application or deployment code could not be resolved to a model ID (src/chat.ts), so it was not checked for deprecation.",
+        severity: "notice",
+      },
+    ]);
+  });
+
+  test("the unchecked-selector notice names only references nothing checked", () => {
+    const dynamic = (evidenceId: string, overrides: Partial<EvidenceFact> = {}): EvidenceFact => {
+      const entry = fact({
+        evidenceId,
+        rawValue: "modelId",
+        modelResolution: "dynamic",
+        selectorKind: "dynamic",
+        policyEligible: false,
+        ...overrides,
+      });
+      delete entry.modelId;
+      return entry;
+    };
+    const notices = (evidence: EvidenceFact[], index = feed) =>
+      evaluateEvidence({
+        evidence,
+        feed: index,
+        policy: defaultPolicy(),
+        now: NOW,
+        scanStatus: "complete",
+      }).diagnostics.filter((diagnostic) =>
+        diagnostic.code === "selector-without-model-id" ||
+        diagnostic.code === "platform-without-lifecycle-data"
+      );
+
+    // Several references aggregate into one notice with a bounded path sample.
+    expect(
+      notices([
+        dynamic("a", { locations: [{ path: "src/a.ts", line: 1, column: 1 }] }),
+        dynamic("b", { locations: [{ path: "src/b.ts", line: 1, column: 1 }] }),
+        dynamic("b2", { locations: [{ path: "src/b.ts", line: 9, column: 1 }] }),
+        dynamic("c", { locations: [{ path: "src/c.ts", line: 1, column: 1 }] }),
+        dynamic("d", { locations: [{ path: "src/d.ts", line: 1, column: 1 }] }),
+      ]).map((diagnostic) => diagnostic.message),
+    ).toEqual([
+      "5 model reference(s) in application or deployment code could not be resolved to a model ID (src/a.ts, src/b.ts, src/c.ts, +1 more), so they were not checked for deprecation.",
+    ]);
+
+    // A gateway call names its model exactly; the lexical fallback checks that literal.
+    const gateway = fact({ evidenceId: "gateway", platformResolution: "unknown", policyEligible: false });
+    delete gateway.servingPlatform;
+    expect(notices([gateway]), "model known, platform unproven").toEqual([]);
+
+    // A reference on a platform the feed does not cover is named once, by that notice.
+    const bedrock = fact({
+      evidenceId: "bedrock",
+      servingPlatform: "aws-bedrock",
+      rawValue: "anthropic.claude-3-haiku-20240307-v1:0",
+      modelId: "anthropic.claude-3-haiku-20240307-v1:0",
+      selectorKind: "polymorphic",
+      policyEligible: false,
+    });
+    expect(notices([bedrock]).map((diagnostic) => diagnostic.code)).toEqual([
+      "platform-without-lifecycle-data",
+    ]);
+
+    for (const [name, evidence, index] of [
+      ["test scope", [dynamic("t", { scope: "test", environment: "test" })], feed],
+      ["documentation scope", [dynamic("d", { scope: "documentation" })], feed],
+      ["lexical", [dynamic("l", { kind: "lexical", confidence: "low" })], feed],
+      ["feed unavailable", [dynamic("u")], { ...feed, modelPairs: [] }],
+    ] as const) {
+      expect(notices([...evidence], index), name).toEqual([]);
+    }
+  });
+
+  test("evidence health still elevates when no finding does", () => {
+    const result = evaluateEvidence({
+      evidence: [
+        fact({ rawValue: "model-with-no-record", modelId: "model-with-no-record", evidenceHealth: "stale" }),
+      ],
+      feed,
+      policy: defaultPolicy(),
+      now: NOW,
+      scanStatus: "complete",
+    });
+
+    expect(result.findings).toEqual([]);
+    expect(result.result).toBe("advisory");
+    expect(result.scanStatus).toBe("partial");
+  });
+
   test("covers every independent v3 blocking-eligibility condition", () => {
     const enforced = { ...defaultPolicy(), failWithinDays: 30 };
     const eligibleOrigins: Array<{

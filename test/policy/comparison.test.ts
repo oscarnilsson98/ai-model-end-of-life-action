@@ -301,7 +301,7 @@ suppressions:
     expect(result.result).toBe("blocking");
   });
 
-  test("a new unresolved semantic selector is an advisory delta", () => {
+  test("a new unresolved semantic selector alone is not an advisory delta", () => {
     const result = evaluateComparison({
       baseDetection: detection([]),
       targetDetection: detection([dynamicEvidence("new-dynamic")]),
@@ -312,39 +312,57 @@ suppressions:
       now: NOW,
     });
 
-    expect(result.targetResult).toBe("advisory");
-    expect(result.result).toBe("advisory");
+    expect(result.targetResult).toBe("no-actionable-risk");
+    expect(result.result).toBe("no-actionable-risk");
+    // Not escalating is not the same as not reporting: a runtime-computed selector can be
+    // unresolvable by construction, so it stays in the report rather than pinning the PR
+    // to an advisory no change can clear.
+    expect(result.evaluation.unresolved.map((fact) => fact.evidenceId)).toEqual([
+      "new-dynamic",
+    ]);
   });
 
   test("a head resolution cannot erase the base-policy advisory view", () => {
-    const targetPolicy = `schemaVersion: 1
+    const resolutionPolicy = (resolutionId: string, modelId: string): string =>
+      `schemaVersion: 1
 resolutions:
-  - resolutionId: resolve-dynamic-safely
+  - resolutionId: ${resolutionId}
     match:
       detectorRuleId: source.ts.openai.request-model@1
       rawValue: MODEL_NAME
       paths:
         - src/**
     resolveTo:
-      modelId: model-with-no-feed-record
+      modelId: ${modelId}
       servingPlatform: openai
-    reason: Proposed target-only mapping
+    reason: Mapping under test
     reviewedAt: 2026-08-01T00:00:00Z
     reviewAfter: 2026-10-01T00:00:00Z
     expiresAt: 2027-01-01T00:00:00Z
 `;
+    // The base maps the dynamic selector onto a shutdown-scheduled model, so the
+    // base-policy view of the target carries a real warning. The head proposes a competing
+    // mapping onto a model the feed does not know, which under the monotonic merge makes
+    // the selector ambiguous rather than clean — and ambiguity must not launder the
+    // warning away either.
     const result = evaluateComparison({
       baseDetection: detection([]),
       targetDetection: detection([dynamicEvidence("new-dynamic")]),
-      baseClaims: claims(),
-      targetClaims: claims(targetPolicy),
+      baseClaims: claims(resolutionPolicy("resolve-dynamic-to-feed-model", "gpt-old")),
+      targetClaims: claims(
+        resolutionPolicy("resolve-dynamic-safely", "model-with-no-feed-record"),
+      ),
       feed,
       inputs: noInputs,
       now: NOW,
     });
 
+    expect(result.baselineResult).toBe("no-actionable-risk");
     expect(result.targetResult).toBe("advisory");
     expect(result.result).toBe("advisory");
+    expect(
+      result.evaluation.findings.map((finding) => [finding.modelId, finding.outcome]),
+    ).toEqual([["gpt-old", "warning"]]);
   });
 
   test("deleting a valid zero-record base source is an advisory weakening", () => {
