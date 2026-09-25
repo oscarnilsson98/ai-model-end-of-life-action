@@ -7899,6 +7899,7 @@ function deprecationLeadsHorizon(finding) {
     return false;
   return finding.daysUntilShutdown === null || (finding.daysUntilDeprecation ?? 0) < finding.daysUntilShutdown;
 }
+var UNCOVERED_PLATFORM_DIAGNOSTIC = "platform-without-lifecycle-data";
 function hasShutDown(finding) {
   return finding.daysUntilShutdown !== null && finding.daysUntilShutdown < 0;
 }
@@ -9255,6 +9256,43 @@ function applySuppressions(findings, evidenceById, policy, now, diagnostics) {
 function evidenceHealth(evidence) {
   return combineEvidenceHealth(...evidence.map((fact) => fact.evidenceHealth ?? "current"));
 }
+var MAX_UNCOVERED_PLATFORMS = 5;
+var MAX_UNCOVERED_PATHS = 3;
+function uncoveredPlatformDiagnostic(evidence, feed) {
+  if (feed.modelPairs.length === 0)
+    return;
+  const published = new Set(feed.modelPairs.map((pair) => pair.servingPlatform));
+  const locationsByPlatform = new Map;
+  for (const fact of evidence) {
+    const platform2 = fact.servingPlatform;
+    const location = fact.locations[0];
+    if (platform2 === undefined || location === undefined || published.has(platform2) || fact.platformResolution !== "resolved" || fact.scope !== "application" && fact.scope !== "deployment") {
+      continue;
+    }
+    const locations = locationsByPlatform.get(platform2) ?? new Map;
+    locations.set(`${location.path}:${location.line}:${location.column}`, location.path);
+    locationsByPlatform.set(platform2, locations);
+  }
+  if (locationsByPlatform.size === 0)
+    return;
+  const platforms = [...locationsByPlatform.keys()].sort(compareText3);
+  const references = [...locationsByPlatform.values()].reduce((total, locations) => total + locations.size, 0);
+  const described = platforms.slice(0, MAX_UNCOVERED_PLATFORMS).map((platform2) => {
+    const locations = locationsByPlatform.get(platform2) ?? new Map;
+    const paths = [...new Set(locations.values())].sort(compareText3);
+    const sample = paths.slice(0, MAX_UNCOVERED_PATHS).join(", ");
+    const more = paths.length > MAX_UNCOVERED_PATHS ? `, +${paths.length - MAX_UNCOVERED_PATHS} more` : "";
+    return `${platform2} (${locations.size} reference(s): ${sample}${more})`;
+  });
+  if (platforms.length > MAX_UNCOVERED_PLATFORMS) {
+    described.push(`${platforms.length - MAX_UNCOVERED_PLATFORMS} more platform(s)`);
+  }
+  return {
+    code: UNCOVERED_PLATFORM_DIAGNOSTIC,
+    message: `The lifecycle feed publishes no records for ${described.join("; ")}, so ${references === 1 ? "that model reference was" : "those model references were"} not checked for deprecation.`,
+    severity: "notice"
+  };
+}
 function unresolvedIsAdvisory(fact) {
   return fact.kind !== "lexical" && fact.confidence !== "low" && (fact.scope === "application" || fact.scope === "deployment");
 }
@@ -9277,6 +9315,9 @@ function evaluateEvidence(input) {
   const evidenceById = new Map(scoped.map((fact) => [fact.evidenceId, fact]));
   applySuppressions(rawFindings, evidenceById, input.policy, input.now, diagnostics);
   const findings = aggregateFindings(rawFindings);
+  const uncovered = uncoveredPlatformDiagnostic(scoped, input.feed);
+  if (uncovered !== undefined)
+    diagnostics.push(uncovered);
   let result = resultFromFindings(findings);
   const health = evidenceHealth(scoped);
   if (result === "no-actionable-risk" && (unresolved.some(unresolvedIsAdvisory) || health !== "current")) {
@@ -14877,12 +14918,15 @@ function renderSummary(report, options = {}) {
   const visibleSources = report.evidenceSources.slice(0, 20);
   const hiddenSourceCount = report.evidenceSources.length - visibleSources.length;
   const sourceText = report.evidenceSources.length === 1 ? "repository only" : `${visibleSources.map((source) => `${compact(source.id, 180)} (${source.kind}, ${source.health})`).join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
+  const uncovered = report.diagnostics.find((diagnostic) => diagnostic.code === UNCOVERED_PLATFORM_DIAGNOSTIC);
+  const listedDiagnostics = report.diagnostics.filter((diagnostic) => diagnostic.code !== UNCOVERED_PLATFORM_DIAGNOSTIC);
   const lines = [
     "## AI model lifecycle",
     "",
     `${resultIcon3(report)} **${report.result}** · ${report.counts.blocking} blocking · ${report.counts.advisory} advisory · ${report.counts.unresolved} unresolved`,
     "",
     `Evidence: ${escapeHtml(sourceText)} · Scan: ${report.scanStatus} · Comparison: ${report.comparisonStatus}`,
+    ...uncovered === undefined ? [] : [`Not assessed: ${escapeHtml(compact(uncovered.message, 800))}`],
     deliveryLine(report, options),
     ""
   ];
@@ -14920,8 +14964,8 @@ function renderSummary(report, options = {}) {
   if (suppressed.length > 0) {
     lines.push("### Active suppressions", "", ...suppressed.slice(0, 100).map((finding) => `- <code>${escapeHtml(compact(finding.modelId, 160))}</code> on ${escapeHtml(compact(servingPlatformLabel(finding), 300))} — <code>${escapeHtml(compact(finding.suppressedBy, 160))}</code>`), ...suppressed.length > 100 ? [`- ${suppressed.length - 100} additional suppressed finding(s) are in the JSON report.`] : [], "");
   }
-  if (report.diagnostics.length > 0) {
-    lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...report.diagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact(diagnostic.message, 800))}`), "", "</details>", "");
+  if (listedDiagnostics.length > 0) {
+    lines.push("<details>", "<summary>Coverage and provenance diagnostics</summary>", "", ...listedDiagnostics.slice(0, 200).map((diagnostic) => `- ${escapeHtml(compact(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact(diagnostic.message, 800))}`), "", "</details>", "");
   }
   const feedFreshness = report.feed.generatedAt === "" || report.feed.ageDays === null ? "unavailable" : `${escapeHtml(report.feed.generatedAt)} (${report.feed.ageDays}d old)`;
   lines.push(`Feed: source <code>${report.feed.sourceFeedSha256}</code> · active <code>${report.feed.activeRecordsSha256}</code> · generated ${feedFreshness}`, `Detector manifest: <code>${report.detectorManifestSha256}</code> · Report: <code>${escapeHtml(compact(report.reportPath, 500))}</code>`, "");
@@ -16052,7 +16096,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
     const diagnostics = [
       ...resolvedEvent.diagnostics,
       ...comparison.evaluation.diagnostics,
-      ...comparison.baseline.diagnostics,
+      ...comparison.baseline.diagnostics.filter((diagnostic) => diagnostic.code !== UNCOVERED_PLATFORM_DIAGNOSTIC),
       ...feedDiagnostics(feed, freshness)
     ];
     const scanStatus = applyFeedFreshnessCoverage(comparison.scanStatus, freshness);

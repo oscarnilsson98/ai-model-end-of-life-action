@@ -518,6 +518,44 @@ describe("v3 production orchestration", () => {
     );
   });
 
+  test("a PR reports the uncovered-platform notice for the merged tree only", async () => {
+    const bedrock = (evidenceId: string, path: string): EvidenceFact => ({
+      ...evidence(evidenceId),
+      detectorRuleId: "source.py.aws-bedrock.invoke-model@1",
+      rawValue: "anthropic.claude-3-haiku-20240307-v1:0",
+      modelId: "anthropic.claude-3-haiku-20240307-v1:0",
+      servingPlatform: "aws-bedrock",
+      selectorKind: "polymorphic",
+      policyEligible: false,
+      locations: [{ path, line: 1, column: 1 }],
+    });
+    const fixture = fixtureEnvironment({ GITHUB_EVENT_NAME: "pull_request" });
+    const report = await run(
+      dependencies(fixture, {
+        resolveEvent: () => comparisonEvent("available"),
+        detect: (inspected) =>
+          detection(
+            inspected.treeObjectId === BASE
+              ? [bedrock("base-call", "app/bedrock.py")]
+              : [bedrock("base-call", "app/bedrock.py"), bedrock("new-call", "src/more.ts")],
+          ),
+      }),
+    );
+
+    // The base's copy would name usage the pull request may have changed or removed.
+    expect(
+      report.diagnostics
+        .filter((diagnostic) => diagnostic.code === "platform-without-lifecycle-data")
+        .map((diagnostic) => diagnostic.message),
+    ).toEqual([
+      "The lifecycle feed publishes no records for aws-bedrock (2 reference(s): app/bedrock.py, src/more.ts), so those model references were not checked for deprecation.",
+    ]);
+    expect(report.scanStatus).toBe("complete");
+    const summary = readFileSync(fixture.summaryPath, "utf8");
+    expect(summary.match(/^Not assessed: /gm)).toHaveLength(1);
+    expect(summary).not.toContain("platform-without-lifecycle-data");
+  });
+
   test("does not fail an unrelated PR for unchanged base debt", async () => {
     const fixture = fixtureEnvironment({ GITHUB_EVENT_NAME: "pull_request" });
     const report = await run(

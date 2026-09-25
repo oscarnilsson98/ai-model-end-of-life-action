@@ -53,6 +53,7 @@ import {
   combineEvidenceHealth,
   combineScanStatus,
   scanFingerprint,
+  UNCOVERED_PLATFORM_DIAGNOSTIC,
 } from "../shared/status.ts";
 import { compact } from "../shared/text.ts";
 import { DEFAULT_MAX_FEED_AGE_DAYS } from "../shared/limits.ts";
@@ -782,7 +783,11 @@ async function assess(
     const diagnostics = [
       ...resolvedEvent.diagnostics,
       ...comparison.evaluation.diagnostics,
-      ...comparison.baseline.diagnostics,
+      // The target's uncovered-platform notice describes the tree being merged; the base's
+      // copy is superseded, and would name usage the pull request may have removed.
+      ...comparison.baseline.diagnostics.filter(
+        (diagnostic) => diagnostic.code !== UNCOVERED_PLATFORM_DIAGNOSTIC,
+      ),
       ...feedDiagnostics(feed, freshness),
     ];
     // Feed staleness degrades only the run's declared coverage. The per-side statuses and

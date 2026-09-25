@@ -140,6 +140,9 @@ export function deprecationLeadsHorizon(
   );
 }
 
+/** Code of the notice naming serving platforms the lifecycle feed publishes nothing for. */
+export const UNCOVERED_PLATFORM_DIAGNOSTIC = "platform-without-lifecycle-data";
+
 function hasShutDown(finding: Pick<LifecycleFinding, "daysUntilShutdown">): boolean {
   return finding.daysUntilShutdown !== null && finding.daysUntilShutdown < 0;
 }
