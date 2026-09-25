@@ -2052,6 +2052,97 @@ client.messages.create(model="gpt-old", messages=[])
     }
   });
 
+  test("binds the official constructor and instance-attribute forms", () => {
+    // The quickstart shapes of both SDKs and the usual class wrappers. Each fell back to a
+    // text match before, so even production evidence written this way could never block.
+    const cases: ReadonlyArray<readonly [name: string, path: string, source: string, ruleId: string, platform: string]> = [
+      [
+        "module-qualified Anthropic",
+        "app/claude.py",
+        `import anthropic\nclient = anthropic.Anthropic()\nclient.messages.create(model="gpt-old", max_tokens=1, messages=[])\n`,
+        "source.py.anthropic.messages-model@1",
+        "anthropic",
+      ],
+      [
+        "aliased module-qualified async OpenAI",
+        "app/chat.py",
+        `import openai as oa\nclient = oa.AsyncOpenAI()\nawait client.responses.create(model="gpt-old", input="hi")\n`,
+        "source.py.openai.request-model@1",
+        "openai",
+      ],
+      [
+        "Python instance attribute",
+        "app/bot.py",
+        `from anthropic import Anthropic\n\nclass Bot:\n    def __init__(self):\n        self.client = Anthropic()\n\n    def ask(self):\n        return self.client.messages.create(model="gpt-old", max_tokens=1, messages=[])\n`,
+        "source.py.anthropic.messages-model@1",
+        "anthropic",
+      ],
+      [
+        "Python class attribute read through self",
+        "app/bot.py",
+        `from openai import OpenAI\n\nclass Bot:\n    client = OpenAI()\n\n    def ask(self):\n        return self.client.chat.completions.create(model="gpt-old", messages=[])\n`,
+        "source.py.openai.request-model@1",
+        "openai",
+      ],
+      [
+        "TypeScript instance attribute",
+        "src/bot.ts",
+        `import OpenAI from "openai";\nexport class Bot {\n  client: OpenAI;\n  constructor() {\n    this.client = new OpenAI();\n  }\n  ask() {\n    return this.client.chat.completions.create({ model: "gpt-old", messages: [] });\n  }\n}\n`,
+        "source.ts.openai.request-model@1",
+        "openai",
+      ],
+      [
+        "TypeScript class field",
+        "src/bot.ts",
+        `import Anthropic from "@anthropic-ai/sdk";\nexport class Bot {\n  private client = new Anthropic();\n  ask() {\n    return this.client.messages.create({ model: "gpt-old", max_tokens: 1, messages: [] });\n  }\n}\n`,
+        "source.ts.anthropic.messages-model@1",
+        "anthropic",
+      ],
+    ];
+    for (const [name, path, source, ruleId, platform] of cases) {
+      expect(ruleEvidence(path, source, ruleId), name).toMatchObject({
+        modelId: "gpt-old",
+        servingPlatform: platform,
+        platformResolution: "resolved",
+        selectorKind: "model-id",
+        policyEligible: true,
+      });
+    }
+
+    // Module-qualified Azure keeps the deployment-name semantics of its named import.
+    expect(
+      ruleEvidence(
+        "app/chat.py",
+        `import openai\nclient = openai.AzureOpenAI(azure_endpoint="https://example.openai.azure.com")\nclient.chat.completions.create(model="gpt-old", messages=[])\n`,
+        "source.py.openai.request-model@1",
+      ),
+    ).toMatchObject({ servingPlatform: "azure", selectorKind: "deployment-name", policyEligible: false });
+  });
+
+  test("does not bind a bare name from another object's attribute", () => {
+    // `config.client` is not `client`; attributing a later bare call to it could name the
+    // wrong client entirely.
+    const evidence = detectSnapshot(
+      snapshot(
+        "app/chat.py",
+        `from openai import OpenAI\nconfig.client = OpenAI(base_url="https://gateway.example")\nclient.chat.completions.create(model="gpt-old", messages=[])\n`,
+      ),
+      feed,
+    ).evidence;
+    expect(evidence.filter((fact) => fact.kind === "sdk-argument")).toEqual([]);
+    expect(evidence.map((fact) => fact.kind)).toEqual(["lexical"]);
+
+    // A module name reassigned in the file is no longer the SDK.
+    const shadowed = detectSnapshot(
+      snapshot(
+        "app/chat.py",
+        `import anthropic\nanthropic = load_proxy()\nclient = anthropic.Anthropic()\nclient.messages.create(model="gpt-old", messages=[])\n`,
+      ),
+      feed,
+    ).evidence;
+    expect(shadowed.filter((fact) => fact.kind === "sdk-argument")).toEqual([]);
+  });
+
   test("distinguishes explicit Google AI Studio and Vertex modes in JavaScript and Python", () => {
     const cases = [
       {
@@ -2912,5 +3003,110 @@ resource "azurerm_cognitive_deployment" "malformed" {
         ),
       ).toBe(true);
     }
+  });
+});
+
+describe("keyed fallback for IDs the lexical automaton skips", () => {
+  const shortIdRecord = (recordId: string, servingPlatform: string, modelId: string) => ({
+    recordId,
+    servingPlatform,
+    primarySourceUrl: `https://example.com/${recordId}`,
+    supersedesRecordIds: [],
+    recordKind: "model" as const,
+    modelId,
+    literalScanEligible: false,
+    lifecycleStatus: "shutdown-scheduled" as const,
+    shutdownDate: "2026-10-23",
+    replacementModels: [],
+  });
+  const shortIdFeed = buildV3FeedIndex({
+    schemaVersion: 3,
+    adapter: { id: "fixture", version: "1", sourceSha256: "a".repeat(64) },
+    generatedAt: "2026-08-01T00:00:00Z",
+    records: [
+      shortIdRecord("openai-o1", "openai", "o1"),
+      shortIdRecord("azure-o1", "azure", "o1"),
+      shortIdRecord("azure-tts", "azure", "tts"),
+      {
+        recordId: "old",
+        servingPlatform: "openai",
+        primarySourceUrl: "https://example.com/old",
+        supersedesRecordIds: [],
+        recordKind: "model",
+        modelId: "gpt-old",
+        literalScanEligible: true,
+        lifecycleStatus: "shutdown-scheduled",
+        shutdownDate: "2027-01-01",
+        replacementModels: [],
+      },
+    ],
+  });
+  const keyed = (path: string, source: string) =>
+    detectSnapshot(snapshot(path, source), shortIdFeed).evidence.filter(
+      (fact) => fact.detectorRuleId === "fallback.text.keyed-lifecycle-id@1",
+    );
+
+  test("matches a short ID written as a model key's value in configuration and code", () => {
+    const cases: ReadonlyArray<readonly [path: string, source: string, scope: string]> = [
+      ["config/llm.yaml", "summarizer:\n  model: o1\n", "application"],
+      [".env", "OPENAI_MODEL=o1\n", "deployment"],
+      ["settings.json", '{ "chat_model": "o1" }\n', "application"],
+      ["app/lc.py", 'from langchain_openai import ChatOpenAI\nllm = ChatOpenAI(model="o1")\n', "application"],
+      ["src/config.ts", 'export const CHAT_MODEL = "o1";\n', "application"],
+    ];
+    for (const [path, source, scope] of cases) {
+      expect(keyed(path, source), path).toEqual([
+        expect.objectContaining({
+          kind: "lexical",
+          confidence: "low",
+          modelId: "o1",
+          scope,
+          platformResolution: "ambiguous",
+          policyEligible: false,
+        }),
+      ]);
+    }
+    const [single] = keyed("deploy/speech.yaml", "speech:\n  model: tts\n");
+    expect(single).toMatchObject({
+      servingPlatform: "azure",
+      platformResolution: "resolved",
+      locations: [{ path: "deploy/speech.yaml", line: 2, column: 10 }],
+    });
+  });
+
+  test("ignores prose, comparisons, other keys, bare source identifiers, and eligible IDs", () => {
+    for (const [path, source] of [
+      ["docs/models.md", "We moved from o1 to a newer model.\n"],
+      ["app/route.py", 'if model == "o1":\n    pass\n'],
+      ["src/route.ts", 'if (model === "o1") {}\n'],
+      ["config/app.yaml", "mode: o1\n"],
+      ["app/chat.py", "model = o1\n"],
+      ["config/llm.yaml", "model: o10\n"],
+    ] as const) {
+      expect(keyed(path, source), `${path}: ${source.trim()}`).toEqual([]);
+    }
+    // An ID the lexical automaton already matches is not duplicated by the keyed rule.
+    const eligible = detectSnapshot(snapshot("config/llm.yaml", "model: gpt-old\n"), shortIdFeed).evidence;
+    expect(eligible.map((fact) => fact.detectorRuleId)).toEqual(["fallback.text.lifecycle-id@1"]);
+  });
+
+  test("defers to a semantic fact that joins the feed, but not to one behind a gateway", () => {
+    const direct = detectSnapshot(
+      snapshot("app/chat.py", 'from openai import OpenAI\nclient = OpenAI()\nclient.chat.completions.create(model="o1", messages=[])\n'),
+      shortIdFeed,
+    ).evidence;
+    expect(direct.map((fact) => fact.kind)).toEqual(["sdk-argument"]);
+
+    const gateway = detectSnapshot(
+      snapshot(
+        "app/chat.py",
+        'from openai import OpenAI\nclient = OpenAI(base_url="https://gateway.example")\nclient.chat.completions.create(model="o1", messages=[])\n',
+      ),
+      shortIdFeed,
+    ).evidence;
+    expect(gateway.map((fact) => fact.detectorRuleId).sort()).toEqual([
+      "fallback.text.keyed-lifecycle-id@1",
+      "source.py.openai.request-model@1",
+    ]);
   });
 });

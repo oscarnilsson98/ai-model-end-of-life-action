@@ -8019,7 +8019,7 @@ function alertFingerprint(findings) {
 }
 
 // src/detection/manifest.ts
-var DETECTOR_MANIFEST_VERSION = "3.0.0-9";
+var DETECTOR_MANIFEST_VERSION = "3.0.0-10";
 var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
@@ -8271,6 +8271,12 @@ var DETECTOR_RULES = Object.freeze([
   },
   {
     ruleId: "fallback.text.lifecycle-id@1",
+    languages: ["text"],
+    confidence: "low",
+    policyEligible: false
+  },
+  {
+    ruleId: "fallback.text.keyed-lifecycle-id@1",
     languages: ["text"],
     confidence: "low",
     policyEligible: false
@@ -11339,6 +11345,9 @@ function isBareAssignmentTarget(tokens, index) {
   const previous = structuralValue(tokens[index - 1]);
   return previous !== "." && previous !== "?.";
 }
+function isMemberAccessBefore(tokens, index) {
+  return !isBareAssignmentTarget(tokens, index);
+}
 function conflictAwareBindings() {
   const bindings = new Map;
   const conflicted = new Set;
@@ -11367,7 +11376,8 @@ function assignmentTargetCounts(tokens) {
 }
 function pruneUntrustedBindings(bindings, analysis) {
   for (const variable of [...bindings.keys()]) {
-    if ((analysis.assignmentCounts.get(variable) ?? 0) > 1 || analysis.parameterNames.has(variable)) {
+    const assigned = variable.includes(".") ? variable.slice(variable.indexOf(".") + 1) : variable;
+    if ((analysis.assignmentCounts.get(assigned) ?? 0) > 1 || analysis.parameterNames.has(variable)) {
       bindings.delete(variable);
     }
   }
@@ -11419,6 +11429,7 @@ function importProvenance(tokens, language, analysis) {
   const constructors = new Map;
   const awsCommands = new Map;
   const googleNamespaces = new Set;
+  const constructorNamespaces = new Map;
   const boto3Namespaces = new Set;
   const pythonOsNamespaces = new Set;
   const pythonGetenvFunctions = new Set;
@@ -11599,6 +11610,9 @@ function importProvenance(tokens, language, analysis) {
             boto3Namespaces.add(local);
           else if (importedModule === "os")
             pythonOsNamespaces.add(local);
+          else if (dotted === importedModule && CONSTRUCTORS_BY_MODULE[importedModule] !== undefined) {
+            constructorNamespaces.set(local, importedModule);
+          }
           if (tokens[scan]?.value === "as")
             scan += 2;
           if (structuralValue(tokens[scan]) !== ",")
@@ -11611,6 +11625,7 @@ function importProvenance(tokens, language, analysis) {
   }
   const importedNames = new Set([
     ...constructors.keys(),
+    ...constructorNamespaces.keys(),
     ...awsCommands.keys(),
     ...googleNamespaces,
     ...boto3Namespaces,
@@ -11637,6 +11652,7 @@ function importProvenance(tokens, language, analysis) {
   }
   for (const name of shadowed) {
     constructors.delete(name);
+    constructorNamespaces.delete(name);
     awsCommands.delete(name);
     googleNamespaces.delete(name);
     boto3Namespaces.delete(name);
@@ -11648,6 +11664,7 @@ function importProvenance(tokens, language, analysis) {
   }
   return {
     constructors,
+    constructorNamespaces,
     awsCommands,
     googleNamespaces,
     boto3Namespaces,
@@ -11658,6 +11675,18 @@ function importProvenance(tokens, language, analysis) {
     aiSdkInstances,
     aiSdkFactories
   };
+}
+function bindingForChain(bindings, chain, language) {
+  const [head, attribute] = chain;
+  if (head === undefined)
+    return;
+  if (head === (language === "python" ? "self" : "this") && attribute !== undefined && chain.length > 2) {
+    const compound = `${head}.${attribute}`;
+    const binding2 = bindings.get(compound) ?? bindings.get(attribute);
+    return binding2 === undefined ? undefined : { binding: binding2, chain: [compound, ...chain.slice(2)] };
+  }
+  const binding = bindings.get(head);
+  return binding === undefined ? undefined : { binding, chain: [...chain] };
 }
 function chainBefore(tokens, openIndex) {
   const chain = [];
@@ -11877,6 +11906,19 @@ function clientBindings(tokens, language, analysis) {
       endpointSafe: true
     };
   };
+  const instanceReceiver = language === "python" ? "self" : "this";
+  const assignmentTarget = (equalsIndex) => {
+    if (tokens[equalsIndex]?.value !== "=")
+      return;
+    const name = tokens[equalsIndex - 1];
+    if (name?.kind !== "identifier")
+      return;
+    const separator = structuralValue(tokens[equalsIndex - 2]);
+    if (separator !== "." && separator !== "?.")
+      return name.value;
+    const receiver = tokens[equalsIndex - 3];
+    return separator === "." && isIdentifier(receiver, instanceReceiver) && !isMemberAccessBefore(tokens, equalsIndex - 3) ? `${instanceReceiver}.${name.value}` : undefined;
+  };
   for (let index = 0;index < tokens.length; index += 1) {
     const token = tokens[index];
     const isNew = language === "javascript" && isIdentifier(token, "new");
@@ -11884,20 +11926,25 @@ function clientBindings(tokens, language, analysis) {
     const localClassName = tokens[classIndex]?.value;
     if (tokens[classIndex]?.kind !== "identifier" || localClassName === undefined)
       continue;
-    const imported = imports.constructors.get(localClassName);
+    let imported = imports.constructors.get(localClassName);
+    let constructorIndex = classIndex;
+    const namespaceModule = imports.constructorNamespaces.get(localClassName);
+    const member = tokens[classIndex + 2];
+    if (imported === undefined && namespaceModule !== undefined && !isMemberAccessBefore(tokens, classIndex) && tokens[classIndex + 1]?.value === "." && member?.kind === "identifier") {
+      const integration = CONSTRUCTORS_BY_MODULE[namespaceModule]?.[member.value];
+      if (integration !== undefined) {
+        imported = { integration, canonicalName: member.value };
+        constructorIndex = classIndex + 2;
+      }
+    }
     if (imported === undefined)
       continue;
-    let variable;
-    if (isNew) {
-      if (tokens[index - 1]?.value === "=" && tokens[index - 2]?.kind === "identifier") {
-        variable = tokens[index - 2]?.value;
-      }
-    } else if (language === "python" && tokens[index - 1]?.value === "=" && tokens[index - 2]?.kind === "identifier") {
-      variable = tokens[index - 2]?.value;
-    }
+    if (!isNew && language === "javascript")
+      continue;
+    const variable = assignmentTarget(index - 1);
     if (variable === undefined)
       continue;
-    const arguments_ = constructorArguments(tokens, classIndex);
+    const arguments_ = constructorArguments(tokens, constructorIndex);
     if (imported.integration === "openai") {
       const platform2 = imported.canonicalName.includes("Azure") ? "azure" : "openai";
       const resolution = resolvedClientPlatform({
@@ -12426,10 +12473,11 @@ function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
     if (structuralValue(tokens[openIndex]) !== "(")
       continue;
     const chain = chainBefore(tokens, openIndex);
-    const binding = chain[0] === undefined ? undefined : bindings.get(chain[0]);
-    if (binding === undefined)
+    const bound = bindingForChain(bindings, chain, language);
+    if (bound === undefined)
       continue;
-    const rule = methodRule(binding, chain);
+    const binding = bound.binding;
+    const rule = methodRule(binding, bound.chain);
     if (rule === null)
       continue;
     const closeIndex = matchingIndex(tokens, openIndex, "(", ")");
@@ -12810,6 +12858,126 @@ function lexicalFacts(source, path, blobOid, candidates, automaton, semanticLite
   }
   return facts;
 }
+var KEYED_LEXICAL_RULE_ID = "fallback.text.keyed-lifecycle-id@1";
+var MAX_KEYED_KEY_LENGTH = 128;
+var MAX_KEYED_GAP = 16;
+var KEY_CHARACTER = /^[A-Za-z0-9_-]$/;
+var NON_ASSIGNMENT_PREFIX = new Set(["=", "!", "<", ">", ":", "+", "-", "*", "/", "%", "&", "|", "^", "~"]);
+function keyedLexicalCandidates(index) {
+  const byId = new Map;
+  for (const pair of index.modelPairs) {
+    if (pair.lexicalScanEligible || pair.conflict || pair.activeLifecycles.length !== 1)
+      continue;
+    const pairs = byId.get(pair.modelId) ?? [];
+    pairs.push(pair);
+    byId.set(pair.modelId, pairs);
+  }
+  for (const pairs of byId.values()) {
+    pairs.sort((left, right) => compareText5(left.servingPlatform, right.servingPlatform));
+  }
+  return byId;
+}
+function isModelKey(key) {
+  const normalized = key.toLowerCase().replace(/[_-]/g, "");
+  return normalized.endsWith("model") || normalized === "modelid" || normalized === "modelname";
+}
+function isKeyedValue(source, start, end, quotesRequired) {
+  const before = source[start - 1];
+  const after = source[end];
+  let cursor = start;
+  if (before === '"' || before === "'" || before === "`") {
+    if (after !== before)
+      return false;
+    cursor = start - 1;
+  } else if (quotesRequired || identifierCharacter(before) || identifierCharacter(characterAt(source, end))) {
+    return false;
+  }
+  const skipGap = (from) => {
+    let index = from;
+    while (index > 0 && from - index < MAX_KEYED_GAP && (source[index - 1] === " " || source[index - 1] === "\t")) {
+      index -= 1;
+    }
+    return index;
+  };
+  cursor = skipGap(cursor);
+  const separator = source[cursor - 1];
+  if (separator !== ":" && separator !== "=")
+    return false;
+  if (NON_ASSIGNMENT_PREFIX.has(source[cursor - 2] ?? ""))
+    return false;
+  cursor = skipGap(cursor - 1);
+  const keyQuote = source[cursor - 1];
+  const quotedKey = keyQuote === '"' || keyQuote === "'";
+  if (quotedKey)
+    cursor -= 1;
+  const keyEnd = cursor;
+  while (cursor > 0 && keyEnd - cursor < MAX_KEYED_KEY_LENGTH && KEY_CHARACTER.test(source[cursor - 1] ?? "")) {
+    cursor -= 1;
+  }
+  if (cursor === keyEnd || quotedKey && source[cursor - 1] !== keyQuote)
+    return false;
+  return isModelKey(source.slice(cursor, keyEnd));
+}
+function keyedLexicalFacts(source, path, blobOid, candidates, semanticLiteralSpans) {
+  if (candidates.size === 0)
+    return [];
+  const scope = classifyEvidenceScope(path);
+  const quotesRequired = SOURCE_EXTENSIONS.has(import_node_path.extname(path.toLowerCase()));
+  const semanticSpans = new Set(semanticLiteralSpans.map((span) => JSON.stringify([span.modelId, span.startOffset, span.endOffset])));
+  const matches = [];
+  for (const [modelId2, pairs] of candidates) {
+    for (let start = source.indexOf(modelId2);start !== -1; start = source.indexOf(modelId2, start + 1)) {
+      const end = start + modelId2.length;
+      if (semanticSpans.has(JSON.stringify([modelId2, start, end])))
+        continue;
+      if (isKeyedValue(source, start, end, quotesRequired))
+        matches.push({ start, modelId: modelId2, pairs });
+    }
+  }
+  matches.sort((left, right) => left.start - right.start || compareText5(left.modelId, right.modelId));
+  const facts = [];
+  let line = 1;
+  let lineStart = 0;
+  let scanned = 0;
+  for (const match of matches) {
+    for (;scanned < match.start; scanned += 1) {
+      if (source[scanned] === `
+`) {
+        line += 1;
+        lineStart = scanned + 1;
+      }
+    }
+    const platforms = [...new Set(match.pairs.map((pair) => pair.servingPlatform))];
+    facts.push({
+      evidenceId: makeEvidenceId(KEYED_LEXICAL_RULE_ID, path, match.modelId, match.modelId, facts.length),
+      origin: "repository",
+      kind: "lexical",
+      confidence: "low",
+      scope,
+      environment: scope === "test" ? "test" : "unknown",
+      detectorRuleId: KEYED_LEXICAL_RULE_ID,
+      detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
+      rawValue: match.modelId,
+      modelId: match.modelId,
+      ...platforms.length === 1 ? { servingPlatform: platforms[0] } : {},
+      modelResolution: "resolved",
+      selectorKind: "model-id",
+      platformResolution: platforms.length === 1 ? "resolved" : "ambiguous",
+      policyEligible: false,
+      locations: [
+        {
+          path,
+          line,
+          column: [...source.slice(lineStart, match.start)].length + 1,
+          blobOid
+        }
+      ],
+      resolutionTrace: [{ kind: "detector", detail: "exact typed-feed ID written as a model key's value" }]
+    });
+    assertEvidenceBudget(facts.length);
+  }
+  return facts;
+}
 function parseDotenvLiteral(tail) {
   if (tail === "")
     return { value: "", contentOffset: 0 };
@@ -13090,7 +13258,7 @@ function unsupportedFrameworkDiagnostics(byFramework, facts) {
     if (paths.length === 0)
       continue;
     const sorted = paths.sort(compareText5);
-    const preamble = `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${prefix === undefined ? NO_SUPPORT_CAUSE : PARTIAL_SUPPORT_CAUSE}. Model selections made that way ` + "were assessed by bounded lexical fallback only, so they cannot block, are reported only as text " + "matches, and produce nothing at all when the selector is dynamic or the model ID is not " + "literal-scan eligible. Files: ";
+    const preamble = `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` + `${prefix === undefined ? NO_SUPPORT_CAUSE : PARTIAL_SUPPORT_CAUSE}. Model selections made that way ` + "were assessed by bounded lexical fallback only, so they cannot block, are reported only as text " + "matches, and produce nothing at all when the selector is dynamic or the model ID is neither " + "literal-scan eligible nor written as a model key's value. Files: ";
     let sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
     while (sample.length > 1 && preamble.length + sample.join(", ").length > UNSUPPORTED_FRAMEWORK_MESSAGE_BUDGET) {
       sample = sample.slice(0, -1);
@@ -13134,6 +13302,7 @@ function isClaimDocument(path) {
 function detectSnapshot(snapshot, feed) {
   const candidates = lexicalCandidates(feed);
   const automaton = buildAutomaton(candidates);
+  const keyedCandidates = keyedLexicalCandidates(feed);
   const evidence = [];
   const consumedEnvironmentSelectors = [];
   const diagnostics = snapshot.diagnostics.filter((diagnostic) => diagnostic.coverageImpact === "partial").map((diagnostic) => ({
@@ -13201,7 +13370,8 @@ function detectSnapshot(snapshot, feed) {
         recordUnsupportedFrameworks(unsupportedFrameworkImportsByFramework, unsupportedFrameworkImports(moduleSpecifiers, semantic, semanticLanguage), entry.displayPath);
       }
       const lexical = lexicalFacts(source, entry.displayPath, entry.objectId, candidates, automaton, literalSpans);
-      evidence.push(...semantic, ...lexical);
+      const keyed = keyedLexicalFacts(source, entry.displayPath, entry.objectId, keyedCandidates, literalSpans);
+      evidence.push(...semantic, ...lexical, ...keyed);
       assertEvidenceBudget(evidence.length);
     }
     if (consumedEnvironmentSelectors.length > 0) {

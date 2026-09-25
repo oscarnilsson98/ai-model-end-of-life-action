@@ -1843,6 +1843,8 @@ type ImportedConstructor = {
 
 type ImportProvenance = {
   constructors: Map<string, ImportedConstructor>;
+  /** Python `import openai [as x]`: a local module name whose constructors are reachable as `x.OpenAI`. */
+  constructorNamespaces: Map<string, string>;
   awsCommands: Map<string, string>;
   googleNamespaces: Set<string>;
   boto3Namespaces: Set<string>;
@@ -2203,7 +2205,7 @@ function aiSdkRuleId(provider: AiSdkProvider): string {
  * the omission fails open with no error.
  */
 export function emittableDetectorRuleIds(): readonly string[] {
-  return AI_SDK_PROVIDERS.map(aiSdkRuleId);
+  return [...AI_SDK_PROVIDERS.map(aiSdkRuleId), KEYED_LEXICAL_RULE_ID];
 }
 
 /**
@@ -2216,6 +2218,11 @@ export function emittableDetectorRuleIds(): readonly string[] {
 function isBareAssignmentTarget(tokens: readonly Token[], index: number): boolean {
   const previous = structuralValue(tokens[index - 1]);
   return previous !== "." && previous !== "?.";
+}
+
+/** Whether the token at `index` is reached through another object, as in `obj.self`. */
+function isMemberAccessBefore(tokens: readonly Token[], index: number): boolean {
+  return !isBareAssignmentTarget(tokens, index);
 }
 
 /**
@@ -2265,8 +2272,10 @@ function pruneUntrustedBindings(
   analysis: TokenAnalysis,
 ): void {
   for (const variable of [...bindings.keys()]) {
+    // `self.client` is counted by its attribute name, the identifier before its `=`.
+    const assigned = variable.includes(".") ? variable.slice(variable.indexOf(".") + 1) : variable;
     if (
-      (analysis.assignmentCounts.get(variable) ?? 0) > 1 ||
+      (analysis.assignmentCounts.get(assigned) ?? 0) > 1 ||
       analysis.parameterNames.has(variable)
     ) {
       bindings.delete(variable);
@@ -2358,6 +2367,7 @@ function importProvenance(
   const constructors = new Map<string, ImportedConstructor>();
   const awsCommands = new Map<string, string>();
   const googleNamespaces = new Set<string>();
+  const constructorNamespaces = new Map<string, string>();
   const boto3Namespaces = new Set<string>();
   const pythonOsNamespaces = new Set<string>();
   const pythonGetenvFunctions = new Set<string>();
@@ -2564,6 +2574,9 @@ function importProvenance(
             : importedModule;
           if (importedModule === "boto3") boto3Namespaces.add(local);
           else if (importedModule === "os") pythonOsNamespaces.add(local);
+          else if (dotted === importedModule && CONSTRUCTORS_BY_MODULE[importedModule] !== undefined) {
+            constructorNamespaces.set(local, importedModule);
+          }
           if (tokens[scan]?.value === "as") scan += 2;
           if (structuralValue(tokens[scan]) !== ",") break;
           cursor = scan + 1;
@@ -2574,6 +2587,7 @@ function importProvenance(
   }
   const importedNames = new Set([
     ...constructors.keys(),
+    ...constructorNamespaces.keys(),
     ...awsCommands.keys(),
     ...googleNamespaces,
     ...boto3Namespaces,
@@ -2611,6 +2625,7 @@ function importProvenance(
   }
   for (const name of shadowed) {
     constructors.delete(name);
+    constructorNamespaces.delete(name);
     awsCommands.delete(name);
     googleNamespaces.delete(name);
     boto3Namespaces.delete(name);
@@ -2622,6 +2637,7 @@ function importProvenance(
   }
   return {
     constructors,
+    constructorNamespaces,
     awsCommands,
     googleNamespaces,
     boto3Namespaces,
@@ -2632,6 +2648,29 @@ function importProvenance(
     aiSdkInstances,
     aiSdkFactories,
   };
+}
+
+/**
+ * The client binding a call chain starts from, with the chain re-rooted at the bound name
+ * so `methodRule` reads the same method tail either way. An instance attribute is bound
+ * under its two-part name (`self.client`); a class field or class-level attribute read
+ * through the instance (`this.client` for `private client = new OpenAI()`) falls back to
+ * its bare name, since that is where its construction was recorded.
+ */
+function bindingForChain(
+  bindings: ReadonlyMap<string, ClientBinding>,
+  chain: readonly string[],
+  language: "javascript" | "python",
+): { binding: ClientBinding; chain: string[] } | undefined {
+  const [head, attribute] = chain;
+  if (head === undefined) return undefined;
+  if (head === (language === "python" ? "self" : "this") && attribute !== undefined && chain.length > 2) {
+    const compound = `${head}.${attribute}`;
+    const binding = bindings.get(compound) ?? bindings.get(attribute);
+    return binding === undefined ? undefined : { binding, chain: [compound, ...chain.slice(2)] };
+  }
+  const binding = bindings.get(head);
+  return binding === undefined ? undefined : { binding, chain: [...chain] };
 }
 
 function chainBefore(tokens: readonly Token[], openIndex: number): string[] {
@@ -2932,28 +2971,56 @@ function clientBindings(
     };
   };
 
+  const instanceReceiver = language === "python" ? "self" : "this";
+  /**
+   * The name a construction assigned at `equalsIndex` binds. A bare name binds itself; an
+   * instance attribute binds as `self.client` / `this.client`, the chain later calls read
+   * it through. Any other object's attribute is not attributable to one name, so it binds
+   * nothing rather than the bare attribute name an unrelated call could also start with.
+   */
+  const assignmentTarget = (equalsIndex: number): string | undefined => {
+    if (tokens[equalsIndex]?.value !== "=") return undefined;
+    const name = tokens[equalsIndex - 1];
+    if (name?.kind !== "identifier") return undefined;
+    const separator = structuralValue(tokens[equalsIndex - 2]);
+    if (separator !== "." && separator !== "?.") return name.value;
+    const receiver = tokens[equalsIndex - 3];
+    return separator === "." &&
+        isIdentifier(receiver, instanceReceiver) &&
+        !isMemberAccessBefore(tokens, equalsIndex - 3)
+      ? `${instanceReceiver}.${name.value}`
+      : undefined;
+  };
+
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     const isNew = language === "javascript" && isIdentifier(token, "new");
     const classIndex = isNew ? index + 1 : index;
     const localClassName = tokens[classIndex]?.value;
     if (tokens[classIndex]?.kind !== "identifier" || localClassName === undefined) continue;
-    const imported = imports.constructors.get(localClassName);
-    if (imported === undefined) continue;
-    let variable: string | undefined;
-    if (isNew) {
-      if (tokens[index - 1]?.value === "=" && tokens[index - 2]?.kind === "identifier") {
-        variable = tokens[index - 2]?.value;
-      }
-    } else if (
-      language === "python" &&
-      tokens[index - 1]?.value === "=" &&
-      tokens[index - 2]?.kind === "identifier"
+    let imported = imports.constructors.get(localClassName);
+    let constructorIndex = classIndex;
+    // `import anthropic` then `anthropic.Anthropic()`: the quickstart form of the Python SDKs.
+    const namespaceModule = imports.constructorNamespaces.get(localClassName);
+    const member = tokens[classIndex + 2];
+    if (
+      imported === undefined &&
+      namespaceModule !== undefined &&
+      !isMemberAccessBefore(tokens, classIndex) &&
+      tokens[classIndex + 1]?.value === "." &&
+      member?.kind === "identifier"
     ) {
-      variable = tokens[index - 2]?.value;
+      const integration = CONSTRUCTORS_BY_MODULE[namespaceModule]?.[member.value];
+      if (integration !== undefined) {
+        imported = { integration, canonicalName: member.value };
+        constructorIndex = classIndex + 2;
+      }
     }
+    if (imported === undefined) continue;
+    if (!isNew && language === "javascript") continue;
+    const variable = assignmentTarget(index - 1);
     if (variable === undefined) continue;
-    const arguments_ = constructorArguments(tokens, classIndex);
+    const arguments_ = constructorArguments(tokens, constructorIndex);
     if (imported.integration === "openai") {
       const platform = imported.canonicalName.includes("Azure")
         ? "azure"
@@ -3817,9 +3884,10 @@ function detectSdkCalls(
   for (let openIndex = 0; openIndex < tokens.length; openIndex += 1) {
     if (structuralValue(tokens[openIndex]) !== "(") continue;
     const chain = chainBefore(tokens, openIndex);
-    const binding = chain[0] === undefined ? undefined : bindings.get(chain[0]);
-    if (binding === undefined) continue;
-    const rule = methodRule(binding, chain);
+    const bound = bindingForChain(bindings, chain, language);
+    if (bound === undefined) continue;
+    const binding = bound.binding;
+    const rule = methodRule(binding, bound.chain);
     if (rule === null) continue;
     const closeIndex = matchingIndex(tokens, openIndex, "(", ")");
     if (closeIndex === null) continue;
@@ -4328,6 +4396,147 @@ function lexicalFacts(
   return facts;
 }
 
+const KEYED_LEXICAL_RULE_ID = "fallback.text.keyed-lifecycle-id@1";
+/** Longest key read leftwards from a separator, and widest gap on either side of it. */
+const MAX_KEYED_KEY_LENGTH = 128;
+const MAX_KEYED_GAP = 16;
+const KEY_CHARACTER = /^[A-Za-z0-9_-]$/;
+/** A `=` preceded by one of these is a comparison or compound operator, not an assignment. */
+const NON_ASSIGNMENT_PREFIX = new Set(["=", "!", "<", ">", ":", "+", "-", "*", "/", "%", "&", "|", "^", "~"]);
+
+/**
+ * Feed IDs too short or common to match in prose — `o1`, `tts`, `whisper` — that a key
+ * still disambiguates. Only unconflicted pairs with one active signature qualify, the same
+ * admission the lexical automaton applies to eligible IDs.
+ */
+function keyedLexicalCandidates(index: V3FeedIndex): Map<string, IndexedModelPair[]> {
+  const byId = new Map<string, IndexedModelPair[]>();
+  for (const pair of index.modelPairs) {
+    if (pair.lexicalScanEligible || pair.conflict || pair.activeLifecycles.length !== 1) continue;
+    const pairs = byId.get(pair.modelId) ?? [];
+    pairs.push(pair);
+    byId.set(pair.modelId, pairs);
+  }
+  for (const pairs of byId.values()) {
+    pairs.sort((left, right) => compareText(left.servingPlatform, right.servingPlatform));
+  }
+  return byId;
+}
+
+/** `model`, `OPENAI_MODEL`, `chat_model`, `modelName`, and `model-id` all name a model. */
+function isModelKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[_-]/g, "");
+  return normalized.endsWith("model") || normalized === "modelid" || normalized === "modelname";
+}
+
+/**
+ * Whether the value at `[start, end)` is written as the value of a model key on the same
+ * line: `model: o1`, `"model": "o1"`, `model="o1"`, `OPENAI_MODEL=o1`. An unquoted value is
+ * accepted only outside conventional source files, where a bare word would be a variable.
+ */
+function isKeyedValue(source: string, start: number, end: number, quotesRequired: boolean): boolean {
+  const before = source[start - 1];
+  const after = source[end];
+  let cursor = start;
+  if (before === '"' || before === "'" || before === "`") {
+    if (after !== before) return false;
+    cursor = start - 1;
+  } else if (quotesRequired || identifierCharacter(before) || identifierCharacter(characterAt(source, end))) {
+    return false;
+  }
+  const skipGap = (from: number): number => {
+    let index = from;
+    while (index > 0 && from - index < MAX_KEYED_GAP && (source[index - 1] === " " || source[index - 1] === "\t")) {
+      index -= 1;
+    }
+    return index;
+  };
+  cursor = skipGap(cursor);
+  const separator = source[cursor - 1];
+  if (separator !== ":" && separator !== "=") return false;
+  if (NON_ASSIGNMENT_PREFIX.has(source[cursor - 2] ?? "")) return false;
+  cursor = skipGap(cursor - 1);
+  const keyQuote = source[cursor - 1];
+  const quotedKey = keyQuote === '"' || keyQuote === "'";
+  if (quotedKey) cursor -= 1;
+  const keyEnd = cursor;
+  while (cursor > 0 && keyEnd - cursor < MAX_KEYED_KEY_LENGTH && KEY_CHARACTER.test(source[cursor - 1] ?? "")) {
+    cursor -= 1;
+  }
+  if (cursor === keyEnd || (quotedKey && source[cursor - 1] !== keyQuote)) return false;
+  return isModelKey(source.slice(cursor, keyEnd));
+}
+
+/**
+ * Keyed fallback for the IDs the lexical automaton skips. Evidence is the same low-
+ * confidence, never-eligible text match as `fallback.text.lifecycle-id@1`, under its own
+ * rule because it rests on a key rather than on the ID alone.
+ */
+function keyedLexicalFacts(
+  source: string,
+  path: string,
+  blobOid: string,
+  candidates: ReadonlyMap<string, readonly IndexedModelPair[]>,
+  semanticLiteralSpans: readonly SemanticLiteralSpan[],
+): EvidenceFact[] {
+  if (candidates.size === 0) return [];
+  const scope = classifyEvidenceScope(path);
+  const quotesRequired = SOURCE_EXTENSIONS.has(extname(path.toLowerCase()));
+  const semanticSpans = new Set(
+    semanticLiteralSpans.map((span) => JSON.stringify([span.modelId, span.startOffset, span.endOffset])),
+  );
+  const matches: Array<{ start: number; modelId: string; pairs: readonly IndexedModelPair[] }> = [];
+  for (const [modelId, pairs] of candidates) {
+    for (let start = source.indexOf(modelId); start !== -1; start = source.indexOf(modelId, start + 1)) {
+      const end = start + modelId.length;
+      if (semanticSpans.has(JSON.stringify([modelId, start, end]))) continue;
+      if (isKeyedValue(source, start, end, quotesRequired)) matches.push({ start, modelId, pairs });
+    }
+  }
+  matches.sort((left, right) => left.start - right.start || compareText(left.modelId, right.modelId));
+  const facts: EvidenceFact[] = [];
+  let line = 1;
+  let lineStart = 0;
+  let scanned = 0;
+  for (const match of matches) {
+    for (; scanned < match.start; scanned += 1) {
+      if (source[scanned] === "\n") {
+        line += 1;
+        lineStart = scanned + 1;
+      }
+    }
+    const platforms = [...new Set(match.pairs.map((pair) => pair.servingPlatform))];
+    facts.push({
+      evidenceId: makeEvidenceId(KEYED_LEXICAL_RULE_ID, path, match.modelId, match.modelId, facts.length),
+      origin: "repository",
+      kind: "lexical",
+      confidence: "low",
+      scope,
+      environment: scope === "test" ? "test" : "unknown",
+      detectorRuleId: KEYED_LEXICAL_RULE_ID,
+      detectorManifestVersion: DETECTOR_MANIFEST_VERSION,
+      rawValue: match.modelId,
+      modelId: match.modelId,
+      ...(platforms.length === 1 ? { servingPlatform: platforms[0] } : {}),
+      modelResolution: "resolved",
+      selectorKind: "model-id",
+      platformResolution: platforms.length === 1 ? "resolved" : "ambiguous",
+      policyEligible: false,
+      locations: [
+        {
+          path,
+          line,
+          column: [...source.slice(lineStart, match.start)].length + 1,
+          blobOid,
+        },
+      ],
+      resolutionTrace: [{ kind: "detector", detail: "exact typed-feed ID written as a model key's value" }],
+    });
+    assertEvidenceBudget(facts.length);
+  }
+  return facts;
+}
+
 function parseDotenvLiteral(
   tail: string,
 ): { value: string; contentOffset: number } | undefined {
@@ -4709,8 +4918,8 @@ function unsupportedFrameworkDiagnostics(
       `${framework.displayName} (${framework.frameworkId}) is imported by ${sorted.length} tracked file(s), ` +
       `${prefix === undefined ? NO_SUPPORT_CAUSE : PARTIAL_SUPPORT_CAUSE}. Model selections made that way ` +
       "were assessed by bounded lexical fallback only, so they cannot block, are reported only as text " +
-      "matches, and produce nothing at all when the selector is dynamic or the model ID is not " +
-      "literal-scan eligible. Files: ";
+      "matches, and produce nothing at all when the selector is dynamic or the model ID is neither " +
+      "literal-scan eligible nor written as a model key's value. Files: ";
     // The sample is the only actionable part, so whole paths are dropped until it
     // fits the publisher's message cap rather than being cut mid-path by it.
     let sample = sorted.slice(0, MAX_DIAGNOSTIC_SAMPLE_PATHS);
@@ -4781,6 +4990,7 @@ function isClaimDocument(path: string): boolean {
 export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): DetectionResult {
   const candidates = lexicalCandidates(feed);
   const automaton = buildAutomaton(candidates);
+  const keyedCandidates = keyedLexicalCandidates(feed);
   const evidence: EvidenceFact[] = [];
   const consumedEnvironmentSelectors: ConsumedEnvironmentSelector[] = [];
   const diagnostics: CoverageDiagnostic[] = snapshot.diagnostics
@@ -4871,7 +5081,14 @@ export function detectSnapshot(snapshot: GitTreeSnapshot, feed: V3FeedIndex): De
         automaton,
         literalSpans,
       );
-      evidence.push(...semantic, ...lexical);
+      const keyed = keyedLexicalFacts(
+        source,
+        entry.displayPath,
+        entry.objectId,
+        keyedCandidates,
+        literalSpans,
+      );
+      evidence.push(...semantic, ...lexical, ...keyed);
       assertEvidenceBudget(evidence.length);
     }
 
