@@ -103,6 +103,8 @@ For an assessment with a trustworthy policy outcome, result precedence is:
 
 `complete` means every eligible Git blob and configured evidence source within the declared scope and resource budgets was processed by its applicable v3 detector or fallback. It does not mean all runtime usage is knowable.
 
+Nor does it mean every processed model could be checked. A model ID absent from the feed means "not deprecated" only on a serving platform the feed actually publishes records for. Application or deployment evidence whose resolved serving platform has no feed records at all is therefore reported in one `platform-without-lifecycle-data` notice per run, naming each such platform with a reference count and a bounded path sample. It is a notice by design: it does not change `scan-status`, `result`, or enforcement, emits no annotation, and is not sent to Slack, so a platform the feed does not cover costs one line rather than recurring noise. It is evaluated after trusted resolutions, so resolving the evidence onto a covered platform clears it, and it is omitted when the feed has no model records at all, an outage `feed-unavailable` already reports. On pull requests and merge groups only the evaluated target's notice is reported; the base's copy is superseded and could name usage the change removed.
+
 `partial` includes at least one of:
 
 - an eligible blob was unavailable, skipped, truncated, or could not be parsed by an applicable detector;
@@ -670,6 +672,8 @@ No actionable lifecycle risk found in eligible repository evidence
 Evidence: repository only · Scan: complete within repository scope
 No runtime or control-plane evidence source was supplied; those systems were not assessed.
 ```
+
+When a `platform-without-lifecycle-data` notice is present, its message follows the evidence line as a single `Not assessed:` line, so a clean result never reads as an all-clear for models nothing could check. It is not repeated among the collapsed coverage diagnostics.
 
 The detailed summary contains nonempty sections in this order:
 

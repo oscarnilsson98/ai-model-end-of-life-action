@@ -787,3 +787,120 @@ describe("warning horizon date precedence", () => {
     expect(evaluation.findings.every((finding) => finding.outcome === "warning")).toBe(true);
   });
 });
+
+describe("serving platforms the feed publishes nothing for", () => {
+  function bedrockFact(overrides: Partial<EvidenceFact> = {}): EvidenceFact {
+    return fact({
+      evidenceId: "bedrock",
+      detectorRuleId: "source.py.aws-bedrock.invoke-model@1",
+      rawValue: "anthropic.claude-3-haiku-20240307-v1:0",
+      modelId: "anthropic.claude-3-haiku-20240307-v1:0",
+      servingPlatform: "aws-bedrock",
+      selectorKind: "polymorphic",
+      policyEligible: false,
+      locations: [{ path: "app/bedrock.py", line: 5, column: 40 }],
+      ...overrides,
+    });
+  }
+
+  function uncoveredNotices(evidence: EvidenceFact[], index = feed) {
+    const result = evaluateEvidence({
+      evidence,
+      feed: index,
+      policy: { ...defaultPolicy(), failWithinDays: 30 },
+      now: NOW,
+      scanStatus: "complete",
+    });
+    return {
+      result,
+      notices: result.diagnostics.filter(
+        (diagnostic) => diagnostic.code === "platform-without-lifecycle-data",
+      ),
+    };
+  }
+
+  test("names every uncovered platform once, without changing coverage or findings", () => {
+    const { result, notices } = uncoveredNotices([
+      bedrockFact(),
+      bedrockFact({
+        evidenceId: "bedrock-second-call",
+        locations: [{ path: "app/bedrock.py", line: 9, column: 40 }],
+      }),
+      bedrockFact({
+        evidenceId: "bedrock-deploy",
+        scope: "deployment",
+        locations: [{ path: "src/summarize.ts", line: 3, column: 12 }],
+      }),
+      bedrockFact({
+        evidenceId: "mistral",
+        servingPlatform: "mistral",
+        locations: [{ path: "src/mistral.ts", line: 1, column: 1 }],
+      }),
+      fact(),
+    ]);
+    expect(notices).toEqual([
+      {
+        code: "platform-without-lifecycle-data",
+        message:
+          "The lifecycle feed publishes no records for aws-bedrock (3 reference(s): app/bedrock.py, src/summarize.ts); mistral (1 reference(s): src/mistral.ts), so those model references were not checked for deprecation.",
+        severity: "notice",
+      },
+    ]);
+    expect(result.scanStatus).toBe("complete");
+    expect(result.findings.map((finding) => finding.servingPlatform)).toEqual(["openai"]);
+  });
+
+  test("stays silent where it would only add noise", () => {
+    const cases: Array<{ name: string; evidence: EvidenceFact[]; index?: typeof feed }> = [
+      { name: "covered platform, model not deprecated", evidence: [fact({ modelId: "gpt-new" })] },
+      { name: "test scope", evidence: [bedrockFact({ scope: "test", environment: "test" })] },
+      { name: "documentation scope", evidence: [bedrockFact({ scope: "documentation" })] },
+      { name: "unknown scope", evidence: [bedrockFact({ scope: "unknown" })] },
+      {
+        name: "platform not established",
+        evidence: [
+          (({ servingPlatform: _platform, ...rest }) => ({
+            ...rest,
+            platformResolution: "unknown" as const,
+          }))(bedrockFact()),
+        ],
+      },
+      // An empty feed is an outage that feed-unavailable already reports.
+      { name: "feed unavailable", evidence: [bedrockFact()], index: { ...feed, modelPairs: [] } },
+    ];
+    for (const candidate of cases) {
+      expect(uncoveredNotices(candidate.evidence, candidate.index).notices, candidate.name)
+        .toEqual([]);
+    }
+  });
+
+  test("a trusted resolution onto a covered platform clears the gap", () => {
+    const result = evaluateEvidence({
+      evidence: [bedrockFact()],
+      feed,
+      policy: {
+        ...defaultPolicy(),
+        resolutions: [
+          {
+            resolutionId: "bedrock-haiku",
+            match: {
+              detectorRuleId: "source.py.aws-bedrock.invoke-model@1",
+              rawValue: "anthropic.claude-3-haiku-20240307-v1:0",
+              paths: ["app/**"],
+            },
+            resolveTo: { servingPlatform: "openai", modelId: "gpt-old" },
+            reason: "fixture",
+            reviewedAt: "2026-07-01T00:00:00Z",
+            reviewAfter: "2026-12-01T00:00:00Z",
+            expiresAt: "2027-01-01T00:00:00Z",
+          },
+        ],
+      },
+      now: NOW,
+      scanStatus: "complete",
+    });
+    expect(
+      result.diagnostics.some((diagnostic) => diagnostic.code === "platform-without-lifecycle-data"),
+    ).toBe(false);
+  });
+});

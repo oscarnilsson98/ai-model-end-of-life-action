@@ -371,6 +371,30 @@ test("the summary names imminent shutdowns that are only notices", () => {
   expect(summary).toContain("No actionable lifecycle risk found in eligible repository evidence");
 });
 
+test("an uncovered serving platform is stated once and never annotated", () => {
+  const report = cleanReport();
+  const message =
+    "The lifecycle feed publishes no records for aws-bedrock (1 reference(s): app/bedrock.py), so that model reference was not checked for deprecation.";
+  report.diagnostics = [
+    { code: "platform-without-lifecycle-data", message, severity: "notice" },
+    { code: "unused-resolution", message: "Resolution r did not match.", severity: "notice" },
+  ];
+
+  const summary = renderSummary(report);
+  const lines = summary.split("\n");
+  const caveat = lines.findIndex((line) => line.startsWith("Not assessed: "));
+  // Beside assessment health, so a clean result cannot read as an all-clear.
+  expect(lines[caveat - 1]).toStartWith("Evidence: ");
+  expect(lines[caveat]).toContain("aws-bedrock");
+  expect(summary.match(/aws-bedrock/g)).toHaveLength(1);
+  expect(summary).toContain("unused-resolution");
+  expect(summary).toContain("No actionable lifecycle risk found in eligible repository evidence");
+
+  const annotations: string[] = [];
+  publishAnnotations(report, (line: string) => annotations.push(line));
+  expect(annotations).toEqual([]);
+});
+
 test("active suppressions stay visible in the summary", () => {
   const report = cleanReport();
   report.lifecycleFindings = [

@@ -13,6 +13,7 @@ import {
   deprecationText,
   shutdownOrderDays,
   shutdownText,
+  UNCOVERED_PLATFORM_DIAGNOSTIC,
 } from "../shared/status.ts";
 import {
   compact,
@@ -139,12 +140,21 @@ export function renderSummary(
               `${compact(source.id, 180)} (${source.kind}, ${source.health})`,
           )
           .join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
+  // An uncovered platform is stated once, beside assessment health, so a clean result
+  // cannot read as an all-clear for models nothing was able to check.
+  const uncovered = report.diagnostics.find(
+    (diagnostic) => diagnostic.code === UNCOVERED_PLATFORM_DIAGNOSTIC,
+  );
+  const listedDiagnostics = report.diagnostics.filter(
+    (diagnostic) => diagnostic.code !== UNCOVERED_PLATFORM_DIAGNOSTIC,
+  );
   const lines = [
     "## AI model lifecycle",
     "",
     `${resultIcon(report)} **${report.result}** · ${report.counts.blocking} blocking · ${report.counts.advisory} advisory · ${report.counts.unresolved} unresolved`,
     "",
     `Evidence: ${escapeHtml(sourceText)} · Scan: ${report.scanStatus} · Comparison: ${report.comparisonStatus}`,
+    ...(uncovered === undefined ? [] : [`Not assessed: ${escapeHtml(compact(uncovered.message, 800))}`]),
     deliveryLine(report, options),
     "",
   ];
@@ -257,12 +267,12 @@ export function renderSummary(
       "",
     );
   }
-  if (report.diagnostics.length > 0) {
+  if (listedDiagnostics.length > 0) {
     lines.push(
       "<details>",
       "<summary>Coverage and provenance diagnostics</summary>",
       "",
-      ...report.diagnostics.slice(0, 200).map(
+      ...listedDiagnostics.slice(0, 200).map(
         (diagnostic) =>
           `- ${escapeHtml(compact(diagnostic.code, 180))}${diagnostic.path === undefined ? "" : ` · <code>${escapeHtml(compact(diagnostic.path, 300))}</code>`}: ${escapeHtml(compact(diagnostic.message, 800))}`,
       ),
