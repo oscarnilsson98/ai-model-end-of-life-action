@@ -10,6 +10,13 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: deps
+    # Types describe the runtime they check against. The action runs on node24, and the
+    # Bun types follow the exact Bun pinned in packageManager, so neither moves ahead of it.
+    ignore:
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/bun"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     groups:
       bun-development-dependencies:
         dependency-type: development

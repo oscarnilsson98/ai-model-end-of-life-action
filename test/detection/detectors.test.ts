@@ -165,7 +165,7 @@ describe("v3 detectors", () => {
 
   /**
    * Every chain `methodRule` accepts, in the syntax qualified against openai 7.4.0 (npm)
-   * and 2.46.0 (PyPI). Most of these had no test at all, so a provider reshaping one of
+   * and 3.19.2 (PyPI). Most of these had no test at all, so a provider reshaping one of
    * them degraded detection to the lexical fallback — lower confidence, unable to block —
    * while coverage still reported `complete` and nothing failed. These lock the accepted
    * set so the next major bump is a test run rather than a manual read of the type surface.
@@ -230,6 +230,16 @@ describe("v3 detectors", () => {
         "audio.transcriptions.create",
         `client.audio.transcriptions.create(model="gpt-old", file=handle)`,
       ],
+      ["responses.stream", `client.responses.stream(model="gpt-old", input="hi")`],
+      [
+        "chat.completions.stream",
+        `client.chat.completions.stream(model="gpt-old", messages=[])`,
+      ],
+      ["images.edit", `client.images.edit(model="gpt-old", image=handle, prompt="hi")`],
+      [
+        "audio.translations.create",
+        `client.audio.translations.create(model="gpt-old", file=handle)`,
+      ],
     ];
 
     for (const [chain, call] of python) {
@@ -250,6 +260,38 @@ describe("v3 detectors", () => {
         expect(result.evidence.filter((fact) => fact.modelId === "gpt-old")).toHaveLength(1);
       });
     }
+
+    test("resolves the async Python client and keeps both Azure Python clients deployment-scoped", () => {
+      // openai 3.19.2 still exports all four clients with the same constructors.
+      const asyncClient = detectSnapshot(
+        snapshot(
+          "src/chat.py",
+          `from openai import AsyncOpenAI\nclient = AsyncOpenAI()\nawait client.chat.completions.create(model="gpt-old", messages=[])\n`,
+        ),
+        feed,
+      );
+      expect(asyncClient.evidence.find((fact) => fact.kind === "sdk-argument")).toMatchObject({
+        detectorRuleId: "source.py.openai.request-model@1",
+        servingPlatform: "openai",
+        selectorKind: "model-id",
+        policyEligible: true,
+      });
+      for (const constructor of ["AzureOpenAI", "AsyncAzureOpenAI"]) {
+        const azure = detectSnapshot(
+          snapshot(
+            "src/chat.py",
+            `from openai import ${constructor}\nclient = ${constructor}(azure_endpoint="https://example.openai.azure.com")\nclient.chat.completions.create(model="gpt-old", messages=[])\n`,
+          ),
+          feed,
+        );
+        expect(azure.evidence.find((fact) => fact.kind === "sdk-argument"), constructor).toMatchObject({
+          detectorRuleId: "source.py.openai.request-model@1",
+          servingPlatform: "azure",
+          selectorKind: "deployment-name",
+          policyEligible: false,
+        });
+      }
+    });
 
     test("distinguishes the Azure constructor's deployment name from an OpenAI model ID", () => {
       // AzureOpenAI still extends OpenAI and is still exported from "openai" in v7. Its
@@ -1052,6 +1094,26 @@ describe("v3 Vercel AI SDK provider rules", () => {
     }
   });
 
+  test("reads the @ai-sdk/xai 5 provider surface", () => {
+    // Qualified against @ai-sdk/xai 5.0.7, which removed the `chat` factory: the default
+    // call, `responses`, and `languageModel` all select a language model, and a
+    // `createXai()` instance without a custom endpoint still names xAI.
+    for (const source of [
+      `import { xai } from "@ai-sdk/xai";\nawait xai.responses("gpt-old");\n`,
+      `import { xai } from "@ai-sdk/xai";\nawait xai.languageModel("gpt-old");\n`,
+      `import { xai } from "@ai-sdk/xai";\nawait xai.imageModel("gpt-old");\n`,
+      `import { createXai } from "@ai-sdk/xai";\nconst provider = createXai({ apiKey: key });\nawait provider.responses("gpt-old");\n`,
+    ]) {
+      expect(providerFact(source), source).toMatchObject({
+        detectorRuleId: "source.ts.vercel-ai-sdk.xai-model@1",
+        modelId: "gpt-old",
+        servingPlatform: "xai",
+        platformResolution: "resolved",
+        policyEligible: true,
+      });
+    }
+  });
+
   test("anchors on the provider call rather than the surrounding ai function", () => {
     // The provider call constructs the model specification, so it is evidence
     // wherever the result is used.
@@ -1721,6 +1783,28 @@ client.messages.create(model="gpt-old", messages=[])
       policyEligible: false,
     });
     expect(customEndpoint?.servingPlatform).toBeUndefined();
+  });
+
+  test("resolves every accepted Anthropic Python method on both clients", () => {
+    // Qualified against anthropic 1.8.0 (PyPI): 1.0 removed the legacy completions resource,
+    // which no rule read, and kept `model` on every Messages overload the rule accepts.
+    for (const constructor of ["Anthropic", "AsyncAnthropic"]) {
+      for (const method of ["create", "stream", "count_tokens"]) {
+        expect(
+          ruleEvidence(
+            "src/claude.py",
+            `from anthropic import ${constructor}\nclient = ${constructor}()\nclient.messages.${method}(model="gpt-old", messages=[])\n`,
+            "source.py.anthropic.messages-model@1",
+          ),
+          `${constructor}.messages.${method}`,
+        ).toMatchObject({
+          modelId: "gpt-old",
+          servingPlatform: "anthropic",
+          platformResolution: "resolved",
+          policyEligible: true,
+        });
+      }
+    }
   });
 
   test("distinguishes explicit Google AI Studio and Vertex modes in JavaScript and Python", () => {

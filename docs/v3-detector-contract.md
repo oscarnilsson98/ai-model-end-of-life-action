@@ -138,9 +138,9 @@ Support is syntax-based because the action does not install repository dependenc
 | Ecosystem | Qualified package | Qualified version |
 | --- | --- | --- |
 | npm | `openai` | `7.4.0` |
-| PyPI | `openai` | `2.46.0` |
+| PyPI | `openai` | `3.19.2` |
 | npm | `@anthropic-ai/sdk` | `0.112.4` |
-| PyPI | `anthropic` | `0.117.0` |
+| PyPI | `anthropic` | `1.8.0` |
 | npm | `@google/genai` | `2.13.0` |
 | PyPI | `google-genai` | `2.13.0` |
 | npm | `@aws-sdk/client-bedrock-runtime` | `3.1096.0` |
@@ -155,7 +155,7 @@ Support is syntax-based because the action does not install repository dependenc
 | npm | `@ai-sdk/amazon-bedrock` | `5.0.40` |
 | npm | `@ai-sdk/cohere` | `4.0.20` |
 | npm | `@ai-sdk/groq` | `4.0.21` |
-| npm | `@ai-sdk/xai` | `4.0.27` |
+| npm | `@ai-sdk/xai` | `5.0.7` |
 
 V3.0 does not claim semantic support for Go, Java, Kotlin, C#, Ruby, PHP, LiteLLM, legacy `@google/generative-ai`, the retired Vertex AI generative SDK module, platform-specific Anthropic clients, arbitrary framework wrappers, broad Kubernetes/Helm schemas, generic Terraform resources, or arbitrary keys named `model`. Those files still receive bounded lexical fallback where eligible. These higher-ambiguity integrations may ship in v3.x only with separate provider-specific rule IDs and fixtures; they are not stretched into v3.0 by generic matching.
 

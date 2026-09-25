@@ -606,36 +606,38 @@ var require_Alias = __commonJS((exports2) => {
         if (node.anchor === this.source)
           found = node;
       }
+      if (found && ctx) {
+        const { anchors: anchors2, doc: doc2, maxAliasCount } = ctx;
+        let data = anchors2.get(found);
+        if (!data) {
+          toJS.toJS(found, null, ctx);
+          data = anchors2.get(found);
+        }
+        if (data?.res === undefined) {
+          const msg = "This should not happen: Alias anchor was not resolved?";
+          throw new ReferenceError(msg);
+        }
+        if (maxAliasCount >= 0) {
+          data.count += 1;
+          if (data.aliasCount === 0)
+            data.aliasCount = getAliasCount(doc2, found, anchors2);
+          if (data.count * data.aliasCount > maxAliasCount) {
+            const msg = "Excessive alias count indicates a resource exhaustion attack";
+            throw new ReferenceError(msg);
+          }
+        }
+      }
       return found;
     }
     toJSON(_arg, ctx) {
       if (!ctx)
         return { source: this.source };
-      const { anchors: anchors2, doc, maxAliasCount } = ctx;
-      const source = this.resolve(doc, ctx);
+      const source = this.resolve(ctx.doc, ctx);
       if (!source) {
         const msg = `Unresolved alias (the anchor must be set before the alias): ${this.source}`;
         throw new ReferenceError(msg);
       }
-      let data = anchors2.get(source);
-      if (!data) {
-        toJS.toJS(source, null, ctx);
-        data = anchors2.get(source);
-      }
-      if (data?.res === undefined) {
-        const msg = "This should not happen: Alias anchor was not resolved?";
-        throw new ReferenceError(msg);
-      }
-      if (maxAliasCount >= 0) {
-        data.count += 1;
-        if (data.aliasCount === 0)
-          data.aliasCount = getAliasCount(doc, source, anchors2);
-        if (data.count * data.aliasCount > maxAliasCount) {
-          const msg = "Excessive alias count indicates a resource exhaustion attack";
-          throw new ReferenceError(msg);
-        }
-      }
-      return data.res;
+      return ctx.anchors.get(source).res;
     }
     toString(ctx, _onComment, _onChompKeep) {
       const src = `*${this.source}`;
@@ -4397,33 +4399,32 @@ var require_resolve_flow_scalar = __commonJS((exports2) => {
     }
     if (badChar)
       onError(0, "BAD_SCALAR_START", `Plain value cannot start with ${badChar}`);
-    return foldLines(source);
+    return unfoldLines(source);
   }
   function singleQuotedValue(source, onError) {
     if (source[source.length - 1] !== "'" || source.length === 1)
       onError(source.length, "MISSING_CHAR", "Missing closing 'quote");
-    return foldLines(source.slice(1, -1)).replace(/''/g, "'");
+    return unfoldLines(source.slice(1, -1)).replace(/''/g, "'");
   }
-  function foldLines(source) {
-    let first, line;
-    try {
-      first = new RegExp(`(.*?)(?<![ 	])[ 	]*\r?
-`, "sy");
-      line = new RegExp(`[ 	]*(.*?)(?:(?<![ 	])[ 	]*)?\r?
-`, "sy");
-    } catch {
-      first = /(.*?)[ \t]*\r?\n/sy;
-      line = /[ \t]*(.*?)[ \t]*\r?\n/sy;
-    }
-    let match = first.exec(source);
+  function unfoldLines(source) {
+    const line = /(.*?)\r?\n/sy;
+    let match = line.exec(source);
     if (!match)
       return source;
-    let res = match[1];
+    let trimEnd, trimBoth;
+    try {
+      trimEnd = new RegExp("(?<![ \t])[ \t]+$");
+      trimBoth = new RegExp("^[ \t]+|(?<![ \t])[ \t]+$", "g");
+    } catch {
+      trimEnd = /[ \t]+$/;
+      trimBoth = /^[ \t]+|[ \t]+$/g;
+    }
+    let res = match[1].replace(trimEnd, "");
     let sep = " ";
-    let pos = first.lastIndex;
-    line.lastIndex = pos;
+    let pos = line.lastIndex;
     while (match = line.exec(source)) {
-      if (match[1] === "") {
+      const lm = match[1].replace(trimBoth, "");
+      if (lm === "") {
         if (sep === `
 `)
           res += sep;
@@ -4431,7 +4432,7 @@ var require_resolve_flow_scalar = __commonJS((exports2) => {
           sep = `
 `;
       } else {
-        res += sep + match[1];
+        res += sep + lm;
         sep = " ";
       }
       pos = line.lastIndex;
@@ -8010,7 +8011,7 @@ function alertFingerprint(findings) {
 }
 
 // src/detection/manifest.ts
-var DETECTOR_MANIFEST_VERSION = "3.0.0-7";
+var DETECTOR_MANIFEST_VERSION = "3.0.0-8";
 var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
@@ -8021,8 +8022,8 @@ var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "pypi",
     package: "openai",
-    version: "2.46.0",
-    sourceUrl: "https://pypi.org/project/openai/2.46.0/"
+    version: "3.19.2",
+    sourceUrl: "https://pypi.org/project/openai/3.19.2/"
   }),
   Object.freeze({
     ecosystem: "npm",
@@ -8033,8 +8034,8 @@ var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "pypi",
     package: "anthropic",
-    version: "0.117.0",
-    sourceUrl: "https://pypi.org/project/anthropic/0.117.0/"
+    version: "1.8.0",
+    sourceUrl: "https://pypi.org/project/anthropic/1.8.0/"
   }),
   Object.freeze({
     ecosystem: "npm",
@@ -8123,8 +8124,8 @@ var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
     package: "@ai-sdk/xai",
-    version: "4.0.27",
-    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/xai/v/4.0.27"
+    version: "5.0.7",
+    sourceUrl: "https://www.npmjs.com/package/@ai-sdk/xai/v/5.0.7"
   })
 ]);
 var DETECTOR_RULES = Object.freeze([
