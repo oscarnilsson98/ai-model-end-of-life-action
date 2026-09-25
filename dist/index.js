@@ -7901,6 +7901,11 @@ function deprecationLeadsHorizon(finding) {
   return finding.daysUntilShutdown === null || (finding.daysUntilDeprecation ?? 0) < finding.daysUntilShutdown;
 }
 var UNCOVERED_PLATFORM_DIAGNOSTIC = "platform-without-lifecycle-data";
+var UNRESOLVED_SELECTOR_DIAGNOSTIC = "selector-without-model-id";
+var NOT_ASSESSED_DIAGNOSTICS = new Set([
+  UNCOVERED_PLATFORM_DIAGNOSTIC,
+  UNRESOLVED_SELECTOR_DIAGNOSTIC
+]);
 function hasShutDown(finding) {
   return finding.daysUntilShutdown !== null && finding.daysUntilShutdown < 0;
 }
@@ -8014,7 +8019,7 @@ function alertFingerprint(findings) {
 }
 
 // src/detection/manifest.ts
-var DETECTOR_MANIFEST_VERSION = "3.0.0-8";
+var DETECTOR_MANIFEST_VERSION = "3.0.0-9";
 var DETECTOR_QUALIFICATION = Object.freeze([
   Object.freeze({
     ecosystem: "npm",
@@ -9261,7 +9266,15 @@ function evidenceHealth(evidence) {
   return combineEvidenceHealth(...evidence.map((fact) => fact.evidenceHealth ?? "current"));
 }
 var MAX_UNCOVERED_PLATFORMS = 5;
-var MAX_UNCOVERED_PATHS = 3;
+var MAX_NOT_ASSESSED_PATHS = 3;
+function pathSample(paths) {
+  const sorted = [...paths].sort(compareText3);
+  const more = sorted.length > MAX_NOT_ASSESSED_PATHS ? `, +${sorted.length - MAX_NOT_ASSESSED_PATHS} more` : "";
+  return `${sorted.slice(0, MAX_NOT_ASSESSED_PATHS).join(", ")}${more}`;
+}
+function onUncoveredPlatform(fact, published) {
+  return fact.servingPlatform !== undefined && fact.platformResolution === "resolved" && !published.has(fact.servingPlatform);
+}
 function uncoveredPlatformDiagnostic(evidence, feed) {
   if (feed.modelPairs.length === 0)
     return;
@@ -9270,7 +9283,7 @@ function uncoveredPlatformDiagnostic(evidence, feed) {
   for (const fact of evidence) {
     const platform2 = fact.servingPlatform;
     const location = fact.locations[0];
-    if (platform2 === undefined || location === undefined || published.has(platform2) || fact.platformResolution !== "resolved" || fact.scope !== "application" && fact.scope !== "deployment") {
+    if (platform2 === undefined || location === undefined || !onUncoveredPlatform(fact, published) || fact.scope !== "application" && fact.scope !== "deployment") {
       continue;
     }
     const locations = locationsByPlatform.get(platform2) ?? new Map;
@@ -9283,10 +9296,7 @@ function uncoveredPlatformDiagnostic(evidence, feed) {
   const references = [...locationsByPlatform.values()].reduce((total, locations) => total + locations.size, 0);
   const described = platforms.slice(0, MAX_UNCOVERED_PLATFORMS).map((platform2) => {
     const locations = locationsByPlatform.get(platform2) ?? new Map;
-    const paths = [...new Set(locations.values())].sort(compareText3);
-    const sample = paths.slice(0, MAX_UNCOVERED_PATHS).join(", ");
-    const more = paths.length > MAX_UNCOVERED_PATHS ? `, +${paths.length - MAX_UNCOVERED_PATHS} more` : "";
-    return `${platform2} (${locations.size} reference(s): ${sample}${more})`;
+    return `${platform2} (${locations.size} reference(s): ${pathSample(new Set(locations.values()))})`;
   });
   if (platforms.length > MAX_UNCOVERED_PLATFORMS) {
     described.push(`${platforms.length - MAX_UNCOVERED_PLATFORMS} more platform(s)`);
@@ -9294,6 +9304,28 @@ function uncoveredPlatformDiagnostic(evidence, feed) {
   return {
     code: UNCOVERED_PLATFORM_DIAGNOSTIC,
     message: `The lifecycle feed publishes no records for ${described.join("; ")}, so ${references === 1 ? "that model reference was" : "those model references were"} not checked for deprecation.`,
+    severity: "notice"
+  };
+}
+function unresolvedSelectorDiagnostic(unresolved, findings, feed) {
+  if (feed.modelPairs.length === 0)
+    return;
+  const published = new Set(feed.modelPairs.map((pair) => pair.servingPlatform));
+  const checked = new Set(findings.flatMap((finding) => finding.evidenceIds));
+  const locations = new Map;
+  for (const fact of unresolved) {
+    const location = fact.locations[0];
+    const modelUnknown = fact.modelResolution !== "resolved" || fact.modelId === undefined || fact.selectorKind !== "model-id";
+    if (location === undefined || !modelUnknown || !isPolicyRelevantUnresolved(fact) || checked.has(fact.evidenceId) || onUncoveredPlatform(fact, published)) {
+      continue;
+    }
+    locations.set(`${location.path}:${location.line}:${location.column}`, location.path);
+  }
+  if (locations.size === 0)
+    return;
+  return {
+    code: UNRESOLVED_SELECTOR_DIAGNOSTIC,
+    message: `${locations.size} model reference(s) in application or deployment code could not be resolved to a model ID (${pathSample(new Set(locations.values()))}), so ${locations.size === 1 ? "it was" : "they were"} not checked for deprecation.`,
     severity: "notice"
   };
 }
@@ -9319,6 +9351,9 @@ function evaluateEvidence(input) {
   const uncovered = uncoveredPlatformDiagnostic(scoped, input.feed);
   if (uncovered !== undefined)
     diagnostics.push(uncovered);
+  const unchecked = unresolvedSelectorDiagnostic(unresolved, findings, input.feed);
+  if (unchecked !== undefined)
+    diagnostics.push(unchecked);
   let result = resultFromFindings(findings);
   const health = evidenceHealth(scoped);
   if (result === "no-actionable-risk" && health !== "current") {
@@ -12197,6 +12232,9 @@ function createSemanticFact(input) {
     ]
   };
 }
+function supersedingLiteralSpan(fact, token, resolved) {
+  return fact.platformResolution === "unknown" ? undefined : directSemanticLiteralSpan(token, resolved);
+}
 function directSemanticLiteralSpan(token, resolved) {
   if (token.kind !== "string" || !token.static || resolved.modelResolution !== "resolved" || resolved.modelId === undefined || token.value !== resolved.modelId) {
     return;
@@ -12341,7 +12379,7 @@ function detectAiSdkModelCalls(input) {
       anchor
     });
     facts.push(fact);
-    const literalSpan = directSemanticLiteralSpan(valueToken, resolved);
+    const literalSpan = supersedingLiteralSpan(fact, valueToken, resolved);
     if (literalSpan !== undefined)
       literalSpans.push(literalSpan);
     input.recordConsumedEnvironment(fact, clientBinding, resolved);
@@ -12423,7 +12461,7 @@ function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
       anchor
     });
     facts.push(fact);
-    const literalSpan = directSemanticLiteralSpan(valueToken, resolved);
+    const literalSpan = supersedingLiteralSpan(fact, valueToken, resolved);
     if (literalSpan !== undefined)
       literalSpans.push(literalSpan);
     recordConsumedEnvironment(fact, effectiveBinding, resolved);
@@ -12482,7 +12520,7 @@ function detectSdkCalls(source, path, blobOid, language, scope, jsx = false) {
         anchor: canonicalCommand
       });
       facts.push(fact);
-      const literalSpan = directSemanticLiteralSpan(tokens[valueIndex], resolved);
+      const literalSpan = supersedingLiteralSpan(fact, tokens[valueIndex], resolved);
       if (literalSpan !== undefined)
         literalSpans.push(literalSpan);
       recordConsumedEnvironment(fact, binding, resolved);
@@ -14801,7 +14839,6 @@ function resultIcon(result, scanStatus) {
 // src/action/notification.ts
 var MAX_SLACK_TEXT_BYTES = 12000;
 var MAX_ACTIONABLE_FINDINGS = 10;
-var MAX_UNRESOLVED_REFERENCES = 5;
 var MAX_EVIDENCE_SOURCES = 8;
 var TRUSTED_NOTIFICATION_EVENTS = new Set(["schedule", "workflow_dispatch", "push"]);
 var PROTECTED_SCOPES2 = new Set(["documentation", "example", "test"]);
@@ -14920,11 +14957,6 @@ function findingLine(finding) {
   const source = safeLink(finding.sourceUrls[0]);
   return source === null ? line : `${line} · ${slackLink(source, "source")}`;
 }
-function unresolvedLine(fact) {
-  const location = fact.locations[0];
-  const line = `• ${slackText(fact.rawValue, 120)} — ${slackText(fact.detectorRuleId, 200)} · ${slackText(fact.servingPlatform ?? "platform unresolved", 60)} · ${fact.modelResolution}/${fact.platformResolution}`;
-  return location === undefined ? line : `${line} · ${slackText(location.path, 200)}:${location.line}`;
-}
 function workflowRunUrl() {
   const repository = repositoryName();
   const runId = process.env.GITHUB_RUN_ID?.trim();
@@ -14991,13 +15023,6 @@ function renderSlackSnapshot(report) {
     }
     if (withheld.length > 0) {
       lines.push(`• ${withheld.length} counted finding(s) outside application and deployment scope stay in the job summary.`);
-    }
-  }
-  const namedUnresolved = report.unresolvedReferences.filter(isPolicyRelevantUnresolved);
-  if (namedUnresolved.length > 0) {
-    lines.push("", `*Unresolved selectors (${namedUnresolved.length}, not counted toward the result):*`, ...namedUnresolved.slice(0, MAX_UNRESOLVED_REFERENCES).map(unresolvedLine));
-    if (namedUnresolved.length > MAX_UNRESOLVED_REFERENCES) {
-      lines.push(`• … ${namedUnresolved.length - MAX_UNRESOLVED_REFERENCES} more unresolved selector(s) in the report`);
     }
   }
   const runUrl = workflowRunUrl();
@@ -15094,15 +15119,15 @@ function renderSummary(report, options = {}) {
   const visibleSources = report.evidenceSources.slice(0, 20);
   const hiddenSourceCount = report.evidenceSources.length - visibleSources.length;
   const sourceText = report.evidenceSources.length === 1 ? "repository only" : `${visibleSources.map((source) => `${compact(source.id, 180)} (${source.kind}, ${source.health})`).join(" + ")}${hiddenSourceCount > 0 ? ` + ${hiddenSourceCount} more` : ""}`;
-  const uncovered = report.diagnostics.find((diagnostic) => diagnostic.code === UNCOVERED_PLATFORM_DIAGNOSTIC);
-  const listedDiagnostics = report.diagnostics.filter((diagnostic) => diagnostic.code !== UNCOVERED_PLATFORM_DIAGNOSTIC);
+  const notAssessed = report.diagnostics.filter((diagnostic) => NOT_ASSESSED_DIAGNOSTICS.has(diagnostic.code));
+  const listedDiagnostics = report.diagnostics.filter((diagnostic) => !NOT_ASSESSED_DIAGNOSTICS.has(diagnostic.code));
   const lines = [
     "## AI model lifecycle",
     "",
     `${resultIcon3(report)} **${report.result}** · ${report.counts.blocking} blocking · ${report.counts.advisory} advisory · ${report.counts.unresolved} unresolved`,
     "",
     `Evidence: ${escapeHtml(sourceText)} · Scan: ${report.scanStatus} · Comparison: ${report.comparisonStatus}`,
-    ...uncovered === undefined ? [] : [`Not assessed: ${escapeHtml(compact(uncovered.message, 800))}`],
+    ...notAssessed.map((diagnostic) => `Not assessed: ${escapeHtml(compact(diagnostic.message, 800))}`),
     deliveryLine(report, options),
     ""
   ];
@@ -16272,7 +16297,7 @@ async function assess(dependencies, environment2, evaluatedAtMs, localReportPath
     const diagnostics = [
       ...resolvedEvent.diagnostics,
       ...comparison.evaluation.diagnostics,
-      ...comparison.baseline.diagnostics.filter((diagnostic) => diagnostic.code !== UNCOVERED_PLATFORM_DIAGNOSTIC),
+      ...comparison.baseline.diagnostics.filter((diagnostic) => !NOT_ASSESSED_DIAGNOSTICS.has(diagnostic.code)),
       ...feedDiagnostics(feed, freshness)
     ];
     const scanStatus = applyFeedFreshnessCoverage(comparison.scanStatus, freshness);

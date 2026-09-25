@@ -3483,6 +3483,22 @@ function createSemanticFact(input: {
   };
 }
 
+/**
+ * A semantic fact supersedes the lexical match for its own literal only when it can join
+ * the feed itself. An unproven endpoint — a custom gateway — leaves the platform unknown,
+ * and such a fact joins nothing, so suppressing the text match would drop an exact feed ID
+ * that plain text matching reports everywhere else.
+ */
+function supersedingLiteralSpan(
+  fact: EvidenceFact,
+  token: Token,
+  resolved: ResolvedValue,
+): SemanticLiteralSpan | undefined {
+  return fact.platformResolution === "unknown"
+    ? undefined
+    : directSemanticLiteralSpan(token, resolved);
+}
+
 function directSemanticLiteralSpan(
   token: Token,
   resolved: ResolvedValue,
@@ -3735,7 +3751,7 @@ function detectAiSdkModelCalls(input: {
       anchor,
     });
     facts.push(fact);
-    const literalSpan = directSemanticLiteralSpan(valueToken, resolved);
+    const literalSpan = supersedingLiteralSpan(fact, valueToken, resolved);
     if (literalSpan !== undefined) literalSpans.push(literalSpan);
     input.recordConsumedEnvironment(fact, clientBinding, resolved);
     assertEvidenceBudget(facts.length);
@@ -3856,7 +3872,7 @@ function detectSdkCalls(
       anchor,
     });
     facts.push(fact);
-    const literalSpan = directSemanticLiteralSpan(valueToken, resolved);
+    const literalSpan = supersedingLiteralSpan(fact, valueToken, resolved);
     if (literalSpan !== undefined) literalSpans.push(literalSpan);
     recordConsumedEnvironment(fact, effectiveBinding, resolved);
     assertEvidenceBudget(facts.length);
@@ -3943,7 +3959,7 @@ function detectSdkCalls(
         anchor: canonicalCommand as string,
       });
       facts.push(fact);
-      const literalSpan = directSemanticLiteralSpan(tokens[valueIndex] as Token, resolved);
+      const literalSpan = supersedingLiteralSpan(fact, tokens[valueIndex] as Token, resolved);
       if (literalSpan !== undefined) literalSpans.push(literalSpan);
       recordConsumedEnvironment(fact, binding, resolved);
       assertEvidenceBudget(facts.length);

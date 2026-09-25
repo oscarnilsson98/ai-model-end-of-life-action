@@ -395,6 +395,31 @@ test("an uncovered serving platform is stated once and never annotated", () => {
   expect(annotations).toEqual([]);
 });
 
+test("every not-assessed notice gets its own summary line and none is repeated", () => {
+  const report = cleanReport();
+  report.diagnostics = [
+    {
+      code: "platform-without-lifecycle-data",
+      message: "The lifecycle feed publishes no records for aws-bedrock (1 reference(s): app/bedrock.py), so that model reference was not checked for deprecation.",
+      severity: "notice",
+    },
+    {
+      code: "selector-without-model-id",
+      message: "2 model reference(s) in application or deployment code could not be resolved to a model ID (src/a.ts, src/b.ts), so they were not checked for deprecation.",
+      severity: "notice",
+    },
+  ];
+
+  const summary = renderSummary(report);
+  const lines = summary.split("\n").filter((line) => line.startsWith("Not assessed: "));
+  expect(lines).toHaveLength(2);
+  expect(lines[0]).toContain("aws-bedrock");
+  expect(lines[1]).toContain("src/a&#46;ts");
+  // Both are stated in the header, so the collapsed diagnostics list is not rendered at all.
+  expect(summary).not.toContain("Coverage and provenance diagnostics");
+  expect(summary).toContain("No actionable lifecycle risk found in eligible repository evidence");
+});
+
 test("active suppressions stay visible in the summary", () => {
   const report = cleanReport();
   report.lifecycleFindings = [

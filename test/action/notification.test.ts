@@ -170,7 +170,7 @@ function payloadText(request: CapturedRequest): string {
 }
 
 describe("v3 Slack snapshot delivery", () => {
-  test("names unresolved selectors without contradicting a clean result", async () => {
+  test("leaves unresolved selectors out of the snapshot and keeps a clean result clean", async () => {
     const base = report();
     const text = await deliveredText(
       report({
@@ -193,60 +193,14 @@ describe("v3 Slack snapshot delivery", () => {
       }),
     );
 
-    // The whole point: unresolved selectors are reported, and the result stays clean.
+    // A selector computed at runtime cannot be checked, but it is not a finding either:
+    // the job summary states it once, and a daily snapshot repeating it would be noise.
     expect(text).toContain("✅");
     expect(text).toContain("Result:* no-actionable-risk");
     expect(text).toContain("0 blocking · 0 advisory · 2 unresolved");
-    expect(text).toContain("Unresolved selectors (2, not counted toward the result):");
-    // Rule IDs keep the snapshot's mention neutralization, like every other report-owned string.
-    expect(text).toContain("source.ts.vercel-ai-sdk.google-model@​1");
-    expect(text).toContain("source.ts.vercel-ai-sdk.openai-model@​1");
-    expect(text).toContain("packages/ai-client/src/provider.ts:28");
-    expect(text).toContain("packages/ai-client/src/provider.ts:39");
-    expect(text).toContain("dynamic/resolved");
-    expect(text).toContain("Actionable findings (0):");
-  });
-
-  test("keeps lexical and protected-scope unresolved references out of the snapshot", async () => {
-    const text = await deliveredText(
-      report({
-        unresolvedReferences: [
-          unresolvedFact({
-            evidenceId: "lexical",
-            kind: "lexical",
-            confidence: "low",
-            detectorRuleId: "text.model-id@1",
-          }),
-          unresolvedFact({
-            evidenceId: "documented",
-            scope: "documentation",
-            detectorRuleId: "source.ts.vercel-ai-sdk.xai-model@1",
-          }),
-        ],
-      }),
-    );
-
     expect(text).not.toContain("Unresolved selectors");
-    expect(text).not.toContain("text.model-id@​1");
-    expect(text).not.toContain("source.ts.vercel-ai-sdk.xai-model@​1");
-  });
-
-  test("bounds the named unresolved selectors and counts the remainder", async () => {
-    const text = await deliveredText(
-      report({
-        unresolvedReferences: Array.from({ length: 7 }, (_unused, index) =>
-          unresolvedFact({
-            evidenceId: `unresolved-${index}`,
-            locations: [{ path: `src/call${index}.ts`, line: index + 1, column: 1 }],
-          }),
-        ),
-      }),
-    );
-
-    expect(text).toContain("Unresolved selectors (7, not counted toward the result):");
-    expect(text).toContain("src/call4.ts:5");
-    expect(text).not.toContain("src/call5.ts:6");
-    expect(text).toContain("2 more unresolved selector(s) in the report");
+    expect(text).not.toContain("provider.ts");
+    expect(text).not.toContain("vercel-ai-sdk");
   });
 
   test("sends a clean bounded snapshot with authoritative event identity", async () => {

@@ -327,6 +327,29 @@ describe("v3 detectors", () => {
     });
   });
 
+  test("keeps the lexical match when a custom endpoint leaves the platform unknown", () => {
+    // Such a fact joins no feed record, so suppressing the text match for its literal would
+    // report nothing at all for an exact feed ID written in a gateway call.
+    for (const [path, source] of [
+      [
+        "src/chat.ts",
+        `import OpenAI from "openai";\nconst client = new OpenAI({ baseURL: "https://gateway.example" });\nawait client.chat.completions.create({ model: "gpt-old", messages: [] });\n`,
+      ],
+      [
+        "src/chat.py",
+        `from openai import OpenAI\nclient = OpenAI(base_url="https://gateway.example")\nclient.chat.completions.create(model="gpt-old", messages=[])\n`,
+      ],
+    ] as const) {
+      const evidence = detectSnapshot(snapshot(path, source), feed).evidence;
+      expect(evidence.map((fact) => [fact.kind, fact.platformResolution]), path).toEqual(
+        expect.arrayContaining([
+          ["sdk-argument", "unknown"],
+          ["lexical", "resolved"],
+        ]),
+      );
+    }
+  });
+
   test("deduplicates lexical fallback evidence by the exact semantic literal span", () => {
     const python = detectSnapshot(
       snapshot(

@@ -142,6 +142,16 @@ export function deprecationLeadsHorizon(
 
 /** Code of the notice naming serving platforms the lifecycle feed publishes nothing for. */
 export const UNCOVERED_PLATFORM_DIAGNOSTIC = "platform-without-lifecycle-data";
+/** Code of the notice naming typed call sites whose model no evidence could name. */
+export const UNRESOLVED_SELECTOR_DIAGNOSTIC = "selector-without-model-id";
+/**
+ * Notices that say what a run could not check. The job summary states each once as a
+ * `Not assessed:` line, and a comparison reports only the target's copy.
+ */
+export const NOT_ASSESSED_DIAGNOSTICS: ReadonlySet<string> = new Set([
+  UNCOVERED_PLATFORM_DIAGNOSTIC,
+  UNRESOLVED_SELECTOR_DIAGNOSTIC,
+]);
 
 function hasShutDown(finding: Pick<LifecycleFinding, "daysUntilShutdown">): boolean {
   return finding.daysUntilShutdown !== null && finding.daysUntilShutdown < 0;

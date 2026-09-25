@@ -217,6 +217,8 @@ Evidence scope is independent of syntax:
 
 Comments and arbitrary strings are excluded from semantic evidence by parsers. Exact feed IDs there remain low-confidence lexical evidence: documentation/test/fixture/example/generated/unknown scopes are notices, while application/deployment scope may become advisory inside the warning horizon under the product contract. Lexical evidence is never policy eligible.
 
+A semantic fact supersedes the lexical match for its own literal, so one call site yields one fact. The exception is a fact whose endpoint leaves the platform unknown, such as a custom gateway: it joins no feed record, so the lexical match for the same literal is kept and reports the exact feed ID as a text match, as it would anywhere else.
+
 Generated-only evidence remains visible. Duplication alone cannot raise confidence or establish production.
 
 V3.0 conventional path matching is ASCII-case-insensitive, segment-aware, and applies segment/filename rules in this order:

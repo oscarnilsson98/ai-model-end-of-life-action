@@ -52,8 +52,8 @@ import {
   chooseExitReason,
   combineEvidenceHealth,
   combineScanStatus,
+  NOT_ASSESSED_DIAGNOSTICS,
   scanFingerprint,
-  UNCOVERED_PLATFORM_DIAGNOSTIC,
 } from "../shared/status.ts";
 import { compact } from "../shared/text.ts";
 import { DEFAULT_MAX_FEED_AGE_DAYS } from "../shared/limits.ts";
@@ -783,10 +783,10 @@ async function assess(
     const diagnostics = [
       ...resolvedEvent.diagnostics,
       ...comparison.evaluation.diagnostics,
-      // The target's uncovered-platform notice describes the tree being merged; the base's
-      // copy is superseded, and would name usage the pull request may have removed.
+      // The target's not-assessed notices describe the tree being merged; the base's
+      // copies are superseded, and would name usage the pull request may have removed.
       ...comparison.baseline.diagnostics.filter(
-        (diagnostic) => diagnostic.code !== UNCOVERED_PLATFORM_DIAGNOSTIC,
+        (diagnostic) => !NOT_ASSESSED_DIAGNOSTICS.has(diagnostic.code),
       ),
       ...feedDiagnostics(feed, freshness),
     ];
