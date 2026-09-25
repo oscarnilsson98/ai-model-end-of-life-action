@@ -170,6 +170,45 @@ function payloadText(request: CapturedRequest): string {
 }
 
 describe("v3 Slack snapshot delivery", () => {
+  test("slack-notify findings skips only a clean, fully assessed, current snapshot", async () => {
+    const attempt = async (assessment: AssessmentReport, notify: "always" | "findings") => {
+      let posted = false;
+      const result = await deliverSlackNotification({
+        webhookUrl: WEBHOOK,
+        report: assessment,
+        notify,
+        fetchImpl: async () => {
+          posted = true;
+          return new Response(null, { status: 204 });
+        },
+      });
+      return { status: result.status, detail: result.detail, posted };
+    };
+
+    const clean = report();
+    expect(await attempt(clean, "findings")).toEqual({
+      status: "skipped",
+      detail: "No blocking or advisory finding and coverage is complete; slack-notify is `findings`.",
+      posted: false,
+    });
+    expect(await attempt(clean, "always")).toMatchObject({ status: "sent", posted: true });
+
+    // Anything to act on still posts — including a degraded scan, since a quiet channel
+    // during a feed outage would read exactly like an all-clear.
+    for (const [name, assessment] of [
+      ["advisory", report({ result: "advisory", lifecycleFindings: [finding()] })],
+      ["blocking", report({ result: "blocking", lifecycleFindings: [finding({ outcome: "breach" })] })],
+      ["partial scan", report({ scanStatus: "partial" })],
+      ["unknown result", report({ result: "unknown", scanStatus: "failed" })],
+      ["stale evidence", report({ evidenceHealth: "stale" })],
+    ] as const) {
+      expect(await attempt(assessment, "findings"), name).toMatchObject({
+        status: "sent",
+        posted: true,
+      });
+    }
+  });
+
   test("leaves unresolved selectors out of the snapshot and keeps a clean result clean", async () => {
     const base = report();
     const text = await deliveredText(

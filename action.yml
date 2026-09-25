@@ -23,6 +23,10 @@ inputs:
   slack-webhook:
     description: "Optional HTTPS Slack incoming webhook for trusted scheduled, manual, and push snapshots. Never sent on pull requests or merge groups."
     required: false
+  slack-notify:
+    description: "When to post the Slack snapshot: `always` on every eligible run, or `findings` only when there is a blocking or advisory finding, a failed or partial scan, or stale evidence."
+    required: false
+    default: "always"
   notification-failure-mode:
     description: "Whether configured Slack delivery failure should fail the step (`fail`) or only warn (`warn`)."
     required: false

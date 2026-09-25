@@ -29,6 +29,8 @@ describe("action metadata contract", () => {
     expect(inputBlock("fail-within-days")).not.toContain("default:");
     expect(inputBlock("allow-partial")).not.toContain("default:");
     expect(inputBlock("notification-failure-mode")).toContain('default: "fail"');
+    // Posting every run is the existing behavior, so omitting the input must keep it.
+    expect(inputBlock("slack-notify")).toContain('default: "always"');
   });
 
   test("materializes the feed-staleness horizon so the guard is on by default", () => {
@@ -44,6 +46,7 @@ describe("action metadata contract", () => {
       "allow-partial",
       "max-feed-age-days",
       "slack-webhook",
+      "slack-notify",
       "notification-failure-mode",
     ]);
     expect(sectionKeys("outputs")).toEqual([

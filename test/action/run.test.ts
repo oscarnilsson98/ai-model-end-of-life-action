@@ -19,6 +19,7 @@ import {
 import type { Environment } from "../../src/action/github.ts";
 import { inspectPolicy } from "../../src/policy/policy.ts";
 import { ActionRunError, run, type RunDependencies } from "../../src/action/run.ts";
+import { deliverSlackNotification } from "../../src/action/notification.ts";
 import type { SnapshotClaimsInspection } from "../../src/evidence/snapshot-claims.ts";
 import type {
   AssessmentReport,
@@ -1003,6 +1004,37 @@ describe("v3 production orchestration", () => {
       scanStatus: "partial",
       exitReason: "partial-disallowed",
     });
+  });
+
+  test("passes slack-notify through and reports a skipped clean snapshot", async () => {
+    const fixture = fixtureEnvironment({
+      "INPUT_SLACK-WEBHOOK": "https://hooks.slack.test/services/test",
+      "INPUT_SLACK-NOTIFY": "findings",
+    });
+    let requested: string | undefined;
+    const report = await run(
+      dependencies(fixture, {
+        deliverNotification: async (options) => {
+          requested = options.notify;
+          return deliverSlackNotification({
+            ...options,
+            fetchImpl: async () => {
+              throw new Error("a clean run must not post");
+            },
+          });
+        },
+      }),
+    );
+
+    expect(requested).toBe("findings");
+    expect(report).toMatchObject({
+      result: "no-actionable-risk",
+      notificationStatus: "skipped",
+      notificationReason:
+        "No blocking or advisory finding and coverage is complete; slack-notify is `findings`.",
+      exitReason: "none",
+    });
+    expect(outputs(fixture.outputPath)["notification-status"]).toBe("skipped");
   });
 
   test("attempts notification only after core publication and keeps health independent", async () => {

@@ -10,6 +10,7 @@ import type {
   AssessmentReport,
   LifecycleFinding,
   NotificationStatus,
+  SlackNotifyMode,
 } from "../shared/types.ts";
 
 const MAX_SLACK_TEXT_BYTES = 12_000;
@@ -291,12 +292,29 @@ function safeFailureDetail(error: unknown): string {
 }
 
 /**
+ * Whether a snapshot carries anything to act on. A failed or partial scan counts: during a
+ * feed outage a quiet channel would read exactly like an all-clear, which is the failure
+ * this action exists to prevent. Only a clean, fully assessed, current run is quiet.
+ */
+export function snapshotHasFindings(
+  report: Pick<AssessmentReport, "result" | "scanStatus" | "evidenceHealth">,
+): boolean {
+  return (
+    report.result !== "no-actionable-risk" ||
+    report.scanStatus !== "complete" ||
+    report.evidenceHealth !== "current"
+  );
+}
+
+/**
  * Deliver one stateless Slack snapshot. PR, merge-group, and local events never consume the
- * webhook. Delivery status remains independent from lifecycle result and scan health.
+ * webhook. With `notify: "findings"` a clean snapshot is skipped rather than sent. Delivery
+ * status remains independent from lifecycle result and scan health.
  */
 export async function deliverSlackNotification(options: {
   webhookUrl: string;
   report: AssessmentReport;
+  notify?: SlackNotifyMode;
   fetchImpl?: FetchLike;
 }): Promise<SlackDeliveryResult> {
   if (
@@ -309,6 +327,13 @@ export async function deliverSlackNotification(options: {
         options.report.event.eventName,
         80,
       )} events.`,
+    };
+  }
+
+  if (options.notify === "findings" && !snapshotHasFindings(options.report)) {
+    return {
+      status: "skipped",
+      detail: "No blocking or advisory finding and coverage is complete; slack-notify is `findings`.",
     };
   }
 
