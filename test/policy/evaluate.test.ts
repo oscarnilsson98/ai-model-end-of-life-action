@@ -296,6 +296,28 @@ describe("v3 lifecycle evaluation", () => {
     expect(result.unresolved).toHaveLength(1);
   });
 
+  test("a text match in a deployment manifest warns but never blocks", () => {
+    const result = evaluateEvidence({
+      evidence: [
+        fact({
+          kind: "lexical",
+          confidence: "low",
+          detectorRuleId: "fallback.text.lifecycle-id@1",
+          policyEligible: false,
+          scope: "deployment",
+          environment: "production",
+          locations: [{ path: "k8s/deployment.yaml", line: 12, column: 22 }],
+        }),
+      ],
+      feed,
+      policy: { ...defaultPolicy(), failWithinDays: 36_500 },
+      now: NOW,
+      scanStatus: "complete",
+    });
+    expect(result.findings.map((finding) => finding.outcome)).toEqual(["warning"]);
+    expect(result.result).toBe("advisory");
+  });
+
   test("collapses one unproven-platform occurrence into a single finding", () => {
     const result = evaluateEvidence({
       evidence: [lexicalFact()],
@@ -710,7 +732,7 @@ describe("warning horizon date precedence", () => {
     expect(result.findings[0]?.outcome).toBe("breach");
   });
 
-  test("findings sort by the deadline the horizon measures", () => {
+  test("findings sort by shutdown, not by the date that opened the horizon", () => {
     const evaluation = evaluateEvidence({
       evidence: [
         fact({ evidenceId: "near-deprecation", rawValue: "gpt-old", modelId: "gpt-old" }),
@@ -757,9 +779,11 @@ describe("warning horizon date precedence", () => {
       now: NOW,
       scanStatus: "complete",
     });
+    // A deprecation long past still warns, but the model that stops serving first leads.
     expect(evaluation.findings.map((finding) => finding.modelId)).toEqual([
-      "gpt-old",
       "gpt-other",
+      "gpt-old",
     ]);
+    expect(evaluation.findings.every((finding) => finding.outcome === "warning")).toBe(true);
   });
 });

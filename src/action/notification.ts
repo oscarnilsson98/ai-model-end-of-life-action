@@ -4,7 +4,7 @@ import {
   type FetchLike,
 } from "../shared/http.ts";
 import { parseHttpsUrl } from "./input.ts";
-import { deprecationLeadsHorizon, earliestLifecycleDays } from "../shared/status.ts";
+import { deprecationText, shutdownOrderDays, shutdownText } from "../shared/status.ts";
 import { servingPlatformLabel } from "../shared/text.ts";
 import type {
   AssessmentReport,
@@ -121,9 +121,8 @@ function partitionFindings(report: AssessmentReport): {
       // Verified evidence outranks a bare text match so the bounded view never buries it.
       const tierDifference = Number(isTextMatch(left)) - Number(isTextMatch(right));
       if (tierDifference !== 0) return tierDifference;
-      const leftDays = earliestLifecycleDays(left) ?? Number.POSITIVE_INFINITY;
-      const rightDays = earliestLifecycleDays(right) ?? Number.POSITIVE_INFINITY;
-      if (leftDays !== rightDays) return leftDays - rightDays;
+      const dayDifference = shutdownOrderDays(left) - shutdownOrderDays(right);
+      if (dayDifference !== 0) return dayDifference;
       const platformDifference = compareText(left.servingPlatform, right.servingPlatform);
       return platformDifference !== 0
         ? platformDifference
@@ -133,20 +132,6 @@ function partitionFindings(report: AssessmentReport): {
     listed,
     withheld: notifiable.filter((finding) => PROTECTED_SCOPES.has(finding.scope)),
   };
-}
-
-function dateText(label: string, date: string, days: number | null | undefined): string {
-  if (days === null || days === undefined || !Number.isSafeInteger(days)) {
-    return `${label} ${date}`;
-  }
-  if (days < 0) return `${label} ${date} (${Math.abs(days)}d overdue)`;
-  if (days === 0) return `${label} ${date} (today)`;
-  return `${label} ${date} (${days}d)`;
-}
-
-function deadlineText(finding: LifecycleFinding): string {
-  if (finding.shutdownDate === undefined) return "shutdown date not announced";
-  return dateText("shutdown", finding.shutdownDate, finding.daysUntilShutdown);
 }
 
 /** Report-owned URLs become links only when they cannot alter the surrounding mrkdwn. */
@@ -185,15 +170,11 @@ function findingLabel(finding: NotifiableFinding): string {
 }
 
 function findingLine(finding: NotifiableFinding): string {
-  const qualifiers: string[] = [];
-  // Name the deprecation whenever it is the nearer date, so an advisory driven by a
+  const qualifiers = [shutdownText(finding)];
+  // Name the deprecation whenever it opened the horizon, so an advisory driven by a
   // deprecation is not read as a false alarm against a distant shutdown.
-  if (deprecationLeadsHorizon(finding) && finding.deprecationDate !== undefined) {
-    qualifiers.push(
-      dateText("deprecation", finding.deprecationDate, finding.daysUntilDeprecation),
-    );
-  }
-  qualifiers.push(deadlineText(finding));
+  const deprecation = deprecationText(finding);
+  if (deprecation !== null) qualifiers.push(deprecation);
   if (finding.delta !== undefined && finding.delta !== "unchanged") {
     qualifiers.push(finding.delta);
   }
