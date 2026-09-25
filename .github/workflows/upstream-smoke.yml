@@ -43,7 +43,7 @@ jobs:
         id: pins
         run: bun .github/scripts/check-detector-pins.ts
 
-      - name: Open an issue for reviewed-contract drift
+      - name: Report reviewed-contract drift
         if: steps.feed.outputs.drift != '' || steps.pins.outputs.drift != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -54,8 +54,11 @@ jobs:
           set -euo pipefail
           title="Upstream contract drift detected"
           # One open issue at a time. Re-running daily must not file a duplicate for drift
-          # nobody has reviewed yet; the run link below always points at the newest evidence.
+          # nobody has reviewed yet.
           existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          # Identity of what drifted, without the run link, so tomorrow's run can tell an
+          # unchanged report from a new one.
+          fingerprint="$(printf '%s\n--\n%s\n' "${FEED_DRIFT}" "${PIN_DRIFT}" | sha256sum | cut -d' ' -f1)"
           {
             echo "The scheduled upstream-contract job observed drift from the reviewed baseline."
             echo
@@ -78,10 +81,32 @@ jobs:
             echo "Neither condition fails a consumer's run: the adapter tolerates unknown fields and"
             echo "quarantines malformed rows, and unmatched SDK call shapes fall back to lexical evidence."
             echo
-            echo "Run: ${RUN_URL}"
+            echo "This description is kept current by the daily job; a comment is added only when the drift changes."
+            echo
+            echo "Latest run: ${RUN_URL}"
+            echo
+            echo "<!-- drift-fingerprint: ${fingerprint} -->"
           } > body.md
-          if [[ -n "${existing}" ]]; then
-            gh issue comment "${existing}" --body-file body.md
-          else
+          if [[ -z "${existing}" ]]; then
             gh issue create --title "${title}" --body-file body.md
+            exit 0
+          fi
+          previous="$(gh issue view "${existing}" --json body --jq .body | sed -n 's/^<!-- drift-fingerprint: \([0-9a-f]*\) -->$/\1/p')"
+          # Editing the description notifies no one, so unchanged drift stays quiet.
+          gh issue edit "${existing}" --body-file body.md
+          if [[ "${previous}" != "${fingerprint}" ]]; then
+            gh issue comment "${existing}" --body "The observed drift changed. The issue description now carries the current report: ${RUN_URL}"
+          fi
+
+      - name: Close the drift issue once the baseline matches
+        if: steps.feed.outputs.drift == '' && steps.pins.outputs.drift == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Upstream contract drift detected"
+          existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [[ -n "${existing}" ]]; then
+            gh issue close "${existing}" --reason completed --comment "The scheduled job no longer observes drift from the reviewed baseline: ${RUN_URL}"
           fi

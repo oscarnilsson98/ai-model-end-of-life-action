@@ -16,7 +16,6 @@
   ],
   "reviewedPlatforms": [
     "anthropic",
-    "aws-bedrock",
     "azure",
     "cohere",
     "google",
